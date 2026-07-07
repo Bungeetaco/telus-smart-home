@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Final
 
+import aiohttp
 from homeassistant import core
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -16,13 +19,27 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 from pyalarmdotcomajax.devices.registry import AllDevices_t
 from pyalarmdotcomajax.devices.sensor import Sensor as libSensor
 from pyalarmdotcomajax.devices.water_sensor import WaterSensor as libWaterSensor
 
 from .base_device import AttributeBaseDevice, BaseDevice, HardwareBaseDevice
-from .const import DATA_CONTROLLER, DOMAIN, SENSOR_SUBTYPE_BLACKLIST
+from .bridge_client import bridge_get
+from .const import (
+    AUTOMATION_RULES_POLL_INTERVAL_SECONDS,
+    CAMERA_BRIDGE_AUTOMATIONS_URL,
+    DATA_CONTROLLER,
+    DOMAIN,
+    SENSOR_SUBTYPE_BLACKLIST,
+)
 from .controller import AlarmIntegrationController
 from .device_type_langs import LANG_DOOR, LANG_WINDOW
 
@@ -103,6 +120,121 @@ async def async_setup_entry(
             and device.has_state
         )
     )
+
+    # Video automation rules (recording schedules etc), served by the
+    # camera-bridge -- unrelated to pyalarmdotcomajax's device model, so
+    # this uses its own small coordinator rather than the controller above.
+    automation_coordinator = AutomationRulesCoordinator(hass, config_entry)
+    await automation_coordinator.async_refresh()
+
+    known_rule_ids: set[str] = set()
+
+    @core.callback
+    def _add_new_rules() -> None:
+        new_ids = {r["id"] for r in (automation_coordinator.data or [])} - known_rule_ids
+        if not new_ids:
+            return
+        known_rule_ids.update(new_ids)
+        LOGGER.info("Adding %d newly discovered TELUS automation rule(s): %s", len(new_ids), sorted(new_ids))
+        async_add_entities(
+            AutomationRuleBinarySensor(automation_coordinator, config_entry, rule_id) for rule_id in new_ids
+        )
+
+    _add_new_rules()
+    config_entry.async_on_unload(automation_coordinator.async_add_listener(_add_new_rules))
+
+
+class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+    """Polls the camera-bridge's /control/automations endpoint.
+
+    Infrequent poll: pause/resume is a manual user action in the Alarm.com
+    app, not something that changes on its own like camera discovery does.
+    """
+
+    def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            LOGGER,
+            config_entry=config_entry,
+            name="TELUS automation rules",
+            update_interval=timedelta(seconds=AUTOMATION_RULES_POLL_INTERVAL_SECONDS),
+        )
+
+    async def _async_update_data(self) -> list[dict[str, Any]]:
+        """Fetch the current automation rule list from the bridge."""
+
+        try:
+            body = await bridge_get(self.hass, CAMERA_BRIDGE_AUTOMATIONS_URL)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
+
+        if body is None:
+            # Bridge not up yet -- not fatal, see CameraBridgeCoordinator in
+            # camera.py for the identical reasoning.
+            return self.data or []
+
+        return body.get("rules", [])
+
+
+class AutomationRuleBinarySensor(CoordinatorEntity[AutomationRulesCoordinator], BinarySensorEntity):
+    """Read-only reflection of one TELUS video automation rule's active/paused
+    state. canBePaused is reported by TELUS for every rule seen so far, but
+    no pause/resume write endpoint has been captured/implemented -- so this
+    is observe-only for now, not a switch.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: AutomationRulesCoordinator, config_entry: ConfigEntry, rule_id: str) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+
+        self._rule_id = rule_id
+        self._attr_unique_id = f"{rule_id}_automation_rule"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_integration")},
+            name="TELUS Smart Home Integration",
+            manufacturer="TELUS",
+            entry_type=dr.DeviceEntryType.SERVICE,
+        )
+
+    @property
+    def _rule(self) -> dict[str, Any] | None:
+        """Current bridge-reported data for this rule, if still present."""
+        return next((r for r in (self.coordinator.data or []) if r["id"] == self._rule_id), None)
+
+    @property
+    def available(self) -> bool:
+        """Unavailable if the coordinator is unhealthy or TELUS stops
+        reporting this rule (e.g. deleted in the Alarm.com app)."""
+        return super().available and self._rule is not None
+
+    @property
+    def name(self) -> str:
+        """Human-readable rule name, e.g. 'Porte d'entrée'."""
+        rule = self._rule
+        return rule["name"] if rule else self._rule_id
+
+    @property
+    def is_on(self) -> bool | None:
+        """On means active (not paused)."""
+        rule = self._rule
+        return not rule["is_paused"] if rule else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Human-readable description of what this rule does, matching what
+        the Alarm.com web UI shows for it."""
+        rule = self._rule
+        if rule is None:
+            return {}
+        return {
+            "action": rule.get("action"),
+            "trigger": rule.get("trigger"),
+            "timeframe": rule.get("timeframe"),
+            "can_be_paused": rule.get("can_be_paused"),
+        }
 
 
 class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore

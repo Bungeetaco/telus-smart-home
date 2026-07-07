@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -32,29 +31,16 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
+from .bridge_client import bridge_get, read_control_secret
 from .const import (
     CAMERA_BRIDGE_CAMERAS_URL,
-    CAMERA_BRIDGE_SHARE_DIR,
+    CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE,
     CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS,
+    DATA_CAMERA_COORDINATOR,
     DOMAIN,
 )
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _read_control_secret() -> str | None:
-    """Read the bridge's control-endpoint shared secret off the shared mount.
-
-    Blocking file I/O -- must run in an executor, never called directly from
-    the event loop. Returns None if the bridge hasn't started/generated its
-    secret yet; callers treat that as "nothing to report this cycle" rather
-    than an error, since it's a normal, temporary state right after either
-    container (re)starts.
-    """
-    try:
-        return (Path(CAMERA_BRIDGE_SHARE_DIR) / "control_secret").read_text().strip()
-    except OSError:
-        return None
 
 
 class CameraBridgeCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
@@ -79,32 +65,26 @@ class CameraBridgeCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch the current camera list from the bridge."""
 
-        secret = await self.hass.async_add_executor_job(_read_control_secret)
-        if secret is None:
+        try:
+            body = await bridge_get(self.hass, CAMERA_BRIDGE_CAMERAS_URL)
+        except aiohttp.ClientResponseError as err:
+            if err.status == 401:
+                # Secret on disk is stale relative to what the bridge is
+                # actually enforcing (e.g. bridge's shared volume was wiped
+                # and it regenerated a new one) -- will self-heal next cycle
+                # once the file catches up; not fatal.
+                raise UpdateFailed("Camera bridge rejected control secret (401)") from err
+            raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
+
+        if body is None:
             # Bridge container isn't up yet / hasn't generated its secret
             # yet. Not an error worth surfacing as UpdateFailed (that would
             # mark every camera entity unavailable on every HA restart until
             # the bridge happens to win the race) -- just report no cameras
             # this cycle; already-created entities keep their last state.
             return self.data or {}
-
-        session = async_get_clientsession(self.hass)
-        try:
-            async with session.get(
-                CAMERA_BRIDGE_CAMERAS_URL,
-                headers={"Authorization": f"Bearer {secret}"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 401:
-                    # Secret on disk is stale relative to what the bridge is
-                    # actually enforcing (e.g. bridge's shared volume was
-                    # wiped and it regenerated a new one) -- will self-heal
-                    # next cycle once the file catches up; not fatal.
-                    raise UpdateFailed("Camera bridge rejected control secret (401)")
-                resp.raise_for_status()
-                body = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
 
         return {cam["id"]: cam for cam in body.get("cameras", [])}
 
@@ -117,15 +97,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up the camera platform."""
 
-    coordinator = CameraBridgeCoordinator(hass, config_entry)
-    # Deliberately async_refresh(), not async_config_entry_first_refresh():
-    # the latter raises ConfigEntryNotReady on failure, which would fail
-    # the *entire* config entry (alarm panel, lock, every other platform)
-    # just because the independently-deployed camera-bridge container
-    # happens to be briefly unreachable at HA startup. async_refresh()
-    # instead logs and leaves coordinator.data empty; camera entities
-    # simply appear on a later poll once the bridge responds.
-    await coordinator.async_refresh()
+    # Created once and already refreshed in __init__.py's async_setup_entry
+    # (before platforms are forwarded), and shared with event.py -- both
+    # need the same camera list, and creating it there means it exists
+    # regardless of which platform HA happens to set up first.
+    coordinator: CameraBridgeCoordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_CAMERA_COORDINATOR]
 
     known_ids: set[str] = set()
 
@@ -151,25 +127,20 @@ async def async_setup_entry(
 class TelusCamera(CoordinatorEntity[CameraBridgeCoordinator], Camera):
     """A camera served by the TELUS camera-bridge over RTSP.
 
-    No still-image URL is exposed by the bridge, so thumbnails/snapshots are
-    grabbed from the live RTSP stream itself via the `stream` integration
-    (use_stream_for_stills=True) -- the same mechanism the Generic Camera
-    integration used for these cameras previously. The base Camera class
-    defaults use_stream_for_stills to False (expecting a still-image URL)
-    and, unlike most Camera properties, does not support an `_attr_`
-    override -- it must be overridden as a property directly, or every
-    snapshot/thumbnail request 500s with NotImplementedError since we have
-    no async_camera_image override either.
+    Stills/snapshots prefer TELUS's own on-demand snapshot API (via the
+    bridge's /control/cameras/<id>/snapshot -- faster, no stream spin-up
+    needed) and fall back to grabbing a frame from the live RTSP stream if
+    that fails for any reason (bridge down, TELUS-side error, etc). This
+    means use_stream_for_stills stays at the base Camera class's default of
+    False -- we have our own async_camera_image override instead, which is
+    the *other* half of that same either/or switch in HA core's
+    _async_get_image (see camera_image()/async_camera_image() below for why
+    both halves matter).
     """
 
     _attr_has_entity_name = True
     _attr_name = None
     _attr_supported_features = CameraEntityFeature.STREAM
-
-    @property
-    def use_stream_for_stills(self) -> bool:
-        """Grab thumbnails/snapshots from the live RTSP stream."""
-        return True
 
     def __init__(self, coordinator: CameraBridgeCoordinator, camera_id: str) -> None:
         """Initialize the camera entity."""
@@ -210,3 +181,46 @@ class TelusCamera(CoordinatorEntity[CameraBridgeCoordinator], Camera):
         """Return the RTSP URL the camera-bridge is publishing to."""
         cam = self._camera
         return cam["rtsp_url"] if cam else None
+
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Return a still image, preferring TELUS's on-demand snapshot API.
+
+        Falls back to grabbing a frame from the live RTSP stream (creating
+        one if not already running) if the snapshot call fails for any
+        reason -- this replicates what HA core's private
+        _async_get_stream_image() does for use_stream_for_stills=True
+        cameras, since that helper isn't part of the public Camera API and
+        importing a private module-level function from HA core is asking
+        for a silent breakage on some future core update.
+        """
+        secret = await self.hass.async_add_executor_job(read_control_secret)
+        if secret is not None:
+            session = async_get_clientsession(self.hass)
+            try:
+                async with session.get(
+                    CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE.format(camera_id=self._camera_id),
+                    headers={"Authorization": f"Bearer {secret}"},
+                    # Observed live: TELUS's own snapshot latency varies a lot
+                    # by camera (Doorbell ~0.3s, Living Room ~6s, occasionally
+                    # more) -- 10s was too tight and caused spurious
+                    # fallbacks. 20s matches this codebase's existing
+                    # convention for "TELUS can be slow to first respond"
+                    # (see FIRST_FRAME_TIMEOUT_S/WEBRTCUP_TIMEOUT_S in
+                    # camera-bridge/bridge/config.py).
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    resp.raise_for_status()
+                    return await resp.read()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                LOGGER.debug(
+                    "On-demand snapshot failed for %s, falling back to a live stream frame",
+                    self._camera_id, exc_info=True,
+                )
+
+        if not self.stream and CameraEntityFeature.STREAM in self.supported_features:
+            self.stream = await self.async_create_stream()
+        if self.stream:
+            return await self.stream.async_get_image(width=width, height=height)
+        return None

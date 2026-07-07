@@ -48,16 +48,66 @@ Contract (as implemented -- this is what callers must match):
       poll -- so a camera added to the TELUS account shows up here within
       config.CAMERA_DISCOVERY_INTERVAL_S of being added, no restart needed on
       either side.
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/snapshot
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200, Content-Type: image/jpeg, raw JPEG bytes -- a fresh
+      on-demand still image fetched from TELUS for this one request (not
+      cached; TELUS's snapshot URLs are signed and short-lived, so every
+      call here does a real round trip to TELUS, unlike /control/cameras).
+      404 {"error": "unknown_camera"} if camera_id isn't in camera_registry.
+      502 {"error": "telus_error"} if the TELUS-side fetch itself fails.
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/events?limit=<N>
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"events": [{"id": ..., "camera_id": ..., "timestamp": ...,
+                                "description": ..., "thumbnail_url": ...,
+                                "download_url": ..., "clip_duration_ms": ...}, ...]}
+      Most recent video clip events across all cameras, newest first.
+      thumbnail_url/download_url are themselves signed TELUS relay-host URLs,
+      passed through as-is -- fetchable directly (confirmed live, no cookie
+      needed), not proxied through this endpoint.
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/automations
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"rules": [{"id": ..., "name": ..., "is_paused": ...,
+                               "can_be_paused": ..., "action": ...,
+                               "trigger": ..., "timeframe": ...}, ...]}
+      Video-related automation rules (recording schedules etc). Read-only --
+      no pause/resume write endpoint implemented yet.
 """
 import logging
 import os
 import secrets as secrets_mod
 
+import aiohttp
 from aiohttp import web
 
 from . import config as c
+from .telus_rest import get_snapshot_url, list_automation_rules, list_video_events
 
 log = logging.getLogger(__name__)
+
+
+async def _fetch_with_relogin(telus_session, login_lock, coro_fn, *args):
+    """Call coro_fn(telus_session, *args); on a 401/403 (expired session
+    cookie), re-login once (serialized against every other login() caller
+    via login_lock, same as main.py's get_video_source_with_relogin) and
+    retry exactly once before giving up.
+    """
+    try:
+        return await coro_fn(telus_session, *args)
+    except aiohttp.ClientResponseError as err:
+        if err.status in (401, 403):
+            log.warning("Control endpoint: %s got %s, re-logging in to TELUS",
+                        coro_fn.__name__, err.status)
+            async with login_lock:
+                await telus_session.login()
+            return await coro_fn(telus_session, *args)
+        raise
 
 
 def _load_or_create_secret() -> str:
@@ -86,22 +136,74 @@ def _load_or_create_secret() -> str:
 def create_app(telus_session, login_lock, camera_registry: dict) -> web.Application:
     secret = _load_or_create_secret()
 
+    def _check_auth(request: web.Request) -> web.Response | None:
+        """Returns a 401 response if the request's Bearer token doesn't match,
+        else None. Shared by every authed endpoint below."""
+        provided = request.headers.get("Authorization", "")
+        if not secrets_mod.compare_digest(provided, f"Bearer {secret}"):
+            log.warning("Control endpoint: rejected %s request with missing/bad secret", request.path)
+            return web.json_response({"error": "bad_secret"}, status=401)
+        return None
+
     async def handle_health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
     async def handle_cameras(request: web.Request) -> web.Response:
-        provided = request.headers.get("Authorization", "")
-        if not secrets_mod.compare_digest(provided, f"Bearer {secret}"):
-            log.warning("Control endpoint: rejected /control/cameras request with missing/bad secret")
-            return web.json_response({"error": "bad_secret"}, status=401)
-
+        if (err := _check_auth(request)) is not None:
+            return err
         return web.json_response({"cameras": list(camera_registry.values())})
 
+    async def handle_snapshot(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        camera_id = request.match_info["camera_id"]
+        if camera_id not in camera_registry:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        try:
+            snapshot_url = await _fetch_with_relogin(telus_session, login_lock, get_snapshot_url, camera_id)
+            async with telus_session.session.get(snapshot_url) as resp:
+                resp.raise_for_status()
+                jpeg_bytes = await resp.read()
+        except Exception:
+            log.exception("Control endpoint: on-demand snapshot fetch failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.Response(body=jpeg_bytes, content_type="image/jpeg")
+
+    async def handle_events(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        try:
+            limit = int(request.query.get("limit", "20"))
+        except ValueError:
+            limit = 20
+
+        try:
+            events = await _fetch_with_relogin(telus_session, login_lock, list_video_events, limit)
+        except Exception:
+            log.exception("Control endpoint: video events fetch failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response({"events": events})
+
+    async def handle_automations(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        try:
+            rules = await _fetch_with_relogin(telus_session, login_lock, list_automation_rules)
+        except Exception:
+            log.exception("Control endpoint: automation rules fetch failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response({"rules": rules})
+
     async def handle_credentials(request: web.Request) -> web.Response:
-        provided = request.headers.get("Authorization", "")
-        if not secrets_mod.compare_digest(provided, f"Bearer {secret}"):
-            log.warning("Control endpoint: rejected request with missing/bad secret")
-            return web.json_response({"error": "bad_secret"}, status=401)
+        if (err := _check_auth(request)) is not None:
+            return err
 
         try:
             body = await request.json()
@@ -130,6 +232,9 @@ def create_app(telus_session, login_lock, camera_registry: dict) -> web.Applicat
     app.router.add_post("/control/credentials", handle_credentials)
     app.router.add_get("/control/health", handle_health)
     app.router.add_get("/control/cameras", handle_cameras)
+    app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
+    app.router.add_get("/control/events", handle_events)
+    app.router.add_get("/control/automations", handle_automations)
     return app
 
 

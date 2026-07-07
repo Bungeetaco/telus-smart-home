@@ -22,6 +22,7 @@ from pyalarmdotcomajax.exceptions import (
     ConfigureTwoFactorAuthentication,
 )
 
+from .camera import CameraBridgeCoordinator
 from .const import (
     CONF_ARM_AWAY,
     CONF_ARM_HOME,
@@ -29,6 +30,7 @@ from .const import (
     CONF_FORCE_BYPASS,
     CONF_NO_ENTRY_DELAY,
     CONF_SILENT_ARM,
+    DATA_CAMERA_COORDINATOR,
     DATA_CONTROLLER,
     DEBUG_REQ_EVENT,
     DOMAIN,
@@ -67,9 +69,24 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     except (TimeoutError, AlarmdotcomException, aiohttp.ClientError) as ex:
         raise ConfigEntryNotReady from ex
 
+    # Camera list coordinator: created here (not inside camera.py) and
+    # refreshed before platforms are forwarded, so it exists in hass.data
+    # for both camera.py and event.py regardless of which one HA's
+    # concurrent platform forwarding happens to set up first.
+    camera_coordinator = CameraBridgeCoordinator(hass, config_entry)
+    # Deliberately async_refresh(), not async_config_entry_first_refresh():
+    # the latter raises ConfigEntryNotReady on failure, which would fail
+    # the *entire* config entry (alarm panel, lock, every other platform)
+    # just because the independently-deployed camera-bridge container
+    # happens to be briefly unreachable at HA startup. async_refresh()
+    # instead logs and leaves coordinator.data empty; camera/event entities
+    # simply appear on a later poll once the bridge responds.
+    await camera_coordinator.async_refresh()
+
     # Store integration data for use during platform setup.
     hass.data[DOMAIN][config_entry.entry_id] = {
         DATA_CONTROLLER: controller,
+        DATA_CAMERA_COORDINATOR: camera_coordinator,
     }
 
     #

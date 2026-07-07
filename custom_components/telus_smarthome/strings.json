@@ -95,6 +95,21 @@
                     "telus_error": "TELUS/Alarm.com error"
                 }
             }
+        },
+        "event": {
+            "video_event": {
+                "name": "Recent Activity",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "Person",
+                            "vehicle": "Vehicle",
+                            "animal": "Animal",
+                            "other": "Other"
+                        }
+                    }
+                }
+            }
         }
     }
 }

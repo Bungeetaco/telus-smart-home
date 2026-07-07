@@ -112,7 +112,10 @@ class TelusSession:
         return self._ajax_headers
 
     @property
-    def video_headers(self) -> dict[str, str]:
+    def api_headers(self) -> dict[str, str]:
+        """Headers for any authenticated web/api/* JSON:API call -- video, and
+        also automation rules / video events, which use the identical
+        Context-Id + Accept contract despite not being under web/api/video/*."""
         headers = {**self._ajax_headers, "Accept": "application/vnd.api+json"}
         if self._context_id is not None:
             headers["Context-Id"] = self._context_id

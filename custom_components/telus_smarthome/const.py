@@ -79,6 +79,10 @@ SENSOR_SUBTYPE_BLACKLIST = [
 ]
 
 DATA_CONTROLLER = "connection"
+# Shared CameraBridgeCoordinator instance -- created once in __init__.py so
+# camera.py and event.py both read the same camera list rather than each
+# polling /control/cameras independently.
+DATA_CAMERA_COORDINATOR = "camera_coordinator"
 
 ATTRIB_BATTERY_NORMAL = "Normal"
 ATTRIB_BATTERY_LOW = "Low"
@@ -97,6 +101,7 @@ PLATFORMS = [
     Platform.CLIMATE,
     Platform.SENSOR,
     Platform.CAMERA,
+    Platform.EVENT,
 ]
 
 # #
@@ -129,6 +134,20 @@ CAMERA_BRIDGE_CONTROL_URL = "http://127.0.0.1:8199/control/credentials"
 # camera-bridge/bridge/control_server.py for the response shape.
 CAMERA_BRIDGE_CAMERAS_URL = "http://127.0.0.1:8199/control/cameras"
 
+# On-demand still image for one camera -- {camera_id} is str.format()'d in.
+# Unlike CAMERA_BRIDGE_CAMERAS_URL, every call here does a real round trip to
+# TELUS (the bridge doesn't cache snapshots), so this is only fetched when a
+# still is actually requested, not on a poll interval.
+CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{camera_id}/snapshot"
+
+# Recent video clip events across all cameras -- see
+# camera-bridge/bridge/control_server.py for the response shape.
+CAMERA_BRIDGE_EVENTS_URL = "http://127.0.0.1:8199/control/events"
+
+# Video-related automation rules (read-only) -- see
+# camera-bridge/bridge/control_server.py for the response shape.
+CAMERA_BRIDGE_AUTOMATIONS_URL = "http://127.0.0.1:8199/control/automations"
+
 # How often camera.py re-polls the bridge for its camera list. This is a
 # cheap local-loopback HTTP GET against a small in-memory dict on the bridge
 # side, so a short interval costs nothing -- kept well under the bridge's own
@@ -136,5 +155,15 @@ CAMERA_BRIDGE_CAMERAS_URL = "http://127.0.0.1:8199/control/cameras"
 # camera the bridge just discovered shows up here on this coordinator's very
 # next cycle rather than waiting on two independently-phased 5-minute polls.
 CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS = 60
+
+# How often event.py polls for new video clip events. Shorter than the
+# camera list poll since this is what determines how quickly a "person
+# detected" event shows up in HA after it actually happens.
+VIDEO_EVENTS_POLL_INTERVAL_SECONDS = 30
+
+# How often binary_sensor.py polls automation rule pause/active state.
+# Infrequent -- these change rarely (a user manually pausing/resuming a
+# recording rule), unlike camera discovery or video events.
+AUTOMATION_RULES_POLL_INTERVAL_SECONDS = 300
 
 DEVICE_STATIC_ATTRIBUTES = [libConst.ATTR_STATE_TEXT, libConst.ATTR_MAC_ADDRESS]
