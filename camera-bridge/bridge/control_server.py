@@ -76,8 +76,18 @@ Contract (as implemented -- this is what callers must match):
     Response: 200 {"rules": [{"id": ..., "name": ..., "is_paused": ...,
                                "can_be_paused": ..., "action": ...,
                                "trigger": ..., "timeframe": ...}, ...]}
-      Video-related automation rules (recording schedules etc). Read-only --
-      no pause/resume write endpoint implemented yet.
+      Video-related automation rules (recording schedules etc).
+
+    POST http://127.0.0.1:<CONTROL_PORT>/control/automations/<rule_id>/pause
+    POST http://127.0.0.1:<CONTROL_PORT>/control/automations/<rule_id>/resume
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"status": "applied"}
+      502 {"error": "telus_error"} if the TELUS-side call itself fails.
+      Doesn't validate rule_id against a known-rules list first (unlike the
+      snapshot endpoint's unknown_camera check) -- TELUS itself 404s/errors
+      on a bad id and that's surfaced as telus_error, so a second local
+      check would just duplicate what TELUS already enforces.
 """
 import logging
 import os
@@ -87,7 +97,13 @@ import aiohttp
 from aiohttp import web
 
 from . import config as c
-from .telus_rest import get_snapshot_url, list_automation_rules, list_video_events
+from .telus_rest import (
+    get_snapshot_url,
+    list_automation_rules,
+    list_video_events,
+    pause_rule,
+    resume_rule,
+)
 
 log = logging.getLogger(__name__)
 
@@ -201,6 +217,25 @@ def create_app(telus_session, login_lock, camera_registry: dict) -> web.Applicat
 
         return web.json_response({"rules": rules})
 
+    async def _handle_rule_action(request: web.Request, action_fn) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        rule_id = request.match_info["rule_id"]
+        try:
+            await _fetch_with_relogin(telus_session, login_lock, action_fn, rule_id)
+        except Exception:
+            log.exception("Control endpoint: %s failed for rule %s", action_fn.__name__, rule_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response({"status": "applied"})
+
+    async def handle_pause_rule(request: web.Request) -> web.Response:
+        return await _handle_rule_action(request, pause_rule)
+
+    async def handle_resume_rule(request: web.Request) -> web.Response:
+        return await _handle_rule_action(request, resume_rule)
+
     async def handle_credentials(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
             return err
@@ -235,6 +270,8 @@ def create_app(telus_session, login_lock, camera_registry: dict) -> web.Applicat
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
     app.router.add_get("/control/events", handle_events)
     app.router.add_get("/control/automations", handle_automations)
+    app.router.add_post("/control/automations/{rule_id}/pause", handle_pause_rule)
+    app.router.add_post("/control/automations/{rule_id}/resume", handle_resume_rule)
     return app
 
 

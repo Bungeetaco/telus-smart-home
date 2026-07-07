@@ -144,9 +144,13 @@ CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{ca
 # camera-bridge/bridge/control_server.py for the response shape.
 CAMERA_BRIDGE_EVENTS_URL = "http://127.0.0.1:8199/control/events"
 
-# Video-related automation rules (read-only) -- see
-# camera-bridge/bridge/control_server.py for the response shape.
+# Video-related automation rules -- see camera-bridge/bridge/control_server.py
+# for the response shape.
 CAMERA_BRIDGE_AUTOMATIONS_URL = "http://127.0.0.1:8199/control/automations"
+
+# Pause/resume one rule -- {rule_id} is str.format()'d in. POST, empty body.
+CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/pause"
+CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/resume"
 
 # How often camera.py re-polls the bridge for its camera list. This is a
 # cheap local-loopback HTTP GET against a small in-memory dict on the bridge

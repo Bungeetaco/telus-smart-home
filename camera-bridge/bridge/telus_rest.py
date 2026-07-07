@@ -96,8 +96,6 @@ async def list_automation_rules(telus) -> list[dict]:
     """Video-related automation rules (recording schedules etc) -- the same
     filter[deviceType]=15 the web UI uses; omitting it returns HTTP 423
     (confirmed live) rather than an unfiltered list, so this isn't optional.
-    Read-only: canBePaused is reported by TELUS but no pause/resume POST has
-    been captured/implemented yet.
     """
     url = f"{c.TELUS_BASE}web/api/automation/rules/rules"
     params = {"filter[deviceType]": "15"}
@@ -118,3 +116,19 @@ async def list_automation_rules(telus) -> list[dict]:
             "timeframe": (a.get("timeframe") or {}).get("description"),
         })
     return rules
+
+
+async def pause_rule(telus, rule_id: str) -> None:
+    """Pause a video automation rule. Empty POST body (confirmed live via
+    captured HAR) -- TELUS identifies the rule purely from the URL path."""
+    url = f"{c.TELUS_BASE}web/api/automation/rules/rules/{rule_id}/pauseRule"
+    async with telus.session.post(url, headers=telus.api_headers) as resp:
+        resp.raise_for_status()
+
+
+async def resume_rule(telus, rule_id: str) -> None:
+    """Resume a paused video automation rule. Empty POST body, same as
+    pause_rule."""
+    url = f"{c.TELUS_BASE}web/api/automation/rules/rules/{rule_id}/resumeRule"
+    async with telus.session.post(url, headers=telus.api_headers) as resp:
+        resp.raise_for_status()
