@@ -37,6 +37,17 @@ Contract (as implemented -- this is what callers must match):
     GET http://127.0.0.1:<CONTROL_PORT>/control/health   (no auth required --
       no secret, this leaks no credential material, just process liveness)
     Response: 200 {"status": "ok"}
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/cameras
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"cameras": [{"id": ..., "name": ..., "model": ..., "firmware": ...,
+                                 "mac_address": ..., "rtsp_url": ...}, ...]}
+      Reflects main.py's in-memory camera_registry, which is populated on
+      startup and kept current by discover_and_launch_cameras()'s periodic
+      poll -- so a camera added to the TELUS account shows up here within
+      config.CAMERA_DISCOVERY_INTERVAL_S of being added, no restart needed on
+      either side.
 """
 import logging
 import os
@@ -72,11 +83,19 @@ def _load_or_create_secret() -> str:
     return secret
 
 
-def create_app(telus_session, login_lock) -> web.Application:
+def create_app(telus_session, login_lock, camera_registry: dict) -> web.Application:
     secret = _load_or_create_secret()
 
     async def handle_health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def handle_cameras(request: web.Request) -> web.Response:
+        provided = request.headers.get("Authorization", "")
+        if not secrets_mod.compare_digest(provided, f"Bearer {secret}"):
+            log.warning("Control endpoint: rejected /control/cameras request with missing/bad secret")
+            return web.json_response({"error": "bad_secret"}, status=401)
+
+        return web.json_response({"cameras": list(camera_registry.values())})
 
     async def handle_credentials(request: web.Request) -> web.Response:
         provided = request.headers.get("Authorization", "")
@@ -110,11 +129,12 @@ def create_app(telus_session, login_lock) -> web.Application:
     app = web.Application()
     app.router.add_post("/control/credentials", handle_credentials)
     app.router.add_get("/control/health", handle_health)
+    app.router.add_get("/control/cameras", handle_cameras)
     return app
 
 
-async def start_control_server(telus_session, login_lock) -> web.AppRunner:
-    runner = web.AppRunner(create_app(telus_session, login_lock))
+async def start_control_server(telus_session, login_lock, camera_registry: dict) -> web.AppRunner:
+    runner = web.AppRunner(create_app(telus_session, login_lock, camera_registry))
     await runner.setup()
     site = web.TCPSite(runner, c.CONTROL_HOST, c.CONTROL_PORT)
     await site.start()

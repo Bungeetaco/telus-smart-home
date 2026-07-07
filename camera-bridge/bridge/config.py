@@ -76,3 +76,11 @@ FRAME_SILENCE_TIMEOUT_S = 15
 WEBRTCUP_TIMEOUT_S = 20
 FIRST_FRAME_TIMEOUT_S = 20
 JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side; keep well under that
+
+# How often to re-poll TELUS for the camera list after startup, so a camera
+# added to the account later gets picked up (and streaming started
+# automatically) without a container restart. Existing camera tasks are never
+# torn down by this poll, even if a camera briefly stops appearing in a
+# response -- only additions are acted on, to avoid killing a working stream
+# over a transient API hiccup.
+CAMERA_DISCOVERY_INTERVAL_S = 300

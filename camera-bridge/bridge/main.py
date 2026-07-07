@@ -87,6 +87,56 @@ def _load_fallback_credentials_if_present() -> str | None:
         return None
 
 
+def _camera_registry_entry(cam: dict) -> dict:
+    """Build the dict shape exposed via the control server's /control/cameras
+    endpoint -- everything the HA integration needs to create a camera entity
+    without itself talking to TELUS's API."""
+    return {
+        "id": cam["id"],
+        "name": cam["description"],
+        "model": cam["model"],
+        "firmware": cam["firmware"],
+        "mac_address": cam["mac_address"],
+        "rtsp_url": c.rtsp_publish_url(cam["id"]),
+    }
+
+
+async def discover_and_launch_cameras(
+    telus: TelusSession,
+    login_lock: asyncio.Lock,
+    camera_tasks: dict[str, asyncio.Task],
+    camera_registry: dict[str, dict],
+) -> None:
+    """Poll TELUS for the camera list forever, launching a run_camera_forever
+    task for any camera not already running. A camera newly added to the
+    account is picked up within CAMERA_DISCOVERY_INTERVAL_S, no restart
+    needed. Deliberately never tears down a task for a camera that stops
+    appearing in a response -- TELUS's API being briefly flaky shouldn't kill
+    an otherwise-working stream; a camera actually removed from the account
+    just becomes a task stuck reconnecting, which is harmless.
+    """
+    while True:
+        try:
+            cameras = await list_cameras(telus)
+        except Exception:
+            log.exception("Camera discovery poll failed, will retry in %ss",
+                          c.CAMERA_DISCOVERY_INTERVAL_S)
+            await asyncio.sleep(c.CAMERA_DISCOVERY_INTERVAL_S)
+            continue
+
+        for cam in cameras:
+            cam_id = cam["id"]
+            if cam_id in camera_tasks:
+                continue
+            log.info("Discovered new camera: %s (%s)", cam_id, cam["description"])
+            camera_registry[cam_id] = _camera_registry_entry(cam)
+            camera_tasks[cam_id] = asyncio.ensure_future(run_camera_forever(
+                telus, cam,
+                lambda t, cid: get_video_source_with_relogin(t, cid, login_lock)))
+
+        await asyncio.sleep(c.CAMERA_DISCOVERY_INTERVAL_S)
+
+
 async def watch_credentials_fallback(telus: TelusSession, login_lock: asyncio.Lock, last_seen) -> None:
     """Safety net for when the control endpoint's live push (control_server.py)
     is missed -- bridge container was down, network hiccup between the HA and
@@ -126,29 +176,47 @@ async def watch_credentials_fallback(telus: TelusSession, login_lock: asyncio.Lo
 async def main():
     last_seen_creds_ts = _load_fallback_credentials_if_present()
     login_lock = asyncio.Lock()
+    camera_tasks: dict[str, asyncio.Task] = {}
+    camera_registry: dict[str, dict] = {}
 
     async with TelusSession() as telus:
         await _login_with_retry(telus, login_lock)
 
-        control_runner = await control_server.start_control_server(telus, login_lock)
+        control_runner = await control_server.start_control_server(
+            telus, login_lock, camera_registry
+        )
         try:
-            cameras = await list_cameras(telus)
-            log.info("Discovered %d cameras: %s", len(cameras),
-                      [(cam["id"], cam["description"]) for cam in cameras])
-
-            if not cameras:
-                log.error("No cameras returned by TELUS (filterByLiveViewDisplayable=true) -- nothing to do.")
-                return
-
-            tasks = [
-                asyncio.ensure_future(run_camera_forever(
+            # First discovery pass runs synchronously so /control/cameras and
+            # streaming are both populated before we consider startup done,
+            # rather than racing the HA integration's first poll against an
+            # empty registry. Every subsequent pass happens inside
+            # discover_and_launch_cameras's own loop.
+            initial_cameras = await list_cameras(telus)
+            log.info("Discovered %d cameras: %s", len(initial_cameras),
+                      [(cam["id"], cam["description"]) for cam in initial_cameras])
+            if not initial_cameras:
+                log.warning("No cameras returned by TELUS (filterByLiveViewDisplayable=true) "
+                            "on startup -- will keep polling every %ss in case one is added.",
+                            c.CAMERA_DISCOVERY_INTERVAL_S)
+            for cam in initial_cameras:
+                camera_registry[cam["id"]] = _camera_registry_entry(cam)
+                camera_tasks[cam["id"]] = asyncio.ensure_future(run_camera_forever(
                     telus, cam,
                     lambda t, cid: get_video_source_with_relogin(t, cid, login_lock)))
-                for cam in cameras
-            ]
-            tasks.append(asyncio.ensure_future(
-                watch_credentials_fallback(telus, login_lock, last_seen_creds_ts)))
-            await asyncio.gather(*tasks)
+
+            discovery_task = asyncio.ensure_future(
+                discover_and_launch_cameras(telus, login_lock, camera_tasks, camera_registry))
+            fallback_task = asyncio.ensure_future(
+                watch_credentials_fallback(telus, login_lock, last_seen_creds_ts))
+
+            # discovery_task never returns, so this blocks forever as intended.
+            # Camera tasks added later by discovery_task run independently on
+            # the event loop the moment ensure_future schedules them -- they
+            # don't need to be in this particular gather() call to execute,
+            # only to have their exceptions surface here if one ever escapes
+            # run_camera_forever's own internal retry loop (which normally
+            # never happens; this is a backstop, not the primary mechanism).
+            await asyncio.gather(discovery_task, fallback_task, *camera_tasks.values())
         finally:
             await control_runner.cleanup()
 

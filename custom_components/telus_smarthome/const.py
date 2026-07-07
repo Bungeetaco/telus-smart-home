@@ -96,6 +96,7 @@ PLATFORMS = [
     Platform.SELECT,
     Platform.CLIMATE,
     Platform.SENSOR,
+    Platform.CAMERA,
 ]
 
 # #
@@ -122,5 +123,18 @@ CAMERA_BRIDGE_SHARE_DIR = "/share/telus_cam_bridge"
 # `--network host`, so 127.0.0.1 here really is the host's loopback that the
 # bridge's control server (bound to 127.0.0.1:8199) is listening on.
 CAMERA_BRIDGE_CONTROL_URL = "http://127.0.0.1:8199/control/credentials"
+
+# Read-only endpoint the camera platform (camera.py) polls to learn which
+# cameras currently exist and their RTSP publish URLs -- see
+# camera-bridge/bridge/control_server.py for the response shape.
+CAMERA_BRIDGE_CAMERAS_URL = "http://127.0.0.1:8199/control/cameras"
+
+# How often camera.py re-polls the bridge for its camera list. This is a
+# cheap local-loopback HTTP GET against a small in-memory dict on the bridge
+# side, so a short interval costs nothing -- kept well under the bridge's own
+# CAMERA_DISCOVERY_INTERVAL_S (300s, see camera-bridge/bridge/config.py) so a
+# camera the bridge just discovered shows up here on this coordinator's very
+# next cycle rather than waiting on two independently-phased 5-minute polls.
+CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS = 60
 
 DEVICE_STATIC_ATTRIBUTES = [libConst.ATTR_STATE_TEXT, libConst.ATTR_MAC_ADDRESS]
