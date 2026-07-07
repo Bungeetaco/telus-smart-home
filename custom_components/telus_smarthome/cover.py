@@ -12,6 +12,7 @@ from homeassistant.components.cover import (
     CoverEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from pyalarmdotcomajax.devices.garage_door import GarageDoor as libGarageDoor
 from pyalarmdotcomajax.devices.gate import Gate as libGate
@@ -109,13 +110,19 @@ class Cover(HardwareBaseDevice, CoverEntity):  # type: ignore
 
         try:
             await self._device.async_open()
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("open")
+            raise HomeAssistantError(
+                f"Not authorized to open {self._device.name}."
+            ) from err
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
 
         try:
             await self._device.async_close()
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("close")
+            raise HomeAssistantError(
+                f"Not authorized to close {self._device.name}."
+            ) from err

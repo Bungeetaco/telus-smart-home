@@ -9,6 +9,7 @@ from homeassistant import core
 from homeassistant.components import light
 from homeassistant.components.light import ATTR_BRIGHTNESS, LightEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from pyalarmdotcomajax.devices.light import Light as libLight
 from pyalarmdotcomajax.exceptions import NotAuthorized
@@ -88,8 +89,13 @@ class Light(HardwareBaseDevice, LightEntity):  # type: ignore
 
         try:
             await self._device.async_turn_on(brightness)
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("turn on or adjust brightness on")
+            # Also prevents the optimistic-state block below from claiming
+            # success locally when the real command was denied.
+            raise HomeAssistantError(
+                f"Not authorized to turn on {self._device.name}."
+            ) from err
 
         if self.assumed_state:
             # optimistically assume that light has changed state
@@ -101,8 +107,11 @@ class Light(HardwareBaseDevice, LightEntity):  # type: ignore
 
         try:
             await self._device.async_turn_off()
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("turn off")
+            raise HomeAssistantError(
+                f"Not authorized to turn off {self._device.name}."
+            ) from err
 
         if self.assumed_state:
             # optimistically assume that light has changed state

@@ -51,14 +51,24 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
 
         self._attr_extra_state_attributes: MutableMapping[str, Any] = {}
 
-        self._attr_device_info = DeviceInfo(
-            {
-                "manufacturer": "Alarm.com",
-                "name": device.name,
-                "identifiers": {(DOMAIN, self._adc_id)},
-                "via_device": (DOMAIN, self._device.partition_id),
-            }
-        )
+        device_info: MutableMapping[str, Any] = {
+            "manufacturer": "Alarm.com",
+            "name": device.name,
+            "identifiers": {(DOMAIN, self._adc_id)},
+        }
+
+        # Only link via_device when it points at a partition device that is
+        # actually created elsewhere (the AlarmControlPanel entity's device,
+        # identified by partition_id). The partition/panel device itself has
+        # no partition_id (it IS the partition), so it must not reference
+        # itself via a dangling (DOMAIN, None) identifier -- doing so is a
+        # deprecated, non-existent via_device link per HA's device registry
+        # rules and logs a warning that will become a hard failure in a
+        # future core release.
+        if self._device.partition_id and self._device.partition_id != self._adc_id:
+            device_info["via_device"] = (DOMAIN, self._device.partition_id)
+
+        self._attr_device_info = DeviceInfo(device_info)
 
     @property
     def device_type_name(self) -> str:

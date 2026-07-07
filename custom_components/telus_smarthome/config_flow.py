@@ -294,17 +294,36 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
             else f"{self._controller.provider_name}:{self._controller.user_email}"
         )
 
+        # Unique ID is the TELUS/Alarm.com account email. This prevents the
+        # same account from being onboarded twice (duplicate device/entity
+        # trees), and -- for reauth/reconfigure -- guards against a mistyped
+        # or wrong-account credential swap silently repointing an existing
+        # entry at a different TELUS account.
+        await self.async_set_unique_id(self._controller.user_email)
+
         if self._existing_entry:
+            # Entries created before this unique_id migration have no
+            # unique_id yet -- only enforce the account-match guard once the
+            # entry actually has one (stamped below via
+            # async_update_reload_and_abort's unique_id= kwarg), so the
+            # first reauth/reconfigure after upgrading doesn't spuriously
+            # abort as a cross-account "mismatch".
+            if self._existing_entry.unique_id is not None:
+                self._abort_if_unique_id_mismatch()
+
             LOGGER.debug("Existing entry found — updating in place (%s).", self._success_abort_reason)
 
             await self._async_sync_bridge_credentials()
 
             return self.async_update_reload_and_abort(
                 self._existing_entry,
+                unique_id=self.unique_id,
                 title=self._config_title,
                 data=self.config,
                 reason=self._success_abort_reason,
             )
+
+        self._abort_if_unique_id_configured(error="already_configured_account")
 
         # Named async_ but doesn't require await!
         return self.async_create_entry(title=self._config_title, data=self.config, options=CONF_OPTIONS_DEFAULT)

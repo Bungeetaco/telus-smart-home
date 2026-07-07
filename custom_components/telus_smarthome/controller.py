@@ -74,11 +74,17 @@ class AlarmIntegrationController:
         # Create pyalarmdotcomajax controller
         #
 
-        await self.initialize_lite(
-            username=self.config_entry.data[CONF_USERNAME],
-            password=self.config_entry.data[CONF_PASSWORD],
-            twofactorcookie=self.config_entry.data.get(CONF_2FA_COOKIE),
-        )
+        try:
+            await self.initialize_lite(
+                username=self.config_entry.data[CONF_USERNAME],
+                password=self.config_entry.data[CONF_PASSWORD],
+                twofactorcookie=self.config_entry.data.get(CONF_2FA_COOKIE),
+            )
+        except UnexpectedResponse as err:
+            # This IS the setup-only path (see initialize_lite's comment on
+            # this exact exception) -- translate here, where it belongs, so
+            # HA retries with backoff instead of a hard SETUP_ERROR.
+            raise ConfigEntryNotReady from err
 
         #
         # Initialize DataUpdateCoordinator and pull device data
@@ -149,8 +155,22 @@ class AlarmIntegrationController:
             await self.api.async_login()
         except (TimeoutError, aiohttp.ClientError, asyncio.exceptions.CancelledError) as err:
             raise ConfigEntryNotReady from err
-        except UnexpectedResponse as err:
-            raise UpdateFailed from err
+        except UnexpectedResponse:
+            # Deliberately NOT translated here. initialize_lite() has two kinds
+            # of caller with different needs: the real setup path (initialize()
+            # -> __init__.py:async_setup_entry, no DataUpdateCoordinator yet)
+            # needs this turned into ConfigEntryNotReady for HA's automatic
+            # retry-with-backoff; but config_flow.py also calls this directly
+            # during interactive login/reconfigure, where it has its own
+            # `except libUnexpectedResponse` handler that shows a specific,
+            # already-written "telus_sso_error" translation string (this is a
+            # TELUS-SSO-specific integration -- a raw UnexpectedResponse here
+            # is exactly the "TELUS changed something server-side" case that
+            # string exists for). Translating to any other exception type at
+            # this shared call site made that handler unreachable dead code.
+            # Re-raise as-is; initialize() below translates for its own
+            # (setup-only) callers instead.
+            raise
         except (AuthenticationFailed, NotAuthorized) as err:
             raise ConfigEntryAuthFailed from err
 
@@ -161,7 +181,17 @@ class AlarmIntegrationController:
         Using now as a dummy to prevent errors.
         """
 
-        return await self.api.keep_alive()  # type: ignore
+        try:
+            return await self.api.keep_alive()  # type: ignore
+        except AlarmdotcomException:
+            # Cosmetic only: if the session has actually degraded, the
+            # coordinator's own refresh (async_update, every
+            # CONF_UPDATE_INTERVAL seconds) will hit the same failure and
+            # correctly trigger ConfigEntryAuthFailed/UpdateFailed. Without
+            # this, a degraded session logs an uncaught-exception traceback
+            # from HA's scheduler every 60 seconds until the next refresh.
+            LOGGER.debug("Keep-alive failed; will resolve on next coordinator refresh.", exc_info=True)
+            return None
 
     async def async_update(self) -> None:
         """Pull fresh data from Alarm.com for coordinator."""

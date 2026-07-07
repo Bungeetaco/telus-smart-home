@@ -19,6 +19,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from pyalarmdotcomajax.devices.registry import AllDevices_t
 from pyalarmdotcomajax.devices.thermostat import Thermostat as libThermostat
@@ -171,8 +172,11 @@ class Climate(HardwareBaseDevice, ClimateEntity):  # type: ignore
             elif hvac_mode == HVACMode.OFF:
                 await self._device.async_set_attribute(state=libThermostat.DeviceState.OFF)
                 await self.async_set_fan_mode(FAN_AUTO)
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("set the HVAC mode on")
+            raise HomeAssistantError(
+                f"Not authorized to set the HVAC mode on {self._device.name}."
+            ) from err
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Change fan mode."""
@@ -189,8 +193,11 @@ class Climate(HardwareBaseDevice, ClimateEntity):  # type: ignore
                 await self._device.async_set_attribute(fan=(libThermostat.FanMode.ON, max_fan_duration))
             elif fan_mode == FAN_AUTO:
                 await self._device.async_set_attribute(fan=(libThermostat.FanMode.AUTO, 0))
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("set the fan mode on")
+            raise HomeAssistantError(
+                f"Not authorized to set the fan mode on {self._device.name}."
+            ) from err
 
     async def async_set_temperature(self, **kwargs) -> None:  # type: ignore
         """Set new target temperature."""
@@ -216,8 +223,11 @@ class Climate(HardwareBaseDevice, ClimateEntity):  # type: ignore
                 await self._device.async_set_attribute(heat_setpoint=heat_setpoint)
             if cool_setpoint is not None:
                 await self._device.async_set_attribute(cool_setpoint=cool_setpoint)
-        except NotAuthorized:
+        except NotAuthorized as err:
             self._show_permission_error("set the temperature on")
+            raise HomeAssistantError(
+                f"Not authorized to set the temperature on {self._device.name}."
+            ) from err
 
     def _determine_features(self) -> None:
         """Determine which features are available for thermostat."""

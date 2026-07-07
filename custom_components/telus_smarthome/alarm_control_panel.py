@@ -15,6 +15,7 @@ from homeassistant.components.alarm_control_panel import (
     CodeFormat,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import HomeAssistantError
 
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from pyalarmdotcomajax.devices.partition import Partition as libPartition
@@ -137,8 +138,11 @@ class AlarmControlPanel(HardwareBaseDevice, AlarmControlPanelEntity):  # type: i
         if self._validate_code(code):
             try:
                 await self._device.async_disarm()
-            except NotAuthorized:
+            except NotAuthorized as err:
                 self._show_permission_error("disarm")
+                raise HomeAssistantError(
+                    f"Not authorized to disarm {self._device.name}."
+                ) from err
 
     async def async_alarm_arm_night(self, code: str | None = None) -> None:
         """Send arm night command."""
@@ -152,8 +156,11 @@ class AlarmControlPanel(HardwareBaseDevice, AlarmControlPanelEntity):  # type: i
                     no_entry_delay=CONF_NO_ENTRY_DELAY in arm_options,
                     silent_arming=CONF_SILENT_ARM in arm_options,
                 )
-            except NotAuthorized:
+            except NotAuthorized as err:
                 self._show_permission_error("arm_night")
+                raise HomeAssistantError(
+                    f"Not authorized to arm night {self._device.name}."
+                ) from err
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
         """Send arm home command."""
@@ -167,8 +174,11 @@ class AlarmControlPanel(HardwareBaseDevice, AlarmControlPanelEntity):  # type: i
                     no_entry_delay=CONF_NO_ENTRY_DELAY in arm_options,
                     silent_arming=CONF_SILENT_ARM in arm_options,
                 )
-            except NotAuthorized:
+            except NotAuthorized as err:
                 self._show_permission_error("arm_home")
+                raise HomeAssistantError(
+                    f"Not authorized to arm home {self._device.name}."
+                ) from err
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
         """Send arm away command."""
@@ -182,8 +192,11 @@ class AlarmControlPanel(HardwareBaseDevice, AlarmControlPanelEntity):  # type: i
                     no_entry_delay=CONF_NO_ENTRY_DELAY in arm_options,
                     silent_arming=CONF_SILENT_ARM in arm_options,
                 )
-            except NotAuthorized:
+            except NotAuthorized as err:
                 self._show_permission_error("arm_away")
+                raise HomeAssistantError(
+                    f"Not authorized to arm away {self._device.name}."
+                ) from err
 
     #
     # Helpers

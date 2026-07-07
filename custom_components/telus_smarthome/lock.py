@@ -11,6 +11,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from homeassistant.helpers.typing import ConfigType
 from pyalarmdotcomajax.devices.lock import Lock as libLock
@@ -135,16 +136,22 @@ class Lock(HardwareBaseDevice, LockEntity):  # type: ignore
         if self._validate_code(kwargs.get("code")):
             try:
                 await self._device.async_lock()
-            except NotAuthorized:
+            except NotAuthorized as err:
                 self._show_permission_error("lock")
+                raise HomeAssistantError(
+                    f"Not authorized to lock {self._device.name}."
+                ) from err
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the lock."""
         if self._validate_code(kwargs.get("code")):
             try:
                 await self._device.async_unlock()
-            except NotAuthorized:
+            except NotAuthorized as err:
                 self._show_permission_error("unlock")
+                raise HomeAssistantError(
+                    f"Not authorized to unlock {self._device.name}."
+                ) from err
 
     #
     # Helpers
