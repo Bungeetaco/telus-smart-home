@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "TELUS Smart Home में लॉग इन करें"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "TELUS Smart Home को आपके खाते को पुनः प्रमाणित करने की आवश्यकता है।"
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "TELUS Smart Home क्रेडेंशियल अपडेट करें",
+                "description": "अपना अपडेट किया गया TELUS Smart Home उपयोगकर्ता नाम और पासवर्ड दर्ज करें।"
+            },
+            "otp_submit": {
+                "title": "वन-टाइम पासवर्ड दर्ज करें",
+                "description": "यदि आपने SMS या ईमेल प्रमाणीकरण विधि का उपयोग किया है, तो एक वन-टाइम पासवर्ड आपके इनबॉक्स में पहले ही भेजा जा चुका है।",
+                "data": {
+                    "otp": "वन-टाइम पासवर्ड"
+                }
+            },
+            "otp_select_method": {
+                "title": "दो-चरणीय प्रमाणीकरण विधि चुनें",
+                "data": { "otp_method": "विधि" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "अमान्य वन-टाइम पासवर्ड।",
+            "telus_sso_error": "TELUS सिंगल साइन-ऑन प्रक्रिया ने कुछ अप्रत्याशित लौटाया। इसका सामान्यतः मतलब है कि TELUS ने सर्वर-साइड कुछ बदला है — गलत पासवर्ड नहीं है।"
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "इस प्रदाता के साथ लॉग इन करने के लिए दो-चरणीय प्रमाणीकरण सक्षम होना आवश्यक है।",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "दर्ज किए गए क्रेडेंशियल उस खाते से भिन्न TELUS Smart Home खाते के हैं जिसे पुनः प्रमाणित/पुनः कॉन्फ़िगर किया जा रहा है। कृपया उसी खाते के क्रेडेंशियल दर्ज करें, या खाता बदलने के लिए इंटीग्रेशन को हटाकर फिर से जोड़ें।"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "सामान्य सेटिंग्स",
+                "data": {
+                    "arm_code": "सुरक्षा कोड (ताले और अलार्म)",
+                    "update_interval": "अपडेट अंतराल",
+                    "ws_reconnect_timeout": "वेबसॉकेट पुनः कनेक्शन टाइमआउट"
+                },
+                "data_description": {
+                    "arm_code": "Home Assistant के माध्यम से अलार्म आर्म करने और ताले खोलने के लिए उपयोग किए जाने वाले कोड को सेट करें। कोड हटाने के लिए `CLEAR!` दर्ज करें।",
+                    "update_interval": "वह दर सेट करें जिस पर Home Assistant TELUS Smart Home के अपडेट की जांच करता है। सावधान रहें! बहुत बार अपडेट करने से खाता लॉक हो सकता है।",
+                    "ws_reconnect_timeout": "डिस्कनेक्ट होने के बाद वेबसॉकेट को फिर से कनेक्ट करने का प्रयास करने से पहले प्रतीक्षा समय सेट करें।"
+                }
+            },
+            "modes": {
+                "title": "आर्मिंग मोड प्रोफ़ाइल",
+                "data": {
+                    "arm_home_options": "होम आर्म",
+                    "arm_away_options": "अवे आर्म",
+                    "arm_night_options": "नाइट आर्म"
+                },
+                "description": "प्रत्येक आर्मिंग मोड के लिए व्यवहार सेट करें।",
+                "data_description": {
+                    "arm_night_options": "नाइट आर्म सभी पार्टिशन पर उपलब्ध नहीं हो सकता।"
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "प्रमाणक ऐप",
+                "sms": "टेक्स्ट संदेश",
+                "email": "ईमेल"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "प्रमाणीकरण स्थिति",
+                "state": {
+                    "ok": "ठीक है",
+                    "reauth_required": "पुनः प्रमाणीकरण आवश्यक है",
+                    "telus_error": "TELUS/Alarm.com त्रुटि"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "हाल की गतिविधि",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "व्यक्ति",
+                            "vehicle": "वाहन",
+                            "animal": "जानवर",
+                            "other": "अन्य"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

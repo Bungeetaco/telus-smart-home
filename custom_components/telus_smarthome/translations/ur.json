@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "TELUS Smart Home میں لاگ ان کریں"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "TELUS Smart Home کو آپ کے اکاؤنٹ کی دوبارہ توثیق کی ضرورت ہے۔"
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "TELUS Smart Home اسناد کو اپ ڈیٹ کریں",
+                "description": "اپنا اپ ڈیٹ شدہ TELUS Smart Home صارف نام اور پاس ورڈ درج کریں۔"
+            },
+            "otp_submit": {
+                "title": "ون-ٹائم پاس ورڈ درج کریں",
+                "description": "اگر آپ نے SMS یا ای میل توثیقی طریقہ استعمال کیا ہے تو ایک ون-ٹائم پاس ورڈ پہلے ہی آپ کے ان باکس میں بھیج دیا گیا ہے۔",
+                "data": {
+                    "otp": "ون-ٹائم پاس ورڈ"
+                }
+            },
+            "otp_select_method": {
+                "title": "دو مرحلہ توثیقی طریقہ منتخب کریں",
+                "data": { "otp_method": "طریقہ" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "غلط ون-ٹائم پاس ورڈ۔",
+            "telus_sso_error": "TELUS کے سنگل سائن-آن عمل نے غیر متوقع نتیجہ دیا۔ اس کا عام طور پر مطلب ہے کہ TELUS نے سرور کی جانب کچھ تبدیل کیا ہے — غلط پاس ورڈ نہیں۔"
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "اس فراہم کنندہ کے ساتھ لاگ ان کرنے کے لیے دو مرحلہ توثیق فعال ہونی چاہیے۔",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "درج کردہ اسناد اس اکاؤنٹ سے مختلف TELUS Smart Home اکاؤنٹ سے تعلق رکھتی ہیں جس کی دوبارہ توثیق/تشکیل کی جا رہی ہے۔ براہ کرم اسی اکاؤنٹ کی اسناد درج کریں، یا اکاؤنٹ تبدیل کرنے کے لیے انٹیگریشن کو ہٹا کر دوبارہ شامل کریں۔"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "عمومی ترتیبات",
+                "data": {
+                    "arm_code": "حفاظتی کوڈ (تالے اور الارم)",
+                    "update_interval": "اپ ڈیٹ وقفہ",
+                    "ws_reconnect_timeout": "ویب ساکٹ دوبارہ رابطے کا ٹائم آؤٹ"
+                },
+                "data_description": {
+                    "arm_code": "Home Assistant کے ذریعے الارم آرم کرنے اور تالے کھولنے کے لیے استعمال ہونے والا کوڈ سیٹ کریں۔ کوڈ ہٹانے کے لیے `CLEAR!` درج کریں۔",
+                    "update_interval": "وہ شرح سیٹ کریں جس پر Home Assistant TELUS Smart Home کی اپ ڈیٹس چیک کرتا ہے۔ احتیاط کریں! بہت زیادہ کثرت سے اپ ڈیٹ کرنے سے اکاؤنٹ لاک ہو سکتا ہے۔",
+                    "ws_reconnect_timeout": "منقطع ہونے کے بعد ویب ساکٹ کو دوبارہ جوڑنے کی کوشش کرنے سے پہلے انتظار کا وقت سیٹ کریں۔"
+                }
+            },
+            "modes": {
+                "title": "آرمنگ موڈ پروفائلز",
+                "data": {
+                    "arm_home_options": "ہوم آرم",
+                    "arm_away_options": "اوے آرم",
+                    "arm_night_options": "نائٹ آرم"
+                },
+                "description": "ہر آرمنگ موڈ کے لیے رویہ سیٹ کریں۔",
+                "data_description": {
+                    "arm_night_options": "نائٹ آرم تمام پارٹیشنز پر دستیاب نہیں ہو سکتا۔"
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "توثیق کنندہ ایپ",
+                "sms": "ٹیکسٹ میسج",
+                "email": "ای میل"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "توثیق کی حالت",
+                "state": {
+                    "ok": "ٹھیک ہے",
+                    "reauth_required": "دوبارہ توثیق درکار ہے",
+                    "telus_error": "TELUS/Alarm.com خرابی"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "حالیہ سرگرمی",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "شخص",
+                            "vehicle": "گاڑی",
+                            "animal": "جانور",
+                            "other": "دیگر"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

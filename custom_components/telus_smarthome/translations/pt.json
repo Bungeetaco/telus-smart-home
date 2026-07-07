@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "Iniciar sessão no TELUS Smart Home"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "O TELUS Smart Home precisa reautenticar a sua conta."
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "Atualizar credenciais do TELUS Smart Home",
+                "description": "Introduza o seu nome de utilizador e palavra-passe atualizados do TELUS Smart Home."
+            },
+            "otp_submit": {
+                "title": "Introduzir palavra-passe de utilização única",
+                "description": "Se utilizou os métodos de autenticação por SMS ou e-mail, já foi enviada uma palavra-passe de utilização única para a sua caixa de entrada.",
+                "data": {
+                    "otp": "Palavra-passe de utilização única"
+                }
+            },
+            "otp_select_method": {
+                "title": "Selecionar método de autenticação de dois fatores",
+                "data": { "otp_method": "Método" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "Palavra-passe de utilização única inválida.",
+            "telus_sso_error": "O processo de início de sessão único da TELUS devolveu algo inesperado. Isto normalmente significa que a TELUS alterou algo do lado do servidor — não uma palavra-passe incorreta."
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "A autenticação de dois fatores tem de estar ativada para iniciar sessão com este fornecedor.",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "As credenciais introduzidas pertencem a uma conta TELUS Smart Home diferente da que está a ser reautenticada/reconfigurada. Introduza as credenciais da mesma conta, ou remova e volte a adicionar a integração para mudar de conta."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Definições gerais",
+                "data": {
+                    "arm_code": "Código de segurança (fechaduras e alarme)",
+                    "update_interval": "Intervalo de atualização",
+                    "ws_reconnect_timeout": "Tempo limite de reconexão do websocket"
+                },
+                "data_description": {
+                    "arm_code": "Define o código a utilizar para armar o alarme e destrancar as fechaduras através do Home Assistant. Para remover o código, introduza `CLEAR!`.",
+                    "update_interval": "Define a frequência com que o Home Assistant verifica atualizações do TELUS Smart Home. Cuidado! Atualizar com demasiada frequência pode resultar no bloqueio da conta.",
+                    "ws_reconnect_timeout": "Define o tempo de espera antes de tentar reconectar o websocket após uma desconexão."
+                }
+            },
+            "modes": {
+                "title": "Perfis de modo de armar",
+                "data": {
+                    "arm_home_options": "Armar em Casa",
+                    "arm_away_options": "Armar Ausente",
+                    "arm_night_options": "Armar Noite"
+                },
+                "description": "Defina o comportamento de armar para cada modo.",
+                "data_description": {
+                    "arm_night_options": "O modo Armar Noite pode não estar disponível em todas as partições."
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "Aplicação de autenticação",
+                "sms": "Mensagem de texto",
+                "email": "E-mail"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "Estado da autenticação",
+                "state": {
+                    "ok": "OK",
+                    "reauth_required": "Reautenticação necessária",
+                    "telus_error": "Erro TELUS/Alarm.com"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "Atividade recente",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "Pessoa",
+                            "vehicle": "Veículo",
+                            "animal": "Animal",
+                            "other": "Outro"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

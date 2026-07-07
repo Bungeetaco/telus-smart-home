@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "Вход в TELUS Smart Home"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "TELUS Smart Home требуется повторная аутентификация вашей учётной записи."
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "Обновить учётные данные TELUS Smart Home",
+                "description": "Введите обновлённые имя пользователя и пароль TELUS Smart Home."
+            },
+            "otp_submit": {
+                "title": "Введите одноразовый пароль",
+                "description": "Если вы использовали метод аутентификации по SMS или электронной почте, одноразовый пароль уже отправлен в ваш почтовый ящик.",
+                "data": {
+                    "otp": "Одноразовый пароль"
+                }
+            },
+            "otp_select_method": {
+                "title": "Выберите метод двухфакторной аутентификации",
+                "data": { "otp_method": "Метод" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "Неверный одноразовый пароль.",
+            "telus_sso_error": "Процесс единого входа TELUS вернул непредвиденный результат. Обычно это означает, что TELUS изменила что-то на стороне сервера, а не то, что пароль неверен."
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "Для входа с использованием этого провайдера должна быть включена двухфакторная аутентификация.",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "Введённые учётные данные относятся к другой учётной записи TELUS Smart Home, отличной от той, для которой выполняется повторная аутентификация/переконфигурация. Введите учётные данные той же учётной записи либо удалите и заново добавьте интеграцию, чтобы сменить учётную запись."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Общие настройки",
+                "data": {
+                    "arm_code": "Код безопасности (замки и сигнализация)",
+                    "update_interval": "Интервал обновления",
+                    "ws_reconnect_timeout": "Тайм-аут переподключения websocket"
+                },
+                "data_description": {
+                    "arm_code": "Устанавливает код, используемый для постановки сигнализации на охрану и разблокировки замков через Home Assistant. Чтобы удалить код, введите `CLEAR!`.",
+                    "update_interval": "Устанавливает частоту, с которой Home Assistant проверяет обновления TELUS Smart Home. Будьте осторожны! Слишком частые обновления могут привести к блокировке учётной записи.",
+                    "ws_reconnect_timeout": "Устанавливает время ожидания перед попыткой переподключения websocket после разрыва соединения."
+                }
+            },
+            "modes": {
+                "title": "Профили режимов постановки на охрану",
+                "data": {
+                    "arm_home_options": "Постановка «Дома»",
+                    "arm_away_options": "Постановка «Вне дома»",
+                    "arm_night_options": "Постановка «Ночь»"
+                },
+                "description": "Настройте поведение для каждого режима постановки на охрану.",
+                "data_description": {
+                    "arm_night_options": "Режим «Ночь» может быть недоступен для всех разделов."
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "Приложение-аутентификатор",
+                "sms": "SMS-сообщение",
+                "email": "Электронная почта"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "Состояние аутентификации",
+                "state": {
+                    "ok": "ОК",
+                    "reauth_required": "Требуется повторная аутентификация",
+                    "telus_error": "Ошибка TELUS/Alarm.com"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "Недавняя активность",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "Человек",
+                            "vehicle": "Транспортное средство",
+                            "animal": "Животное",
+                            "other": "Другое"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

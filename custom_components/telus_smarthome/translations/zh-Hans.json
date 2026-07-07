@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "登录 TELUS Smart Home"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "TELUS Smart Home 需要重新验证您的账户。"
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "更新 TELUS Smart Home 凭据",
+                "description": "请输入您更新后的 TELUS Smart Home 用户名和密码。"
+            },
+            "otp_submit": {
+                "title": "输入一次性密码",
+                "description": "如果您使用了短信或电子邮件验证方式,一次性密码已发送至您的收件箱。",
+                "data": {
+                    "otp": "一次性密码"
+                }
+            },
+            "otp_select_method": {
+                "title": "选择双重验证方式",
+                "data": { "otp_method": "方式" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "一次性密码无效。",
+            "telus_sso_error": "TELUS 单点登录流程返回了意外结果。这通常表示 TELUS 在服务器端做了某些更改,而不是密码错误。"
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "必须启用双重验证才能使用此提供商登录。",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "输入的凭据属于与正在重新验证/重新配置的账户不同的 TELUS Smart Home 账户。请输入同一账户的凭据,或删除并重新添加此集成以切换账户。"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "常规设置",
+                "data": {
+                    "arm_code": "安全代码(门锁和警报)",
+                    "update_interval": "更新间隔",
+                    "ws_reconnect_timeout": "Websocket 重连超时"
+                },
+                "data_description": {
+                    "arm_code": "设置通过 Home Assistant 布防警报和解锁门锁时使用的代码。要删除该代码,请输入 `CLEAR!`。",
+                    "update_interval": "设置 Home Assistant 检查 TELUS Smart Home 更新的频率。请谨慎设置!更新过于频繁可能导致账户被锁定。",
+                    "ws_reconnect_timeout": "设置断开连接后尝试重新连接 websocket 之前的等待时间。"
+                }
+            },
+            "modes": {
+                "title": "布防模式配置",
+                "data": {
+                    "arm_home_options": "在家布防",
+                    "arm_away_options": "外出布防",
+                    "arm_night_options": "夜间布防"
+                },
+                "description": "为每种布防模式设置行为。",
+                "data_description": {
+                    "arm_night_options": "并非所有分区都支持夜间布防。"
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "身份验证应用",
+                "sms": "短信",
+                "email": "电子邮件"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "认证状态",
+                "state": {
+                    "ok": "正常",
+                    "reauth_required": "需要重新验证",
+                    "telus_error": "TELUS/Alarm.com 错误"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "近期活动",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "人",
+                            "vehicle": "车辆",
+                            "animal": "动物",
+                            "other": "其他"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

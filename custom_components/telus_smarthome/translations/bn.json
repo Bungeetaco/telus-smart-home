@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "TELUS Smart Home-এ লগ ইন করুন"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "TELUS Smart Home-এর আপনার অ্যাকাউন্ট পুনরায় প্রমাণীকরণ করা প্রয়োজন।"
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "TELUS Smart Home শংসাপত্র আপডেট করুন",
+                "description": "আপনার আপডেট করা TELUS Smart Home ব্যবহারকারীর নাম এবং পাসওয়ার্ড লিখুন।"
+            },
+            "otp_submit": {
+                "title": "ওয়ান-টাইম পাসওয়ার্ড লিখুন",
+                "description": "আপনি যদি SMS বা ইমেল প্রমাণীকরণ পদ্ধতি ব্যবহার করে থাকেন, তাহলে একটি ওয়ান-টাইম পাসওয়ার্ড ইতিমধ্যে আপনার ইনবক্সে পাঠানো হয়েছে।",
+                "data": {
+                    "otp": "ওয়ান-টাইম পাসওয়ার্ড"
+                }
+            },
+            "otp_select_method": {
+                "title": "দ্বি-স্তরীয় প্রমাণীকরণ পদ্ধতি নির্বাচন করুন",
+                "data": { "otp_method": "পদ্ধতি" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "অবৈধ ওয়ান-টাইম পাসওয়ার্ড।",
+            "telus_sso_error": "TELUS সিঙ্গেল সাইন-অন প্রক্রিয়া অপ্রত্যাশিত কিছু ফেরত দিয়েছে। এর সাধারণ অর্থ হলো TELUS সার্ভার-সাইডে কিছু পরিবর্তন করেছে — ভুল পাসওয়ার্ড নয়।"
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "এই প্রদানকারীর মাধ্যমে লগ ইন করতে দ্বি-স্তরীয় প্রমাণীকরণ সক্রিয় থাকতে হবে।",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "প্রবেশ করানো শংসাপত্রগুলি পুনরায় প্রমাণীকরণ/পুনঃকনফিগার করা অ্যাকাউন্ট থেকে ভিন্ন একটি TELUS Smart Home অ্যাকাউন্টের অন্তর্গত। অনুগ্রহ করে একই অ্যাকাউন্টের শংসাপত্র লিখুন, অথবা অ্যাকাউন্ট পরিবর্তন করতে ইন্টিগ্রেশনটি সরিয়ে পুনরায় যোগ করুন।"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "সাধারণ সেটিংস",
+                "data": {
+                    "arm_code": "নিরাপত্তা কোড (তালা ও অ্যালার্ম)",
+                    "update_interval": "আপডেট বিরতি",
+                    "ws_reconnect_timeout": "ওয়েবসকেট পুনঃসংযোগ টাইমআউট"
+                },
+                "data_description": {
+                    "arm_code": "Home Assistant-এর মাধ্যমে অ্যালার্ম আর্ম করতে এবং তালা আনলক করতে ব্যবহৃত কোড নির্ধারণ করুন। কোড মুছতে `CLEAR!` লিখুন।",
+                    "update_interval": "Home Assistant কত ঘন ঘন TELUS Smart Home আপডেটের জন্য পরীক্ষা করবে তা নির্ধারণ করুন। সতর্ক থাকুন! খুব ঘন ঘন আপডেট করলে অ্যাকাউন্ট লক হয়ে যেতে পারে।",
+                    "ws_reconnect_timeout": "সংযোগ বিচ্ছিন্ন হওয়ার পর ওয়েবসকেট পুনরায় সংযোগের চেষ্টা করার আগে অপেক্ষার সময় নির্ধারণ করুন।"
+                }
+            },
+            "modes": {
+                "title": "আর্মিং মোড প্রোফাইল",
+                "data": {
+                    "arm_home_options": "হোম আর্ম",
+                    "arm_away_options": "অ্যাওয়ে আর্ম",
+                    "arm_night_options": "নাইট আর্ম"
+                },
+                "description": "প্রতিটি আর্মিং মোডের জন্য আচরণ নির্ধারণ করুন।",
+                "data_description": {
+                    "arm_night_options": "নাইট আর্ম সব পার্টিশনে উপলব্ধ নাও থাকতে পারে।"
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "অথেনটিকেটর অ্যাপ",
+                "sms": "টেক্সট মেসেজ",
+                "email": "ইমেল"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "প্রমাণীকরণ অবস্থা",
+                "state": {
+                    "ok": "ঠিক আছে",
+                    "reauth_required": "পুনরায় প্রমাণীকরণ প্রয়োজন",
+                    "telus_error": "TELUS/Alarm.com ত্রুটি"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "সাম্প্রতিক কার্যকলাপ",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "ব্যক্তি",
+                            "vehicle": "যানবাহন",
+                            "animal": "প্রাণী",
+                            "other": "অন্যান্য"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

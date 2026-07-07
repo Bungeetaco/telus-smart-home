@@ -1,0 +1,115 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "تسجيل الدخول إلى TELUS Smart Home"
+            },
+            "reauth_confirm": {
+                "title": "[%key:common::config_flow::title::reauth%]",
+                "description": "يحتاج TELUS Smart Home إلى إعادة مصادقة حسابك."
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "[%key:common::config_flow::data::username%]",
+                    "password": "[%key:common::config_flow::data::password%]"
+                },
+                "title": "تحديث بيانات اعتماد TELUS Smart Home",
+                "description": "أدخل اسم المستخدم وكلمة المرور المحدّثين الخاصين بـ TELUS Smart Home."
+            },
+            "otp_submit": {
+                "title": "إدخال كلمة المرور لمرة واحدة",
+                "description": "إذا كنت قد استخدمت طريقة المصادقة عبر الرسائل القصيرة أو البريد الإلكتروني، فقد تم بالفعل إرسال كلمة مرور لمرة واحدة إلى بريدك الوارد.",
+                "data": {
+                    "otp": "كلمة المرور لمرة واحدة"
+                }
+            },
+            "otp_select_method": {
+                "title": "اختر طريقة المصادقة الثنائية",
+                "data": { "otp_method": "الطريقة" }
+            }
+        },
+        "error": {
+            "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+            "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+            "unknown": "[%key:common::config_flow::error::unknown%]",
+            "invalid_otp": "كلمة المرور لمرة واحدة غير صالحة.",
+            "telus_sso_error": "أعادت عملية تسجيل الدخول الموحد الخاصة بـ TELUS استجابة غير متوقعة. يعني هذا عادةً أن TELUS قامت بتغيير شيء ما من جهة الخادم — وليس كلمة مرور خاطئة."
+        },
+        "abort": {
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+            "must_enable_2fa": "يجب تفعيل المصادقة الثنائية لتسجيل الدخول باستخدام هذا المزوّد.",
+            "already_configured_account": "[%key:common::config_flow::abort::already_configured_account%]",
+            "unique_id_mismatch": "بيانات الاعتماد المُدخلة تخص حساب TELUS Smart Home مختلفًا عن الحساب الذي تتم إعادة مصادقته/إعادة تكوينه. يُرجى إدخال بيانات اعتماد نفس الحساب، أو إزالة التكامل وإضافته مجددًا لتبديل الحساب."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "الإعدادات العامة",
+                "data": {
+                    "arm_code": "رمز الأمان (الأقفال والإنذار)",
+                    "update_interval": "فاصل التحديث",
+                    "ws_reconnect_timeout": "مهلة إعادة اتصال الويب سوكيت"
+                },
+                "data_description": {
+                    "arm_code": "يحدد الرمز المستخدم لتفعيل الإنذار وفتح الأقفال عبر Home Assistant. لإزالة الرمز، أدخل `CLEAR!`.",
+                    "update_interval": "يحدد المعدل الذي يتحقق به Home Assistant من تحديثات TELUS Smart Home. احذر! قد يؤدي التحديث المتكرر جدًا إلى قفل الحساب.",
+                    "ws_reconnect_timeout": "يحدد وقت الانتظار قبل محاولة إعادة اتصال الويب سوكيت بعد انقطاع الاتصال."
+                }
+            },
+            "modes": {
+                "title": "ملفات تعريف وضع التفعيل",
+                "data": {
+                    "arm_home_options": "تفعيل وضع المنزل",
+                    "arm_away_options": "تفعيل وضع الغياب",
+                    "arm_night_options": "تفعيل وضع الليل"
+                },
+                "description": "حدد سلوك التفعيل لكل وضع.",
+                "data_description": {
+                    "arm_night_options": "قد لا يكون وضع الليل متاحًا في جميع الأقسام."
+                }
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "تطبيق المصادقة",
+                "sms": "رسالة نصية",
+                "email": "البريد الإلكتروني"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "حالة المصادقة",
+                "state": {
+                    "ok": "جيد",
+                    "reauth_required": "مطلوب إعادة المصادقة",
+                    "telus_error": "خطأ في TELUS/Alarm.com"
+                }
+            }
+        },
+        "event": {
+            "video_event": {
+                "name": "النشاط الأخير",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "شخص",
+                            "vehicle": "مركبة",
+                            "animal": "حيوان",
+                            "other": "آخر"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
