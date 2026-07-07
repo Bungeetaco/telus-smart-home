@@ -1,0 +1,125 @@
+"""Const for the Alarmdotcom integration."""
+
+from __future__ import annotations
+
+import logging
+
+from homeassistant.const import Platform
+from pyalarmdotcomajax import const as libConst
+from pyalarmdotcomajax.devices.sensor import Sensor as libSensor
+
+INTEGRATION_NAME = "Alarm.com"
+DOMAIN = "telus_smarthome"
+ISSUE_URL = "https://github.com/pyalarmdotcom/alarmdotcom/issues"
+STARTUP_MESSAGE = f"""
+===================================================================
+{DOMAIN}
+This is a custom component
+If you have any issues with this you need to open an issue here:
+{ISSUE_URL}
+===================================================================
+"""
+
+STATE_MALFUNCTION = "Malfunction"
+
+DEBUG_REQ_EVENT = "telus_smarthome_debug_request"
+
+MIGRATE_MSG_ALERT = (
+    "The Alarm.com integration is now configured exclusively via Home Assistant's"
+    " integrations page. Please delete the Alarm.com entry from configuration.yaml."
+    " Your existing settings have already been migrated."
+)
+
+KEEP_ALIVE_INTERVAL_SECONDS = 60
+CONF_DEFAULT_UPDATE_INTERVAL_SECONDS = 900  # 15 minutes
+CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT = 300  # 5 minutes
+
+LOGGER = logging.getLogger(__package__)
+
+# #
+# CONFIGURATION
+# #
+
+# Configuration
+CONF_2FA_COOKIE = "2fa_cookie"
+CONF_OTP = "otp"
+CONF_OTP_METHOD = "otp_method"
+CONF_OTP_METHODS_LIST = "otp_methods_list"
+
+CONF_ARM_CODE = "arm_code"
+CONF_UPDATE_INTERVAL = "update_interval"
+CONF_WEBSOCKET_RECONNECT_TIMEOUT = "ws_reconnect_timeout"
+CONF_ARM_HOME = "arm_home_options"
+CONF_ARM_AWAY = "arm_away_options"
+CONF_ARM_NIGHT = "arm_night_options"
+
+
+CONF_FORCE_BYPASS = "force_bypass"
+CONF_SILENT_ARM = "silent_arming"
+CONF_NO_ENTRY_DELAY = "no_entry_delay"
+CONF_ARM_MODE_OPTIONS = {
+    CONF_FORCE_BYPASS: "Force Bypass",
+    CONF_SILENT_ARM: "Arm Silently",
+    CONF_NO_ENTRY_DELAY: "No Entry Delay",
+}
+
+CONF_OPTIONS_DEFAULT = {
+    CONF_ARM_CODE: "",
+    CONF_ARM_HOME: [],
+    CONF_ARM_AWAY: [],
+    CONF_ARM_NIGHT: [],
+    CONF_UPDATE_INTERVAL: CONF_DEFAULT_UPDATE_INTERVAL_SECONDS,
+    CONF_WEBSOCKET_RECONNECT_TIMEOUT: CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT,
+}
+
+SENSOR_SUBTYPE_BLACKLIST = [
+    libSensor.Subtype.MOBILE_PHONE,  # No purpose
+    libSensor.Subtype.PANEL_IMAGE_SENSOR,  # No support yet
+    libSensor.Subtype.FIXED_PANIC,  # Doesn't support state reporting
+]
+
+DATA_CONTROLLER = "connection"
+
+ATTRIB_BATTERY_NORMAL = "Normal"
+ATTRIB_BATTERY_LOW = "Low"
+ATTRIB_BATTERY_CRITICAL = "Critical"
+
+PLATFORMS = [
+    Platform.ALARM_CONTROL_PANEL,
+    Platform.BINARY_SENSOR,
+    Platform.LOCK,
+    Platform.COVER,
+    Platform.LIGHT,
+    Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SWITCH,
+    Platform.SELECT,
+    Platform.CLIMATE,
+    Platform.SENSOR,
+]
+
+# #
+# CAMERA BRIDGE CREDENTIAL SYNC
+#
+# The camera bridge (/opt/telus-cam-bridge/, a separate standalone Docker
+# container) holds its own independent copy of the TELUS username/password.
+# When credentials are changed here (reauth or reconfigure), we best-effort
+# push them to the bridge's local control endpoint, and unconditionally write
+# a fallback file the bridge also watches/loads at its own startup and on a
+# poll loop, so an update is never silently lost if the bridge happens to be
+# down when the push is attempted. See config_flow.py's
+# _async_sync_bridge_credentials / _sync_write_fallback_and_read_secret.
+# #
+
+# Shared directory: HA's existing `/share` mount (host:
+# /var/lib/homeassistant/share) is RW from this container. The bridge
+# container mounts the same host subdirectory at /shared. Neither container
+# needed a new supervisor-level mount to make this work on the HA side.
+CAMERA_BRIDGE_SHARE_DIR = "/share/telus_cam_bridge"
+
+# Both the HA container and the camera bridge container run with
+# `--network host`, so 127.0.0.1 here really is the host's loopback that the
+# bridge's control server (bound to 127.0.0.1:8199) is listening on.
+CAMERA_BRIDGE_CONTROL_URL = "http://127.0.0.1:8199/control/credentials"
+
+DEVICE_STATIC_ATTRIBUTES = [libConst.ATTR_STATE_TEXT, libConst.ATTR_MAC_ADDRESS]

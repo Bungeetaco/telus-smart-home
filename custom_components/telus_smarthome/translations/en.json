@@ -1,0 +1,98 @@
+{
+    "config": {
+        "abort": {
+            "must_enable_2fa": "Two-factor authentication must be enabled in order to log in with this provider.",
+            "reauth_successful": "Re-authentication was successful",
+            "reconfigure_successful": "Reconfiguration was successful"
+        },
+        "error": {
+            "cannot_connect": "Failed to connect",
+            "invalid_auth": "Invalid authentication",
+            "invalid_otp": "Invalid one-time password.",
+            "unknown": "Unexpected error",
+            "telus_sso_error": "The TELUS single sign-on flow returned something unexpected. This usually means TELUS changed something server-side — not a wrong password."
+        },
+        "step": {
+            "otp_submit": {
+                "data": {
+                    "otp": "One-Time Password"
+                },
+                "title": "Enter One-Time Password",
+                "description": "If you used the SMS or email authentication methods, an OTP has already been sent to your inbox."
+            },
+            "reauth_confirm": {
+                "description": "TELUS Smart Home needs to re-authenticate your account.",
+                "title": "Reauthenticate Integration"
+            },
+            "reconfigure": {
+                "data": {
+                    "username": "Username",
+                    "password": "Password"
+                },
+                "title": "Update TELUS Smart Home Credentials",
+                "description": "Enter your updated TELUS Smart Home username and password."
+            },
+            "user": {
+                "data": {
+                    "password": "Password",
+                    "username": "Username"
+                },
+                "title": "Log In to TELUS Smart Home"
+            },
+            "otp_select_method": {
+                "title": "Select Two Factor Authentication Method",
+                "data": { "otp_method": "Method" }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "arm_code": "Security Code (Locks & Alarm)",
+                    "update_interval": "Update Interval",
+                    "ws_reconnect_timeout": "Websocket Reconnect Timeout"
+                },
+                "data_description": {
+                    "arm_code": "Sets the code to use when arming the alarm and unlocking locks via Home Assistant. To remove the pin, enter `CLEAR!`.",
+                    "update_interval": "Sets the rate at which Home Assistant checks TELUS Smart Home for updates. Be careful! Updating too frequently may result in an account lockout.",
+                    "ws_reconnect_timeout": "Sets the time to wait before attempting to reconnect the websocket on disconnection."
+                },
+                "title": "General Settings"
+            },
+            "modes": {
+                "data": {
+                    "arm_away_options": "Arm Away",
+                    "arm_home_options": "Arm Home",
+                    "arm_night_options": "Arm Night"
+                },
+                "data_description": {
+                    "arm_night_options": "Arm Night may not be available on all partitions."
+                },
+                "description": "Set arming behavior for each arming mode.",
+                "title": "Arming Mode Profiles"
+            }
+        }
+    },
+    "selector": {
+        "otp_methods_list": {
+            "options": {
+                "app": "Authenticator App",
+                "sms": "Text Message",
+                "email": "Email"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "auth_health": {
+                "name": "Auth Health",
+                "state": {
+                    "ok": "OK",
+                    "reauth_required": "Reauthentication required",
+                    "telus_error": "TELUS/Alarm.com error"
+                }
+            }
+        }
+    }
+}
