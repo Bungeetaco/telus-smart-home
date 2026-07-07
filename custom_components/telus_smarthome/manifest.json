@@ -4,10 +4,10 @@
     "codeowners": ["@uvjustin", "@elahd"],
     "config_flow": true,
     "dependencies": [],
-    "documentation": "https://github.com/pyalarmdotcom/alarmdotcom",
+    "documentation": "https://github.com/Bungeetaco/telus-smart-home",
     "integration_type": "hub",
     "iot_class": "cloud_polling",
-    "issue_tracker": "https://github.com/pyalarmdotcom/alarmdotcom/issues",
+    "issue_tracker": "https://github.com/Bungeetaco/telus-smart-home/issues",
     "requirements": ["beautifulsoup4>=4.10.0", "pyalarmdotcomajax==0.5.13"],
-    "version": "3.0.14"
+    "version": "1.0.0"
 }

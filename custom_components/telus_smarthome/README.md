@@ -1,10 +1,14 @@
 # TELUS Smart Home (custom_components/telus_smarthome)
 
-**This is a permanent, hand-maintained local fork — not a HACS-managed
-integration, and not tracked upstream.** There is no automatic update path.
-Do not delete/replace this directory expecting a package manager to bring it
-back "clean" — any future changes need to be made directly to the files
-here, by hand, the same way this fork itself was built.
+**This is a permanent, hand-maintained fork — not tracked against the
+upstream `alarmdotcom` project it started from.** It's installable via HACS
+as a custom repository (see the top-level README's "Installing" section),
+which gives you a convenient install/update mechanism against *this* repo's
+own git tags, but there's no automatic sync with upstream `alarmdotcom` or
+any other package manager. Do not delete/replace this directory expecting
+some other tool to bring it back "clean" — any future changes need to be
+made directly to the files here (or in this project's own repo), the same
+way this fork itself was built.
 
 ## What this is
 
@@ -43,10 +47,11 @@ Alarm.com's normal login flow. The domain is `telus_smarthome`.
 
 ## Credential sync with the camera bridge
 
-There is a **separate**, independently-deployed Docker service at
-`/opt/telus-cam-bridge/` that streams camera video into Home Assistant via
-its own Janus/WebRTC bridge. It used to hold a completely independent copy
-of the TELUS username/password (from its own `.env` file), disconnected
+There is a **separate**, independently-deployed Docker service (the
+`camera-bridge/` directory in this same repo -- see its own README) that
+streams camera video into Home Assistant via its own Janus/WebRTC bridge. It
+used to hold a completely independent copy of the TELUS username/password
+(from its own `.env` file), disconnected
 from this integration's config entry — so changing your TELUS password here
 would silently break camera streaming until someone noticed and manually
 updated the bridge's `.env` and restarted it.

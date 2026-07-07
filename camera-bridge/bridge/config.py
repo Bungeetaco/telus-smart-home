@@ -11,7 +11,7 @@ try:
     TELUS_PASSWORD = os.environ["TELUS_PASSWORD"]
 except KeyError as e:
     sys.exit(f"telus-cam-bridge: required environment variable {e} not set "
-              f"(check /opt/telus-cam-bridge/.env)")
+              f"(check secrets.env in the camera-bridge directory)")
 # NOTE: these two names are intentionally mutable module attributes -- both
 # control_server.py (live credential push from HA's reconfigure flow) and
 # main.py's fallback-file watcher reassign them at runtime, and telus_auth.py

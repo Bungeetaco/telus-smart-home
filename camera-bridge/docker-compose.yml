@@ -1,0 +1,33 @@
+# Requires --network host (see README's "Network requirement" section) --
+# Janus/WebRTC negotiates a wide ephemeral UDP port range for RTP that doesn't
+# play well with Docker's default bridge networking + NAT, and the control
+# endpoint's loopback-only design depends on sharing the host's network
+# namespace with the Home Assistant container.
+#
+# HOST_SHARED_DIR (in .env) is the host-side path for the directory this
+# shares with Home Assistant's own container -- defaults to the Supervised
+# layout. See the top-level README's "Non-Supervised installs" note if that
+# path doesn't exist on your system.
+#
+# Credentials live in secrets.env, deliberately NOT named .env: Compose
+# auto-interpolates ${...}-looking references inside whichever file is
+# literally named .env (needed here so ${HOST_SHARED_DIR} below resolves),
+# and a password containing a "$" -- entirely plausible for anything
+# reasonably random -- gets silently mangled if it goes through that same
+# interpolation pass. secrets.env, as an explicitly-named (not
+# auto-interpolated) env_file, is passed to the container as literal
+# key=value pairs with no such processing. Verified live: a real password
+# with a "$" in it came through corrupted via .env and intact via
+# secrets.env -- this isn't a theoretical concern, keep these files separate.
+services:
+  telus-cam-bridge:
+    build: .
+    image: telus-cam-bridge:latest
+    container_name: telus-cam-bridge
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - secrets.env
+      - .env
+    volumes:
+      - ${HOST_SHARED_DIR:-/var/lib/homeassistant/share/telus_cam_bridge}:/shared

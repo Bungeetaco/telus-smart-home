@@ -5,12 +5,38 @@ Standalone Docker service that pulls live video from a TELUS Smart Home
 Assistant (or anything else) can consume the cameras as normal RTSP camera
 entities instead of needing WebRTC/Janus support itself.
 
-**This is a hand-built, one-off service for this household's setup. It is not
-an official TELUS/Alarm.com product, not a published/maintained package, and
-has no upstream to pull updates from.** A future reader (including a future
-instance of an AI assistant working on this box) should not treat it as
-disposable or "just reinstall it" -- there is no reference copy anywhere else.
-Treat this README and the comments in the source as the design doc.
+**This is not an official TELUS/Alarm.com product** -- it's a reverse-engineered
+personal project (see the top-level README) with no upstream to pull updates
+from. It's been made installable on a fresh box (see "Installing" below), but
+treat this README and the comments in the source as the design doc, not a
+maintained public package with support guarantees.
+
+## Network requirement -- read this first
+
+**This container, and your Home Assistant container, must both run with
+`--network host`.** Janus/WebRTC negotiates a wide ephemeral UDP port range
+for RTP that doesn't work through Docker's default bridge networking + NAT,
+and the credential-sync control endpoint (see below) is loopback-only by
+design, reachable from Home Assistant's container only because both share the
+host's network namespace. If your Home Assistant install doesn't use host
+networking (a default HA Container/Docker install typically uses bridge
+networking with port mapping instead), this won't work as-is -- `install.sh`
+checks for this up front and will tell you plainly rather than let you
+discover it halfway through.
+
+## Installing
+
+```bash
+cd telus-smart-home
+./install.sh
+```
+
+Walks through the network pre-flight check, credentials, the shared
+directory, and building/starting the container. See the top-level README for
+what it does step by step. To recreate manually instead: `cp .env.example
+.env`, `cp secrets.env.example secrets.env` (fill in real values -- **if your
+password contains a literal `$`, escape it as `$$`**, see the comment in
+secrets.env.example for why), then `sudo docker compose up -d --build`.
 
 ## Architecture
 
@@ -26,10 +52,8 @@ Treat this README and the comments in the source as the design doc.
   into an ffmpeg process that publishes them to MediaMTX over RTSP
   (`ffmpeg_sink.py`). `camera_session.py` owns the per-camera reconnect loop.
 - Runs as a single Docker container (`telus-cam-bridge`), `--network host`,
-  `--restart unless-stopped`. There is no docker-compose file or systemd unit
-  for it on this box -- it was started by hand with `docker run`; if you need
-  to recreate it, see the "Recreating the container" section below for the
-  full command.
+  `--restart unless-stopped`, managed via `docker-compose.yml` (see
+  "Installing" above and "Recreating the container" below).
 
 ## The 120s proactive session-rotation fix -- do not regress
 
@@ -165,33 +189,19 @@ never blocked on this bridge being reachable.
 
 ## Recreating the container
 
-There is no compose file or systemd unit for this on the box. To rebuild the
-image and recreate the container from scratch:
+The cloned repo directory itself is the deployment location -- there's no
+separate "install path" to keep in sync with the source, `docker-compose.yml`
+runs directly from here:
 
 ```bash
-cd /opt/telus-cam-bridge
-sudo docker build -t telus-cam-bridge:latest .
-sudo docker stop telus-cam-bridge && sudo docker rm telus-cam-bridge
-sudo mkdir -p /var/lib/homeassistant/share/telus_cam_bridge
-# The bridge process runs as a non-root UID 1500 inside the container (see
-# Dockerfile) -- Docker doesn't remap UIDs by default, so this bind-mounted
-# host directory must be owned by that same UID or the bridge can't read the
-# control secret or write the fallback credentials file. HA's own container
-# runs as root and is unaffected by this (root bypasses permission checks),
-# so only this side needs the chown.
-sudo chown -R 1500:1500 /var/lib/homeassistant/share/telus_cam_bridge
-sudo docker run -d \
-  --name telus-cam-bridge \
-  --network host \
-  --restart unless-stopped \
-  --env-file /opt/telus-cam-bridge/.env \
-  -v /var/lib/homeassistant/share/telus_cam_bridge:/shared \
-  telus-cam-bridge:latest
+cd camera-bridge   # inside your clone of the telus-smart-home repo
+sudo docker compose up -d --build
 ```
 
-`--network host` is required (Janus/WebRTC negotiates a wide ephemeral UDP
-port range for RTP that doesn't play well with Docker's default bridge
-networking + NAT). No port-publish flags are needed anywhere, including for
-the control endpoint -- `--network host` already puts the container's
-`127.0.0.1:8199` on the host's own loopback, which the HA container (also
-`--network host`) shares directly.
+`install.sh` at the repo root does this plus the one-time setup (shared
+directory, credentials) in one step -- see the top-level README.
+
+No port-publish flags are needed anywhere, including for the control
+endpoint -- `--network host` (set in `docker-compose.yml`) already puts the
+container's `127.0.0.1:8199` on the host's own loopback, which the HA
+container (also `--network host`) shares directly.

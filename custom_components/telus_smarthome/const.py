@@ -101,8 +101,9 @@ PLATFORMS = [
 # #
 # CAMERA BRIDGE CREDENTIAL SYNC
 #
-# The camera bridge (/opt/telus-cam-bridge/, a separate standalone Docker
-# container) holds its own independent copy of the TELUS username/password.
+# The camera bridge (camera-bridge/ in this project's repo, a separate
+# standalone Docker container -- see its own README) holds its own
+# independent copy of the TELUS username/password.
 # When credentials are changed here (reauth or reconfigure), we best-effort
 # push them to the bridge's local control endpoint, and unconditionally write
 # a fallback file the bridge also watches/loads at its own startup and on a

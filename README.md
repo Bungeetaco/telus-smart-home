@@ -13,6 +13,40 @@ captures of a real browser session (see comments in `telus_auth_patch.py` and
 `camera-bridge/bridge/janus_client.py` for the exact request/response shapes this was
 built against).
 
+## Network requirement -- read this first
+
+Both Home Assistant's own container and the camera bridge container **must run
+with `--network host`**. This is a hard requirement, not a suggestion --
+Janus/WebRTC's ephemeral RTP port range doesn't work through Docker's default
+bridge networking, and the credential-sync endpoint between the two
+components is loopback-only, reachable only because both share the host's
+network namespace. `install.sh` (below) checks this up front and stops with a
+clear message if it isn't true, rather than letting you find out halfway
+through setup. If your Home Assistant install doesn't use host networking
+(common on default HA Container/Docker setups, which typically use bridge
+networking with port mapping instead), the camera bridge component won't work
+as-is against that install.
+
+## Installing
+
+**Home Assistant integration** -- via HACS: open **HACS → ⋮ (top-right) →
+Custom repositories**, add this repo's URL with category **Integration**,
+then install "TELUS Smart Home" from HACS like any other integration.
+(Manual alternative: copy `custom_components/telus_smarthome/` into your HA
+config's `custom_components/` directory yourself.)
+
+**Camera bridge** -- clone this repo onto the same box as Home Assistant and run:
+
+```bash
+cd telus-smart-home
+./install.sh
+```
+
+This walks through the network pre-flight check, TELUS credentials, the
+shared directory Home Assistant and the bridge use to sync credentials, and
+building/starting the container. See [camera-bridge/README.md](camera-bridge/README.md)
+for what it's doing under the hood, or to run the steps by hand.
+
 ## Components
 
 ### `custom_components/telus_smarthome/`
@@ -48,5 +82,8 @@ exact contract.
 
 This is a personal, unofficial integration built by reverse-engineering a specific TELUS
 account's browser traffic. It is **not affiliated with or endorsed by TELUS or Alarm.com**,
-isn't tracked by HACS, and may break if either changes their web portal, SSO flow, or camera
-platform. Treat it as a reference/starting point, not a maintained public package.
+and may break if either changes their web portal, SSO flow, or camera platform. It's
+installable via HACS as a custom repository (see "Installing" above), but isn't in HACS's
+default store and has no update-notification/release process beyond git tags on this repo.
+Treat it as a reference/starting point, not a maintained public package with support
+guarantees.
