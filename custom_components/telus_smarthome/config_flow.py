@@ -463,8 +463,16 @@ class ADCOptionsFlowHandler(config_entries.OptionsFlow):  # type: ignore
     """Handle option configuration via Integrations page."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+        """Initialize options flow.
+
+        Deliberately does NOT set self.config_entry: recent HA core versions
+        made OptionsFlow.config_entry a read-only property, populated
+        automatically by the flow manager. Assigning to it here raises
+        AttributeError ("property ... has no setter") -- confirmed live, this
+        broke the options flow (gear icon) entirely until fixed. The
+        `config_entry` parameter itself is still used below/by the framework;
+        only the manual self-assignment was the problem.
+        """
         self.options = dict(config_entry.options)
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
