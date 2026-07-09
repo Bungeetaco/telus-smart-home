@@ -212,7 +212,20 @@ class TelusCamera(CoordinatorEntity[CameraBridgeCoordinator], Camera):
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
                     resp.raise_for_status()
-                    return await resp.read()
+                    data = await resp.read()
+                    # raise_for_status() only catches a non-2xx from the *bridge*; the
+                    # bridge itself forwards whatever TELUS's signed snapshot URL
+                    # returns with a hardcoded image/jpeg content-type (see
+                    # control_server.py's handle_snapshot) even if TELUS's own
+                    # response wasn't actually a valid JPEG (e.g. an HTML error page).
+                    # Without this check that garbage would be handed to HA core as
+                    # a "successful" camera image.
+                    if data[:2] == b"\xff\xd8":
+                        return data
+                    LOGGER.debug(
+                        "Snapshot response for %s wasn't a valid JPEG (%d bytes), "
+                        "falling back to a live stream frame", self._camera_id, len(data),
+                    )
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 LOGGER.debug(
                     "On-demand snapshot failed for %s, falling back to a live stream frame",

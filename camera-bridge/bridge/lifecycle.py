@@ -11,6 +11,7 @@ be tearing down when a new viewer triggers another activate()).
 """
 import asyncio
 import logging
+import time
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +21,28 @@ log = logging.getLogger(__name__)
 # a known-hangable call under certain ICE states) before giving up on it. Set
 # comfortably above sink.stop()'s own 5s ffmpeg-terminate timeout.
 DEACTIVATE_TIMEOUT_S = 10
+
+# Guards against a real, observed race: when a cold start doesn't produce a
+# publisher within mediamtx.yml's runOnDemandStartTimeout, MediaMTX tears that
+# attempt down (firing runOnUnDemand -> deactivate()) *and*, if a reader is
+# still waiting, immediately retries (firing a fresh runOnDemand -> activate()
+# again). Those two calls race, and since _tasks is keyed only by camera_id
+# with no per-cycle identity, whichever HTTP request reaches this server
+# second wins -- if that's the stale deactivate, it cancels the brand-new
+# task moments after activate() created it, before it ever gets to try
+# connecting. Confirmed live: repeated runOnDemandStartTimeout failures, 3+
+# minutes straight, entirely caused by this and not by anything actually
+# being slow.
+#
+# A *legitimate* idle-timeout deactivate can only be fired by MediaMTX after
+# a camera's current cycle has had zero readers for runOnDemandCloseAfter
+# (45s in mediamtx.yml) -- so it can never legitimately target a cycle that
+# started less than that long ago. Any deactivate arriving sooner must be
+# stale/misdirected from a previous cycle; ignoring it is therefore safe by
+# construction, not just a heuristic. Set comfortably below both
+# runOnDemandCloseAfter (45s) and runOnDemandStartTimeout (60s) so a genuine
+# retry-cascade's own later, legitimate deactivate still gets through.
+MIN_TASK_AGE_BEFORE_DEACTIVATE_S = 20
 
 
 class CameraLifecycleManager:
@@ -32,6 +55,7 @@ class CameraLifecycleManager:
         self._start_camera_fn = start_camera_fn
         self._tasks: dict[str, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._started_at: dict[str, float] = {}
 
     def _lock_for(self, camera_id: str) -> asyncio.Lock:
         return self._locks.setdefault(camera_id, asyncio.Lock())
@@ -44,12 +68,22 @@ class CameraLifecycleManager:
                 return  # already running -- idempotent no-op
             log.info("%s: activating camera pipeline (on-demand)", camera_id)
             self._tasks[camera_id] = asyncio.ensure_future(self._start_camera_fn(camera))
+            self._started_at[camera_id] = time.monotonic()
 
     async def deactivate(self, camera_id: str) -> None:
         async with self._lock_for(camera_id):
-            task = self._tasks.pop(camera_id, None)
+            task = self._tasks.get(camera_id)
             if task is None or task.done():
                 return  # already stopped -- idempotent no-op
+
+            age = time.monotonic() - self._started_at.get(camera_id, 0.0)
+            if age < MIN_TASK_AGE_BEFORE_DEACTIVATE_S:
+                log.warning("%s: ignoring deactivate for a pipeline only %.1fs old -- "
+                            "almost certainly a stale call racing a fresh activate, "
+                            "see MIN_TASK_AGE_BEFORE_DEACTIVATE_S", camera_id, age)
+                return
+
+            del self._tasks[camera_id]
             log.info("%s: deactivating camera pipeline (idle timeout)", camera_id)
             task.cancel()
             try:
