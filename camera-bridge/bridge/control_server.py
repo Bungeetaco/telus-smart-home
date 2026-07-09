@@ -78,6 +78,20 @@ Contract (as implemented -- this is what callers must match):
                                "trigger": ..., "timeframe": ...}, ...]}
       Video-related automation rules (recording schedules etc).
 
+    POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/activate
+    POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/deactivate
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Not meant for Home Assistant -- these exist purely for MediaMTX's own
+    runOnDemand/runOnUnDemand hooks (see mediamtx.yml, activate_camera.sh,
+    deactivate_camera.sh) to start/stop a camera's streaming pipeline on demand,
+    driven by MediaMTX's own reader-count tracking. <path_name> is the RTSP path
+    name MediaMTX passes via $MTX_PATH (config.rtsp_path_for(camera_id)), not the
+    camera_id itself -- MediaMTX only knows the path, not our camera ids.
+
+    Response: 200 {"status": "activating"} / {"status": "deactivating"}
+      404 {"error": "unknown_path"} if no known camera maps to that path name.
+
     POST http://127.0.0.1:<CONTROL_PORT>/control/automations/<rule_id>/pause
     POST http://127.0.0.1:<CONTROL_PORT>/control/automations/<rule_id>/resume
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -149,8 +163,14 @@ def _load_or_create_secret() -> str:
     return secret
 
 
-def create_app(telus_session, login_lock, camera_registry: dict) -> web.Application:
+def create_app(telus_session, login_lock, camera_registry: dict, lifecycle) -> web.Application:
     secret = _load_or_create_secret()
+
+    def _camera_for_path(path_name: str) -> dict | None:
+        return next(
+            (cam for cam in camera_registry.values() if c.rtsp_path_for(cam["id"]) == path_name),
+            None,
+        )
 
     def _check_auth(request: web.Request) -> web.Response | None:
         """Returns a 401 response if the request's Bearer token doesn't match,
@@ -236,6 +256,24 @@ def create_app(telus_session, login_lock, camera_registry: dict) -> web.Applicat
     async def handle_resume_rule(request: web.Request) -> web.Response:
         return await _handle_rule_action(request, resume_rule)
 
+    async def handle_activate_by_path(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+        camera = _camera_for_path(request.match_info["path_name"])
+        if camera is None:
+            return web.json_response({"error": "unknown_path"}, status=404)
+        await lifecycle.activate(camera)
+        return web.json_response({"status": "activating"})
+
+    async def handle_deactivate_by_path(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+        camera = _camera_for_path(request.match_info["path_name"])
+        if camera is None:
+            return web.json_response({"error": "unknown_path"}, status=404)
+        await lifecycle.deactivate(camera["id"])
+        return web.json_response({"status": "deactivating"})
+
     async def handle_credentials(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
             return err
@@ -272,11 +310,13 @@ def create_app(telus_session, login_lock, camera_registry: dict) -> web.Applicat
     app.router.add_get("/control/automations", handle_automations)
     app.router.add_post("/control/automations/{rule_id}/pause", handle_pause_rule)
     app.router.add_post("/control/automations/{rule_id}/resume", handle_resume_rule)
+    app.router.add_post("/control/cameras/by-path/{path_name}/activate", handle_activate_by_path)
+    app.router.add_post("/control/cameras/by-path/{path_name}/deactivate", handle_deactivate_by_path)
     return app
 
 
-async def start_control_server(telus_session, login_lock, camera_registry: dict) -> web.AppRunner:
-    runner = web.AppRunner(create_app(telus_session, login_lock, camera_registry))
+async def start_control_server(telus_session, login_lock, camera_registry: dict, lifecycle) -> web.AppRunner:
+    runner = web.AppRunner(create_app(telus_session, login_lock, camera_registry, lifecycle))
     await runner.setup()
     site = web.TCPSite(runner, c.CONTROL_HOST, c.CONTROL_PORT)
     await site.start()

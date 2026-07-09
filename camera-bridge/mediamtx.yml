@@ -9,3 +9,32 @@ metrics: no
 pprof: no
 paths:
   all_others:
+    # On-demand pipeline lifecycle: the bridge's Janus WebRTC session + software
+    # decode/encode pipeline (camera_session.run_camera_forever) previously ran
+    # continuously for every discovered camera, 24/7, regardless of whether anyone was
+    # actually looking -- by far the largest CPU cost in this container. HA only opens
+    # the upstream RTSP connection while a camera's live view is actually on-screen, so
+    # gating the pipeline on MediaMTX's own reader tracking (which it already does
+    # natively for exactly this use case) drops steady-state CPU to near zero the rest
+    # of the time. MediaMTX itself holds a connecting reader open/waiting until a
+    # publisher appears -- no race where a viewer's first request fails because nothing
+    # was running yet.
+    #
+    # Both hook commands are documented in bridge/activate_camera.sh /
+    # deactivate_camera.sh -- they don't publish anything themselves, they just tell the
+    # already-running bridge process (which owns the one shared TELUS session) to
+    # start/stop that specific camera's pipeline.
+    runOnDemand: /app/bridge/activate_camera.sh
+    runOnDemandRestart: no
+    # Our pipeline's realistic startup latency (TELUS video-source fetch + a full Janus
+    # WebRTC handshake, up to WEBRTCUP_TIMEOUT_S=20s in bridge/config.py, plus initial
+    # frame collection up to FIRST_FRAME_TIMEOUT_S=20s) comfortably exceeds MediaMTX's
+    # 10s default -- a reader would see a failed/timed-out connection on nearly every
+    # on-demand start otherwise. 35s covers the realistic worst case with margin.
+    runOnDemandStartTimeout: 35s
+    # How long to keep a pipeline running with zero readers before tearing it down --
+    # long enough that HA's normal viewer connect/reconnect churn (switching dashboard
+    # views, brief card re-renders) doesn't cause start/stop thrashing, short enough
+    # that "nobody's looking" still gets back to near-zero CPU within under a minute.
+    runOnDemandCloseAfter: 45s
+    runOnUnDemand: /app/bridge/deactivate_camera.sh
