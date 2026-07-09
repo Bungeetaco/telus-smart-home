@@ -19,6 +19,14 @@
 # key=value pairs with no such processing. Verified live: a real password
 # with a "$" in it came through corrupted via .env and intact via
 # secrets.env -- this isn't a theoretical concern, keep these files separate.
+#
+# /dev/dri passthrough + group_add is for hardware (QuickSync/VAAPI) video
+# encoding in ffmpeg_sink.py -- the render node (/dev/dri/renderD128) is
+# group-owned by "render" on the host, and this container runs as a
+# non-root "bridge" user (see Dockerfile), so group_add grants that user
+# access via GID rather than running privileged or as root. The GID below
+# must match `getent group render` on the actual host -- override via a
+# .env RENDER_GID if it differs from this project's dev/deploy hosts.
 services:
   telus-cam-bridge:
     build: .
@@ -29,5 +37,9 @@ services:
     env_file:
       - secrets.env
       - .env
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-992}"
     volumes:
       - ${HOST_SHARED_DIR:-/var/lib/homeassistant/share/telus_cam_bridge}:/shared

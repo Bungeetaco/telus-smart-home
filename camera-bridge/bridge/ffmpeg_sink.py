@@ -10,6 +10,13 @@ Load-bearing flags, found by empirical testing against this exact stack:
                     "No dts in N consecutive packets" in HA's stream_worker.
 Without both of these, the Generic Camera config flow's live "can we read the
 stream" verification step times out with no clue in the REST response as to why.
+
+Encoding is hardware-accelerated (VAAPI, via the host's Intel iGPU / QuickSync)
+rather than libx264 -- the container needs /dev/dri passed through (see
+docker-compose.yml) for this to work. `format=nv12,hwupload` converts the raw
+software frames this class receives into the hardware surface h264_vaapi requires;
+-g/-bf above are still respected by the hardware encoder and remain load-bearing
+for the same reason.
 """
 import asyncio
 import logging
@@ -34,11 +41,13 @@ class FfmpegSink:
         url = c.rtsp_publish_url(self.camera_id)
         args = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-vaapi_device", c.VAAPI_DEVICE,
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}",
             "-r", str(fps), "-use_wallclock_as_timestamps", "1",
             "-i", "pipe:0",
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-g", "30", "-bf", "0", "-pix_fmt", "yuv420p",
+            "-vf", "format=nv12,hwupload",
+            "-c:v", "h264_vaapi",
+            "-g", "30", "-bf", "0",
             "-f", "rtsp", "-rtsp_transport", "tcp", "-pkt_size", "1200", url,
         ]
         self.proc = await asyncio.create_subprocess_exec(

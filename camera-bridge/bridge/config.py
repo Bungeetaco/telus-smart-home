@@ -21,6 +21,12 @@ except KeyError as e:
 MEDIAMTX_RTSP_HOST = "127.0.0.1"
 MEDIAMTX_RTSP_PORT = int(os.environ.get("MEDIAMTX_RTSP_PORT", "8554"))
 
+# Render node ffmpeg_sink.py hands to ffmpeg's -vaapi_device for hardware (QuickSync)
+# H.264 encoding. Requires the host's /dev/dri to be passed through to this container
+# (see docker-compose.yml) -- overridable since render node numbering isn't guaranteed
+# stable across hosts/reboots if more than one GPU is present.
+VAAPI_DEVICE = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
+
 # Local control endpoint -- lets the Home Assistant integration's reconfigure
 # flow push updated TELUS credentials into this already-running process
 # without a container restart. Bound to loopback only; both this container and

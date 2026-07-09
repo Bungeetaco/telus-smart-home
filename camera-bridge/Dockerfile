@@ -3,6 +3,7 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg curl ca-certificates \
         libavdevice-dev libavfilter-dev libopus-dev libvpx-dev libsrtp2-dev pkg-config gcc \
+        intel-media-va-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # MediaMTX: single static binary, no runtime deps. Pin the version tested against this design.
@@ -20,6 +21,7 @@ COPY mediamtx.yml /app/mediamtx.yml
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 COPY bridge/ /app/bridge/
+RUN chmod +x /app/bridge/activate_camera.sh /app/bridge/deactivate_camera.sh
 
 # No component here needs root: MediaMTX's RTSP/RTP/RTCP ports (8554/8000/8001) and
 # the control endpoint (8199) are all >1024, and everything this process writes to
