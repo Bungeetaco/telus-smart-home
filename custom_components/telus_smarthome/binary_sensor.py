@@ -236,10 +236,10 @@ class AttributeBinarySensor(AttributeBaseDevice, BinarySensorEntity):  # type: i
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Return the state attributes of the entity."""
 
-        extra_attribs = {}.update(super().extra_state_attributes)
+        extra_attribs: dict[str, Any] = dict(super().extra_state_attributes or {})
 
-        if extra_attribs := self.entity_description.extra_attribs_fn(self):
-            extra_attribs.update(extra_attribs)
+        if description_attribs := self.entity_description.extra_attribs_fn(self):
+            extra_attribs.update(description_attribs)
 
         return extra_attribs
 

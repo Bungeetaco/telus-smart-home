@@ -188,8 +188,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             json.dumps(event_device.debug_data),
         )
 
-    # Listen for debug entity requests
-    hass.bus.async_listen(DEBUG_REQ_EVENT, handle_telus_smarthome_debug_request_event)
+    # Listen for debug entity requests. Wrapped in async_on_unload (same pattern as
+    # the EVENT_HOMEASSISTANT_STOP listener above) so a reload doesn't leave a stale
+    # duplicate listener registered against a controller whose session may already be
+    # closed -- unwrapped, every options-flow save/reauth/reconfigure added another.
+    config_entry.async_on_unload(
+        hass.bus.async_listen(DEBUG_REQ_EVENT, handle_telus_smarthome_debug_request_event)
+    )
 
     LOGGER.info("%s: Finished initializing Alarmdotcom from config entry.", __name__)
 
@@ -325,8 +330,11 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
 
     controller: AlarmIntegrationController = hass.data[DOMAIN].pop(config_entry.entry_id)[DATA_CONTROLLER]
 
-    controller.api.stop_websocket()
-    controller.stop_keep_alive()
+    # controller.stop() also closes the aiohttp ClientSession (close_websession()) --
+    # calling only stop_websocket()/stop_keep_alive() here previously skipped that,
+    # leaking one session (and its connector/sockets) per reload (every options-flow
+    # save, reauth, or reconfigure).
+    await controller.stop()
 
     unload_ok: bool = await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
     if unload_ok:
