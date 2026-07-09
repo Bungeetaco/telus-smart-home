@@ -26,12 +26,16 @@ paths:
     # start/stop that specific camera's pipeline.
     runOnDemand: /app/bridge/activate_camera.sh
     runOnDemandRestart: no
-    # Our pipeline's realistic startup latency (TELUS video-source fetch + a full Janus
-    # WebRTC handshake, up to WEBRTCUP_TIMEOUT_S=20s in bridge/config.py, plus initial
-    # frame collection up to FIRST_FRAME_TIMEOUT_S=20s) comfortably exceeds MediaMTX's
-    # 10s default -- a reader would see a failed/timed-out connection on nearly every
-    # on-demand start otherwise. 35s covers the realistic worst case with margin.
-    runOnDemandStartTimeout: 35s
+    # Our pipeline's realistic startup latency comfortably exceeds MediaMTX's 10s
+    # default -- a reader would see a failed/timed-out connection on nearly every
+    # on-demand start otherwise. The actual worst case per bridge/camera_session.py:
+    # connect_and_watch() is wrapped in asyncio.wait_for(..., WEBRTCUP_TIMEOUT_S+10=30s),
+    # and only *after* that completes does the separate first-frame collection loop run,
+    # up to FIRST_FRAME_TIMEOUT_S=20s -- these are sequential, not overlapping, so the
+    # real worst case is ~50s, not the ~40s the previous 35s value assumed (which could
+    # legitimately time out a slow-but-otherwise-fine camera start). 60s covers the
+    # actual worst case with margin.
+    runOnDemandStartTimeout: 60s
     # How long to keep a pipeline running with zero readers before tearing it down --
     # long enough that HA's normal viewer connect/reconnect churn (switching dashboard
     # views, brief card re-renders) doesn't cause start/stop thrashing, short enough

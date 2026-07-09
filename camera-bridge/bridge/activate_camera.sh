@@ -23,4 +23,15 @@ SECRET="$(cat "${SHARED_DIR:-/shared}/control_secret")"
 curl -s -X POST -H "Authorization: Bearer $SECRET" \
   "$CONTROL_URL/control/cameras/by-path/$MTX_PATH/activate" >/dev/null
 
-exec sh -c 'while true; do sleep 3600 & wait $!; done'
+# `exec` replaces this shell's process image with `sleep` itself, so the signal
+# MediaMTX sends to this PID on teardown (see runOnUnDemand) lands directly on
+# sleep -- which terminates immediately on SIGINT/SIGTERM by default. The
+# previous `sh -c 'while true; do sleep 3600 & wait $!; done'` backgrounded the
+# sleep as a *child*; a signal delivered to the parent shell (not the process
+# group) killed the shell but left the background sleep running as an orphan,
+# reparented to PID 1, for up to the remaining hour -- confirmed live via
+# `docker top` showing 17 stray `sleep 3600` processes after 11 hours of normal
+# dashboard use. GNU coreutils' `sleep infinity` (confirmed present in this
+# image's Debian trixie base) sleeps far longer than any realistic container
+# uptime, so there's no need for a loop at all.
+exec sleep infinity

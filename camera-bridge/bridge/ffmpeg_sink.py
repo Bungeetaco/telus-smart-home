@@ -17,6 +17,13 @@ docker-compose.yml) for this to work. `format=nv12,hwupload` converts the raw
 software frames this class receives into the hardware surface h264_vaapi requires;
 -g/-bf above are still respected by the hardware encoder and remain load-bearing
 for the same reason.
+
+If the VAAPI device is unavailable or broken (driver crash, device reset, a host
+without the passthrough at all), ffmpeg exits almost immediately after launch --
+`start()` detects that and falls back to software libx264 rather than leaving the
+camera dark. This is deliberately re-attempted on every start() call (i.e. every
+reconnect/rotation) rather than remembered as "permanently broken", so hardware
+encoding resumes automatically the moment the device comes back.
 """
 import asyncio
 import logging
@@ -24,6 +31,11 @@ import logging
 from . import config as c
 
 log = logging.getLogger(__name__)
+
+# How long to give a freshly-launched ffmpeg to prove it's actually alive before
+# trusting it -- a doomed VAAPI attempt (missing/broken device) exits almost
+# immediately; a working one is still running past this, quietly waiting on stdin.
+_STARTUP_GRACE_S = 0.75
 
 
 class FfmpegSink:
@@ -34,28 +46,61 @@ class FfmpegSink:
         self.proc: asyncio.subprocess.Process | None = None
         self._wh: tuple[int, int] | None = None
         self._stderr_task: asyncio.Task | None = None
+        self.hardware_encode: bool = False
 
     async def start(self, width: int, height: int, fps: int = 15):
         self._wh = (width, height)
         fps = max(1, min(int(round(fps)), 30))
         url = c.rtsp_publish_url(self.camera_id)
-        args = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
-            "-vaapi_device", c.VAAPI_DEVICE,
+        common_in = [
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}",
             "-r", str(fps), "-use_wallclock_as_timestamps", "1",
             "-i", "pipe:0",
-            "-vf", "format=nv12,hwupload",
-            "-c:v", "h264_vaapi",
+        ]
+        common_out = [
             "-g", "30", "-bf", "0",
             "-f", "rtsp", "-rtsp_transport", "tcp", "-pkt_size", "1200", url,
         ]
-        self.proc = await asyncio.create_subprocess_exec(
+        vaapi_args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-vaapi_device", c.VAAPI_DEVICE, *common_in,
+            "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", *common_out,
+        ]
+        software_args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in,
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", *common_out,
+        ]
+
+        if await self._try_start(vaapi_args):
+            self.hardware_encode = True
+        else:
+            log.warning("%s: h264_vaapi failed to start (device unavailable?), "
+                        "falling back to software libx264", self.camera_id)
+            if not await self._try_start(software_args):
+                raise RuntimeError("ffmpeg failed to start with both hardware and software encoders")
+            self.hardware_encode = False
+
+        log.info("%s: ffmpeg publishing %dx%d@%dfps to %s (%s)", self.camera_id, width, height, fps,
+                  url, "hw/vaapi" if self.hardware_encode else "sw/libx264")
+
+    async def _try_start(self, args: list[str]) -> bool:
+        proc = await asyncio.create_subprocess_exec(
             *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_STARTUP_GRACE_S)
+        except asyncio.TimeoutError:
+            pass  # still running past the grace period -- treat as a successful start
+        else:
+            stderr = (await proc.stderr.read()).decode(errors="replace")
+            log.warning("%s: ffmpeg exited immediately (code %s): %s",
+                        self.camera_id, proc.returncode, stderr.strip()[-500:])
+            return False
+
+        self.proc = proc
         self._stderr_task = asyncio.ensure_future(self._log_stderr())
-        log.info("%s: ffmpeg publishing %dx%d@%dfps to %s", self.camera_id, width, height, fps, url)
+        return True
 
     async def _log_stderr(self):
         try:

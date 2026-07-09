@@ -14,6 +14,13 @@ import logging
 
 log = logging.getLogger(__name__)
 
+# Backstop for deactivate() below: bounds how long we wait for a cancelled
+# pipeline's own cleanup (sink.stop()'s bounded ffmpeg terminate, then
+# session.close()'s aiortc pc.close(), which has no timeout of its own and is
+# a known-hangable call under certain ICE states) before giving up on it. Set
+# comfortably above sink.stop()'s own 5s ffmpeg-terminate timeout.
+DEACTIVATE_TIMEOUT_S = 10
+
 
 class CameraLifecycleManager:
     def __init__(self, start_camera_fn):
@@ -46,9 +53,17 @@ class CameraLifecycleManager:
             log.info("%s: deactivating camera pipeline (idle timeout)", camera_id)
             task.cancel()
             try:
-                await task
+                await asyncio.wait_for(task, timeout=DEACTIVATE_TIMEOUT_S)
             except asyncio.CancelledError:
                 pass
+            except asyncio.TimeoutError:
+                # task is still cancelled again by wait_for on timeout, but its cleanup
+                # (most likely aiortc's pc.close()) is wedged and won't be waited on any
+                # further -- log loudly and move on rather than holding this camera's
+                # lock (and therefore every future activate/deactivate for it) forever.
+                log.error("%s: pipeline did not finish shutting down within %ss after "
+                          "cancel -- abandoning it, may leak resources", camera_id,
+                          DEACTIVATE_TIMEOUT_S)
             except Exception:
                 # run_camera_forever has its own internal retry loop and normally never
                 # raises on its own -- this is a backstop, same reasoning as main.py's
