@@ -82,6 +82,18 @@ def _sync_write_fallback_and_read_secret(payload: dict) -> str | None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, json.dumps(payload).encode())
+            # 0o600 alone isn't enough: this code runs as HA's user (root in
+            # the container) but the reader is the bridge's non-root user, so
+            # a root-owned file is unreadable there (observed live: the
+            # bridge's fallback watcher logging PermissionError every 30s).
+            # Match the share dir's owner -- the bridge creates and owns that
+            # dir. Best-effort: on a non-root HA install chown may be denied,
+            # which just preserves today's behavior.
+            try:
+                st = os.stat(share_dir)
+                os.fchown(fd, st.st_uid, st.st_gid)
+            except OSError:
+                pass
         finally:
             os.close(fd)
         os.replace(tmp, share_dir / "credentials.json")

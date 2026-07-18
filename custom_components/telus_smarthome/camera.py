@@ -195,6 +195,17 @@ class TelusCamera(CoordinatorEntity[CameraBridgeCoordinator], Camera):
         importing a private module-level function from HA core is asking
         for a silent breakage on some future core update.
         """
+        # A warm stream serves a frame instantly, and is the overwhelmingly
+        # common case here: streams stay up 24/7 via preload_stream plus the
+        # bridge's persistent RTSP publisher. Without wait_for_next_keyframe
+        # this returns the last cached keyframe immediately (or None on a
+        # cold stream) -- and its internal start() call also kicks a stopped
+        # stream awake, which the final fallback below then benefits from.
+        if self.stream:
+            image = await self.stream.async_get_image(width=width, height=height)
+            if image:
+                return image
+
         secret = await self.hass.async_add_executor_job(read_control_secret)
         if secret is not None:
             session = async_get_clientsession(self.hass)
@@ -202,14 +213,17 @@ class TelusCamera(CoordinatorEntity[CameraBridgeCoordinator], Camera):
                 async with session.get(
                     CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE.format(camera_id=self._camera_id),
                     headers={"Authorization": f"Bearer {secret}"},
-                    # Observed live: TELUS's own snapshot latency varies a lot
-                    # by camera (Doorbell ~0.3s, Living Room ~6s, occasionally
-                    # more) -- 10s was too tight and caused spurious
-                    # fallbacks. 20s matches this codebase's existing
-                    # convention for "TELUS can be slow to first respond"
-                    # (see FIRST_FRAME_TIMEOUT_S/WEBRTCUP_TIMEOUT_S in
-                    # camera-bridge/bridge/config.py).
-                    timeout=aiohttp.ClientTimeout(total=20),
+                    # HA core's camera_proxy / async_get_image bounds this
+                    # ENTIRE method at 10s -- the old 20s budget here meant
+                    # that when TELUS was slow the proxy 500'd before any
+                    # fallback could run (observed live 2026-07-18: TELUS
+                    # snapshot latency degraded to 12-16s and every dashboard
+                    # thumbnail broke, showing alt text instead). Reaching
+                    # this code at all means the warm-stream path above came
+                    # up empty, so give TELUS most of the remaining budget
+                    # (normal latency is 0.3-6s by camera) while still
+                    # leaving the keyframe-wait fallback a chance.
+                    timeout=aiohttp.ClientTimeout(total=8),
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.read()
@@ -235,5 +249,11 @@ class TelusCamera(CoordinatorEntity[CameraBridgeCoordinator], Camera):
         if not self.stream and CameraEntityFeature.STREAM in self.supported_features:
             self.stream = await self.async_create_stream()
         if self.stream:
-            return await self.stream.async_get_image(width=width, height=height)
+            # wait_for_next_keyframe: on a cold-started stream the converter
+            # has no cached keyframe and would otherwise return None
+            # immediately; the stream was already kicked awake above, so a
+            # keyframe is typically 1-3s out (GOP 30 at 15-30fps).
+            return await self.stream.async_get_image(
+                width=width, height=height, wait_for_next_keyframe=True
+            )
         return None

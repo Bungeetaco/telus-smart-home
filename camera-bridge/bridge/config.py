@@ -64,16 +64,21 @@ RECONNECT_BACKOFF_MAX_S = 30
 # a mismatch here (this used to be 900s) is exactly what caused the bridge to hang
 # forever once the server-side timeout won the race.
 #
-# Every rotation causes a brief (~5-8s, measured live) gap in the RTSP feed --
-# MediaMTX rejects a second concurrent publisher on the same path (confirmed:
-# https://github.com/bluenviron/mediamtx/discussions/2765), so a fully gapless
-# handoff isn't possible without a bigger dual-path rearchitecture. Given the
-# gap self-heals every time, the practical lever is rotation *frequency*, not
-# eliminating the gap -- so this sits close to the confirmed ~180s server limit
-# (15s margin, matching FRAME_SILENCE_TIMEOUT_S) rather than the much more
-# conservative 120s originally chosen, cutting how often the gap happens by
-# roughly a quarter.
+# A fully gapless publisher *handoff* isn't possible -- MediaMTX rejects a
+# second concurrent publisher on the same path (confirmed:
+# https://github.com/bluenviron/mediamtx/discussions/2765) -- so instead the
+# one publisher is kept alive across rotations and the gap is bridged by
+# repeating the last frame (see camera_session.py / FRAME_HOLD_MAX_S below).
+# This still sits close to the confirmed ~180s server limit (15s margin,
+# matching FRAME_SILENCE_TIMEOUT_S) to keep freeze-bridged gaps infrequent.
 SESSION_MAX_LIFETIME_S = 165
+# Upper bound on how long camera_session.py keeps repeating the last real frame
+# into the RTSP publish while a Janus session is rotated/reconnected, measured
+# from when the last real frame arrived. Rotation gaps are ~2-8s, so this only
+# ever expires when the camera is genuinely gone (e.g. the 2026-07-17 doorbell
+# outage) -- at which point the feed is allowed to go dark rather than keep
+# presenting a stale frozen image as live.
+FRAME_HOLD_MAX_S = 60
 # If no frame arrives for this long, treat the session as dead and reconnect --
 # this must fire well before SESSION_MAX_LIFETIME_S in the worst case (e.g. the
 # camera goes offline mid-session), and must be short enough that a live view
