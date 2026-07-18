@@ -3,8 +3,11 @@ publishes (RTSP ANNOUNCE, not listen -- ffmpeg's RTSP muxer cannot act as a serv
 into the bundled MediaMTX instance.
 
 Load-bearing flags, found by empirical testing against this exact stack:
-  -bf 0 -g 30       avoid B-frames / keep a short GOP so Home Assistant's PyAV-based
-                    stream worker never has to reorder frames without DTS info.
+  -bf 0 -g <fps>    avoid B-frames / keep a short (~1s) GOP so Home Assistant's
+                    PyAV-based stream worker never has to reorder frames without DTS
+                    info. GOP is tied to the actual measured fps (not a fixed frame
+                    count) so the keyframe interval is a consistent ~1s regardless of
+                    a given camera's frame rate.
   -pkt_size 1200    keep RTP payloads under MediaMTX's repacketization threshold --
                     letting MediaMTX repacketize strips DTS continuity and produces
                     "No dts in N consecutive packets" in HA's stream_worker.
@@ -16,7 +19,11 @@ rather than libx264 -- the container needs /dev/dri passed through (see
 docker-compose.yml) for this to work. `format=nv12,hwupload` converts the raw
 software frames this class receives into the hardware surface h264_vaapi requires;
 -g/-bf above are still respected by the hardware encoder and remain load-bearing
-for the same reason.
+for the same reason. -async_depth 1 (VAAPI-only, not a libx264 option) forces
+strictly sequential encoding rather than the encoder's default 2-frame pipeline --
+that parallelism trades latency for throughput across many concurrent streams
+sharing an encode session, which doesn't apply to this one-process-per-camera
+design.
 
 If the VAAPI device is unavailable or broken (driver crash, device reset, a host
 without the passthrough at all), ffmpeg exits almost immediately after launch --
@@ -47,10 +54,17 @@ class FfmpegSink:
         self._wh: tuple[int, int] | None = None
         self._stderr_task: asyncio.Task | None = None
         self.hardware_encode: bool = False
+        self.fps: int | None = None  # actual (clamped) fps in use -- see start()
 
     async def start(self, width: int, height: int, fps: int = 15):
         self._wh = (width, height)
         fps = max(1, min(int(round(fps)), 30))
+        # Exposed so callers can log/reason about the fps actually given to ffmpeg
+        # (for -r/-g) rather than whatever raw value they originally passed in --
+        # confirmed live 2026-07-18 that logging the pre-clamp value elsewhere
+        # (camera_session.py) made the doorbell's real 30fps look like "39fps" in
+        # logs, since a burst-artifact measurement can exceed this clamp.
+        self.fps = fps
         url = c.rtsp_publish_url(self.camera_id)
         common_in = [
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}",
@@ -58,13 +72,32 @@ class FfmpegSink:
             "-i", "pipe:0",
         ]
         common_out = [
-            "-g", "30", "-bf", "0",
+            # GOP was a fixed 30-frame count, so keyframe interval (and therefore the
+            # granularity HLS/WebRTC decoders can recover at) varied by camera --
+            # exactly 1s at the living room's 30fps but 2s at the doorbell's ~15fps.
+            # Tying it to the actual fps keeps a consistent ~1s keyframe interval
+            # regardless of camera frame rate, which also keeps clean alignment with
+            # HA's HLS segmenter (hardcoded 2.0s non-LL-HLS target, see
+            # TARGET_SEGMENT_DURATION_NON_LL_HLS in HA core's stream/const.py --
+            # not configurable without LL-HLS) instead of relying on the coincidence
+            # that both cameras' previous fixed-frame-count GOPs happened to divide
+            # evenly into 2.0s at their current measured fps.
+            "-g", str(fps), "-bf", "0",
             "-f", "rtsp", "-rtsp_transport", "tcp", "-pkt_size", "1200", url,
         ]
         vaapi_args = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
             "-vaapi_device", c.VAAPI_DEVICE, *common_in,
-            "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", *common_out,
+            "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+            # Default 2: lets the encoder have up to 2 frames in flight for pipeline
+            # parallelism, which mainly helps *throughput* across many concurrent
+            # streams sharing one encode session -- not our case (one process, one
+            # stream, real-time source rate well under this iGPU's capability even
+            # sequentially). For a single live stream that extra frame in flight is
+            # pure added latency with no throughput benefit, so force strictly
+            # sequential encoding instead.
+            "-async_depth", "1",
+            *common_out,
         ]
         software_args = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in,

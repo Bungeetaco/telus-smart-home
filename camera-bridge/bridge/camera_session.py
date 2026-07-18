@@ -102,13 +102,35 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                 # set, require the new measurement to land within 50% of it too, since
                 # a camera's real fps doesn't change between rotations -- a bad
                 # burst-artifact reading would otherwise silently overwrite a correct
-                # known_fps and mismatch ffmpeg's declared -r for every rotation after,
-                # skewing its GOP-length-in-frames (-g 30) assumption relative to actual
-                # wall-clock pacing.
+                # known_fps and mismatch ffmpeg's declared -r for every rotation after.
+                # ffmpeg_sink.py ties -g to this same fps value (~1s GOP by design), so
+                # a wrong reading still skews the real wall-clock keyframe interval
+                # relative to actual pacing, just less unpredictably than when -g was a
+                # fixed frame count independent of fps.
                 fps = known_fps or 15
                 if len(first_frames) >= 2:
-                    elapsed = first_frames[-1][0] - first_frames[0][0]
-                    measured = round((len(first_frames) - 1) / elapsed) if elapsed > 0 else None
+                    # Median inter-frame delta, not total-span/(count-1) -- the total-span
+                    # form takes its single worst-case hit from just the first and last
+                    # timestamps in the batch, so if EITHER happens to be a buffered/burst
+                    # frame (arriving back-to-back with near-zero gap) the whole estimate is
+                    # contaminated even though most of the other 8+ frames arrived at the
+                    # camera's real pace. Confirmed live 2026-07-18: this was still producing
+                    # a bogus-but-1-60-plausible ~30-39fps reading for the doorbell's real
+                    # ~15fps on ordinary (non-crash-loop) cold starts, which then got locked in
+                    # by the known_fps tolerance check below for the rest of that process's
+                    # lifetime -- there was no history yet to compare the bad *first* reading
+                    # against. The median of all consecutive deltas only gets fooled if a
+                    # MAJORITY of the batch is burst-contaminated, not just one endpoint.
+                    deltas = sorted(
+                        first_frames[i][0] - first_frames[i - 1][0]
+                        for i in range(1, len(first_frames))
+                    )
+                    mid = len(deltas) // 2
+                    median_delta = (
+                        deltas[mid] if len(deltas) % 2
+                        else (deltas[mid - 1] + deltas[mid]) / 2
+                    )
+                    measured = round(1 / median_delta) if median_delta > 0 else None
                     plausible = (
                         measured is not None and 1 <= measured <= 60
                         and (known_fps is None or 0.5 * known_fps <= measured <= 1.5 * known_fps)
@@ -143,7 +165,10 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                     if not await sink.write_frame(frame):
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
                 backoff = c.RECONNECT_BACKOFF_INITIAL_S  # reset after any successful frame batch
-                log.info("%s: streaming %dx%d@%dfps", camera["id"], w, h, fps)
+                # sink.fps (not the local fps var) so this always reflects what's
+                # actually driving the encoder's -r/-g, not a pre-clamp/burst-noisy
+                # measurement -- see FfmpegSink.start()'s own comment.
+                log.info("%s: streaming %dx%d@%dfps", camera["id"], w, h, sink.fps)
 
                 # Alarm.com's own mountpoint timeout (see janus_client.py's "timeout_seconds":
                 # 180 in the create body) actually kills the stream server-side at ~180s --
