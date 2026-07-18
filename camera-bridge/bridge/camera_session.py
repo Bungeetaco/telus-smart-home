@@ -180,6 +180,21 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                 log.exception("%s: camera session failed, reconnecting in %ss",
                               camera["id"], backoff)
                 _start_hold()
+                # Close the dead/dying session BEFORE the backoff sleep, not after --
+                # the outer `finally` below runs only once this except block finishes,
+                # i.e. after the sleep. Left running, the old JanusCameraSession's
+                # _pump_track keeps decoding and enqueueing real RTP frames that
+                # nothing is draining anymore (the main loop that called frames() just
+                # exited) for the *entire* backoff duration -- confirmed live
+                # 2026-07-18: exactly this caused 300+ frames to be silently dropped
+                # in a single ~15s backoff window once the new drop-counter logging
+                # (janus_client.py) made it visible. Wasteful (decoding work nobody
+                # wants) and, before that logging existed, indistinguishable from a
+                # real streaming problem when it was actually just an orphaned session
+                # nobody had told to stop yet.
+                if session:
+                    await session.close()
+                    session = None
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, c.RECONNECT_BACKOFF_MAX_S)
             else:
