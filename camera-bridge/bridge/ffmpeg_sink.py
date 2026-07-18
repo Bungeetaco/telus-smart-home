@@ -114,7 +114,17 @@ class FfmpegSink:
 
     async def write_frame(self, frame) -> bool:
         """Returns False if the pipe is broken (caller should restart the sink)."""
-        data = frame.to_ndarray(format="yuv420p").tobytes()
+        # to_ndarray()/tobytes() is a real synchronous CPU cost -- a full pixel-format
+        # copy of the whole frame (e.g. ~3.1MB for this codebase's 1440x1440 doorbell
+        # camera) done in pure Python/numpy, not I/O. Running it inline on the event
+        # loop stalls every other task scheduled on it for that duration: the OTHER
+        # camera's frame pump, Janus keepalives/WebRTC signaling, the control HTTP
+        # server -- for both cameras running this every frame, continuously, since the
+        # 2026-07-18 always-on change. run_in_executor moves the copy to a thread so
+        # the loop stays responsive; only the actual pipe write/drain (already
+        # non-blocking/async) still happens on the loop.
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(None, lambda: frame.to_ndarray(format="yuv420p").tobytes())
         try:
             self.proc.stdin.write(data)
             await self.proc.stdin.drain()

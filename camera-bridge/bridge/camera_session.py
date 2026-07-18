@@ -95,15 +95,25 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                 w, h = first_frames[0][1].width, first_frames[0][1].height
                 # On a rotation, buffered frames can arrive in a near-instant burst,
                 # making elapsed-time-based fps math produce nonsense (observed: 544fps,
-                # 215fps for real 15fps/30fps cameras). Only trust a fresh measurement
-                # that falls in a plausible camera fps range; otherwise reuse whatever we
-                # already learned for this camera, since its real fps doesn't change
-                # between rotations.
+                # 215fps for real 15fps/30fps cameras -- and, less obviously, plausible-
+                # looking but still-wrong values like 38-49fps for a real 15fps camera,
+                # seen live 2026-07-18 during a rapid activate/deactivate crash loop).
+                # A bare 1-60 range only catches the extreme cases; once known_fps is
+                # set, require the new measurement to land within 50% of it too, since
+                # a camera's real fps doesn't change between rotations -- a bad
+                # burst-artifact reading would otherwise silently overwrite a correct
+                # known_fps and mismatch ffmpeg's declared -r for every rotation after,
+                # skewing its GOP-length-in-frames (-g 30) assumption relative to actual
+                # wall-clock pacing.
                 fps = known_fps or 15
                 if len(first_frames) >= 2:
                     elapsed = first_frames[-1][0] - first_frames[0][0]
                     measured = round((len(first_frames) - 1) / elapsed) if elapsed > 0 else None
-                    if measured is not None and 1 <= measured <= 60:
+                    plausible = (
+                        measured is not None and 1 <= measured <= 60
+                        and (known_fps is None or 0.5 * known_fps <= measured <= 1.5 * known_fps)
+                    )
+                    if plausible:
                         fps = measured
                     elif known_fps is None:
                         log.warning("%s: implausible fps measurement %s, defaulting to %s",

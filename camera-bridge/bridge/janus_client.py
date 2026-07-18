@@ -33,6 +33,7 @@ class JanusCameraSession:
         self._pending_candidates: list[dict] = []
         self._webrtcup = asyncio.Event()
         self._track_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+        self._dropped_frames = 0
         # Set on any sign this session has died (track ended, ICE/connection failed,
         # websocket closed) so frames() can stop blocking forever instead of hanging.
         self._dead = asyncio.Event()
@@ -249,7 +250,18 @@ class JanusCameraSession:
                 self._track_queue.put_nowait(frame)
             except asyncio.QueueFull:
                 # Drop the oldest queued frame rather than blocking the decoder --
-                # a live view cares about latency, not completeness.
+                # a live view cares about latency, not completeness. This previously
+                # had zero observability -- if the consumer (camera_session.py's
+                # sink.write_frame, one queue.get() per frame) ever falls behind
+                # (e.g. ffmpeg/VAAPI encode contention), frames vanish here with no
+                # trace, which is exactly what a "dropped frames" complaint would look
+                # like from the outside. Logging (throttled, since a real backlog can
+                # drop many frames a second) at least makes it visible.
+                self._dropped_frames += 1
+                if self._dropped_frames == 1 or self._dropped_frames % 150 == 0:
+                    log.warning("%s: dropped %d frame(s) so far -- consumer falling "
+                                "behind (queue maxsize=%d)", self.camera["id"],
+                                self._dropped_frames, self._track_queue.maxsize)
                 with contextlib.suppress(asyncio.QueueEmpty):
                     self._track_queue.get_nowait()
                 self._track_queue.put_nowait(frame)

@@ -40,6 +40,15 @@ from pyalarmdotcomajax.exceptions import (
     UnexpectedResponse,
 )
 
+def _is_transient_login_status(status: int) -> bool:
+    """True for TELUS login-gateway statuses that mean "try again later", never
+    "bad credentials" -- 429 is the one actually observed live (hit repeatedly
+    during a day of frequent bridge/HA restarts), 5xx included on the same
+    reasoning since a server-side failure can't mean the password was wrong
+    either. Anything else (400/401/403/etc) keeps the original
+    AuthenticationFailed treatment."""
+    return status == 429 or status >= 500
+
 log = logging.getLogger(__name__)
 
 TELUS_BASE = "https://smarthome-security.telus.com/"
@@ -104,6 +113,18 @@ async def _telus_async_login(self: AlarmController) -> None:
             headers=_BROWSER_HEADERS,
         ) as resp:
             if resp.status != 200:
+                if _is_transient_login_status(resp.status):
+                    # Previously always raised AuthenticationFailed here, which
+                    # __init__.py maps to ConfigEntryAuthFailed -- putting the config
+                    # entry into reauth/setup_error and demanding the user re-enter
+                    # credentials that were never actually wrong. UnexpectedResponse
+                    # instead maps to ConfigEntryNotReady, HA's normal
+                    # automatically-retried-with-backoff state. Confirmed live
+                    # 2026-07-18: this status hit repeatedly after a day of frequent
+                    # bridge/HA restarts, needing a manual wait-then-reload each time.
+                    log.warning("TELUS smarthome_login_v1 returned %s (transient) -- "
+                                "will retry, not a credentials problem", resp.status)
+                    raise UnexpectedResponse(f"TELUS login gateway returned {resp.status}")
                 log.error("TELUS smarthome_login_v1 failed with status %s", resp.status)
                 raise AuthenticationFailed("Invalid TELUS username or password.")
             body = await resp.text()

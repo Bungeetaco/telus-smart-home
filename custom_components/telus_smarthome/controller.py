@@ -232,22 +232,41 @@ class AlarmIntegrationController:
             self._ws_close_event.set()
 
     async def async_start_websocket_monitor(self) -> None:
-        """Start a websocket connection and monitor it for disconnection."""
+        """Start a websocket connection and monitor it for disconnection.
 
+        __init__.py runs this via a bare asyncio.create_task() with nothing awaiting
+        it, so any exception escaping this loop (a bug in start_websocket(), a bad
+        state callback, an unexpected exception type from the underlying library)
+        would otherwise kill real-time alarm/lock/sensor updates for the rest of
+        this HA session with nothing more visible than an easily-missed "Task
+        exception was never retrieved" warning -- the same silent-failure shape as
+        the camera-bridge's own pipeline, which already guards against it (see
+        camera_session.py/lifecycle.py's backstop comments). Catch, log loudly, and
+        keep retrying rather than going dark.
+        """
         ws_reconnect_timeout = self.config_entry.options.get(
             CONF_WEBSOCKET_RECONNECT_TIMEOUT, CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT
         )
 
         while True:
-            self._ws_close_event.clear()
-            self.api.start_websocket(self._ws_state_handler)
+            try:
+                self._ws_close_event.clear()
+                self.api.start_websocket(self._ws_state_handler)
 
-            await self._ws_close_event.wait()
+                await self._ws_close_event.wait()
 
-            if self._ws_state == WebSocketState.STOPPED:
-                break
+                if self._ws_state == WebSocketState.STOPPED:
+                    break
 
-            await asyncio.sleep(ws_reconnect_timeout)
+                await asyncio.sleep(ws_reconnect_timeout)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "Websocket monitor loop hit an unexpected error -- retrying in %ss "
+                    "rather than silently stopping real-time updates", ws_reconnect_timeout
+                )
+                await asyncio.sleep(ws_reconnect_timeout)
 
     @property
     def provider_name(self) -> str:
