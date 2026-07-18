@@ -105,18 +105,19 @@ def _camera_registry_entry(cam: dict) -> dict:
 async def discover_and_launch_cameras(
     telus: TelusSession,
     camera_registry: dict[str, dict],
+    lifecycle: CameraLifecycleManager,
 ) -> None:
     """Poll TELUS for the camera list forever, registering any camera not already
-    known. A camera newly added to the account is picked up within
-    CAMERA_DISCOVERY_INTERVAL_S, no restart needed. Deliberately never removes a
-    camera that stops appearing in a response -- TELUS's API being briefly flaky
-    shouldn't break an otherwise-working camera; one actually removed from the
-    account just becomes a registry entry nobody ever activates, which is harmless.
+    known and starting its pipeline immediately. A camera newly added to the account
+    is picked up (and streaming) within CAMERA_DISCOVERY_INTERVAL_S, no restart needed.
+    Deliberately never removes a camera that stops appearing in a response -- TELUS's
+    API being briefly flaky shouldn't break an otherwise-working camera; one actually
+    removed from the account just keeps its pipeline retrying harmlessly forever (same
+    as any other camera that goes offline -- see camera_session.py's own backoff loop).
 
-    Registration alone does NOT start that camera's streaming pipeline -- pipelines
-    are started/stopped on demand by CameraLifecycleManager, driven by MediaMTX's own
-    runOnDemand/runOnUnDemand hooks (see lifecycle.py, mediamtx.yml) the moment
-    someone actually tries to view the camera, not proactively here.
+    Cameras are started here (and once in main()'s initial pass) and never
+    deliberately stopped again -- see main()'s "always warm" comment for why this
+    replaced the old MediaMTX-runOnDemand-driven start/stop.
     """
     while True:
         try:
@@ -132,7 +133,9 @@ async def discover_and_launch_cameras(
             if cam_id in camera_registry:
                 continue
             log.info("Discovered new camera: %s (%s)", cam_id, cam["description"])
-            camera_registry[cam_id] = _camera_registry_entry(cam)
+            entry = _camera_registry_entry(cam)
+            camera_registry[cam_id] = entry
+            await lifecycle.activate(entry)
 
         await asyncio.sleep(c.CAMERA_DISCOVERY_INTERVAL_S)
 
@@ -181,11 +184,17 @@ async def main():
     async with TelusSession() as telus:
         await _login_with_retry(telus, login_lock)
 
-        # Owns actually starting/stopping each camera's pipeline (Janus WebRTC session
-        # + decode/encode), on demand -- see lifecycle.py. Cameras are registered here
-        # and via discover_and_launch_cameras below, but nothing streams until
-        # MediaMTX's runOnDemand hook (a viewer connecting) triggers activate() through
-        # the control server.
+        # Owns starting each camera's pipeline (Janus WebRTC session + decode/encode)
+        # -- see lifecycle.py. As of 2026-07-18, every registered camera is activated
+        # eagerly (below, and in discover_and_launch_cameras for later discoveries)
+        # and kept running indefinitely -- there's no more on-demand start driven by a
+        # MediaMTX reader connecting. This trades the old design's near-zero idle CPU
+        # for always-warm streams: HA (or a fresh MediaMTX/HA restart) never has to
+        # wait out a cold Janus/TELUS negotiation (worst case ~50s per camera) before
+        # video appears, since the pipeline is typically already flowing by the time
+        # anything asks for it. lifecycle.deactivate() still exists and stays safe to
+        # call (e.g. via the control server's by-path endpoint for manual ops), it's
+        # just no longer invoked automatically by anything.
         lifecycle = CameraLifecycleManager(
             lambda camera: run_camera_forever(
                 telus, camera,
@@ -207,10 +216,16 @@ async def main():
                             "on startup -- will keep polling every %ss in case one is added.",
                             c.CAMERA_DISCOVERY_INTERVAL_S)
             for cam in initial_cameras:
-                camera_registry[cam["id"]] = _camera_registry_entry(cam)
+                entry = _camera_registry_entry(cam)
+                camera_registry[cam["id"]] = entry
+                # Fire-and-forget in effect (activate() just kicks off a task and
+                # returns), so this loop doesn't serialize on Janus/TELUS negotiation
+                # for one camera before starting the next -- all cameras' cold starts
+                # happen concurrently, not one after another.
+                await lifecycle.activate(entry)
 
             discovery_task = asyncio.ensure_future(
-                discover_and_launch_cameras(telus, camera_registry))
+                discover_and_launch_cameras(telus, camera_registry, lifecycle))
             fallback_task = asyncio.ensure_future(
                 watch_credentials_fallback(telus, login_lock, last_seen_creds_ts))
 

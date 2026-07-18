@@ -21,7 +21,6 @@ COPY mediamtx.yml /app/mediamtx.yml
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 COPY bridge/ /app/bridge/
-RUN chmod +x /app/bridge/activate_camera.sh /app/bridge/deactivate_camera.sh
 
 # No component here needs root: MediaMTX's RTSP/RTP/RTCP ports (8554/8000/8001) and
 # the control endpoint (8199) are all >1024, and everything this process writes to

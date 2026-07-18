@@ -82,12 +82,15 @@ Contract (as implemented -- this is what callers must match):
     POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/deactivate
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
 
-    Not meant for Home Assistant -- these exist purely for MediaMTX's own
-    runOnDemand/runOnUnDemand hooks (see mediamtx.yml, activate_camera.sh,
-    deactivate_camera.sh) to start/stop a camera's streaming pipeline on demand,
-    driven by MediaMTX's own reader-count tracking. <path_name> is the RTSP path
-    name MediaMTX passes via $MTX_PATH (config.rtsp_path_for(camera_id)), not the
-    camera_id itself -- MediaMTX only knows the path, not our camera ids.
+    Not meant for Home Assistant, and not called by anything automatically as of
+    2026-07-18 -- every registered camera's pipeline is started eagerly by main.py
+    and left running indefinitely (see main.py's "always warm" comment), so there's
+    no more on-demand start/stop driven by MediaMTX reader counts. These endpoints
+    remain as a manual lever (e.g. force one camera's pipeline to restart without
+    touching the others, or without a full container restart). <path_name> is the
+    RTSP path name (config.rtsp_path_for(camera_id)), kept rather than switched to
+    camera_id since MediaMTX's $MTX_PATH is still what identifies a path elsewhere
+    in this codebase's conventions.
 
     Response: 200 {"status": "activating"} / {"status": "deactivating"}
       404 {"error": "unknown_path"} if no known camera maps to that path name.
