@@ -1,5 +1,13 @@
 rtsp: yes
 rtspAddress: 127.0.0.1:8554
+# The default 10s read timeout races bridge/config.py's FRAME_SILENCE_TIMEOUT_S
+# (15s): when Alarm.com's RTP silently stalls mid-session, ffmpeg has nothing to
+# send, and MediaMTX would kill the publisher connection at 10s -- destroying the
+# path (kicking every reader, HLS discontinuity in HA) BEFORE the bridge's own
+# silence watchdog could fire at 15s, reconnect, and bridge the gap with held
+# frames (observed live 2026-07-18 01:22:50, "i/o timeout"). 30s covers the 15s
+# detection plus a reconnect (~2-6s measured) with margin.
+readTimeout: 30s
 rtmp: no
 hls: no
 webrtc: no
