@@ -58,6 +58,15 @@ def rtsp_publish_url(camera_id: str) -> str:
 # Reconnect / hygiene
 RECONNECT_BACKOFF_INITIAL_S = 2
 RECONNECT_BACKOFF_MAX_S = 30
+# If a single camera's session fails this many times in a row with no
+# successful frame batch in between, camera_session.py gives up on in-process
+# retrying and hard-exits the whole bridge (os._exit) so Docker's
+# `restart: unless-stopped` policy brings up a fully clean process -- see the
+# comment at that call site for why. With the backoff sequence above
+# (2,4,8,16,30...), 5 consecutive failures is at least ~60s of continuous
+# failure before this fires, comfortably past what the backoff alone absorbs
+# for an ordinary transient blip.
+MAX_CONSECUTIVE_SESSION_FAILURES = 5
 # The mountpoint is created with "timeout_seconds": 180 (see janus_client.py) --
 # that's Alarm.com's own server-side kill timer, observed live to actually fire at
 # ~180s. Rotate comfortably before that so the RTSP feed never actually goes dark;

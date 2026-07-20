@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 
 from . import config as c
@@ -11,6 +12,8 @@ log = logging.getLogger(__name__)
 
 async def run_camera_forever(telus, camera: dict, get_video_source):
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
+    consecutive_failures = 0  # reset on any successful frame batch; see the
+    # os._exit() escape hatch in the except block below for why this exists.
     known_fps = None  # learned once, reused across rotations for this camera
 
     # The ffmpeg/RTSP publisher deliberately outlives individual Janus sessions.
@@ -165,6 +168,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                     if not await sink.write_frame(frame):
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
                 backoff = c.RECONNECT_BACKOFF_INITIAL_S  # reset after any successful frame batch
+                consecutive_failures = 0
                 # sink.fps (not the local fps var) so this always reflects what's
                 # actually driving the encoder's -r/-g, not a pre-clamp/burst-noisy
                 # measurement -- see FfmpegSink.start()'s own comment.
@@ -202,8 +206,40 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
 
             except Exception:
+                consecutive_failures += 1
                 log.exception("%s: camera session failed, reconnecting in %ss",
                               camera["id"], backoff)
+                if consecutive_failures >= c.MAX_CONSECUTIVE_SESSION_FAILURES:
+                    # This loop's own backoff already absorbs ordinary transient
+                    # failures (auth blips, brief camera dropouts, etc). Reaching
+                    # this many *consecutive* failures for one camera with no
+                    # successful frame batch in between means something below
+                    # this loop isn't being fully released between attempts --
+                    # lifecycle.py's deactivate() already documents aiortc's
+                    # pc.close() as "a known-hangable call under certain ICE
+                    # states" that can leak resources when abandoned, and this
+                    # loop's own session.close() calls (right below, and in the
+                    # finally) have no equivalent timeout guard. Observed live
+                    # 2026-07-20: 26+ consecutive "no frames received" failures
+                    # across both cameras that never self-cleared, needing a
+                    # manual `docker restart` -- retries kept cycling but never
+                    # succeeding, consistent with a leaked/wedged resource
+                    # rather than a transient/retryable one.
+                    #
+                    # os._exit() (not sys.exit/raise) is deliberate: a graceful
+                    # shutdown would run through the very cleanup path already
+                    # suspected of being wedged, which is exactly what we can't
+                    # rely on working here. Hard-exiting the whole process lets
+                    # the OS reclaim every fd/socket/child unconditionally, and
+                    # Docker's `restart: unless-stopped` policy (see main.py's
+                    # _login_with_retry comment for the same pattern) brings up
+                    # a fully clean process.
+                    log.critical(
+                        "%s: %d consecutive session failures with no successful "
+                        "frame in between -- likely a leaked/wedged resource that "
+                        "only a fresh process can clear; forcing container restart",
+                        camera["id"], consecutive_failures)
+                    os._exit(1)
                 _start_hold()
                 # Close the dead/dying session BEFORE the backoff sleep, not after --
                 # the outer `finally` below runs only once this except block finishes,
