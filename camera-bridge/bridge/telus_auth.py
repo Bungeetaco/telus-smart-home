@@ -13,6 +13,22 @@ from . import config as c
 
 log = logging.getLogger(__name__)
 
+
+class RateLimited(RuntimeError):
+    """Raised on HTTP 429 from the login POST -- confirmed live 2026-07-21
+    this is Cloudflare's own edge rate limiter on auth-gateway.telus.com
+    (error 1015, "Access denied ... used Cloudflare to restrict access"), NOT
+    a TELUS application-level account lockout. Cloudflare's response carries
+    its own Retry-After (observed: ~101s), which callers should sleep for
+    exactly -- a fixed short retry schedule (what main.py used before this
+    was added) just re-triggers the same window instead of clearing it,
+    which is what turned one bad night into a multi-hour outage."""
+
+    def __init__(self, retry_after_s: float):
+        self.retry_after_s = retry_after_s
+        super().__init__(f"rate limited by Cloudflare, Retry-After={retry_after_s}s")
+
+
 _BROWSER_HEADERS = {
     "Origin": "https://www.telus.com",
     "Referer": "https://www.telus.com/",
@@ -39,6 +55,20 @@ class TelusSession:
     async def __aexit__(self, *exc):
         await self._session.close()
 
+    @staticmethod
+    def _raise_if_rate_limited(resp: aiohttp.ClientResponse) -> None:
+        """Cloudflare fronts every auth-gateway.telus.com call in this flow, so
+        any of the three requests below can 429 with error 1015 -- checked
+        first, before each step's own status handling, so it's never
+        misreported as a generic step failure (or, for step 3, as a
+        possible-MFA landing-page mismatch)."""
+        if resp.status == 429:
+            try:
+                retry_after_s = float(resp.headers.get("Retry-After"))
+            except (TypeError, ValueError):
+                retry_after_s = 60.0
+            raise RateLimited(retry_after_s)
+
     async def login(self) -> None:
         """Idempotent -- clears cookies first, safe to call again to re-login."""
         self._session.cookie_jar.clear()
@@ -51,6 +81,7 @@ class TelusSession:
             json={"authdomain": "telus", "loginid": c.TELUS_EMAIL, "password": c.TELUS_PASSWORD},
             headers=_BROWSER_HEADERS,
         ) as resp:
+            self._raise_if_rate_limited(resp)
             if resp.status != 200:
                 raise RuntimeError(f"TELUS login step 1 failed: {resp.status}")
 
@@ -58,6 +89,7 @@ class TelusSession:
             f"{c.AUTH_GATEWAY}/v1/flows/login",
             params={"acr": "ci-loa2-smarthome"}, json={}, headers=_BROWSER_HEADERS,
         ) as resp:
+            self._raise_if_rate_limited(resp)
             if resp.status != 200:
                 raise RuntimeError(f"TELUS login step 2 failed: {resp.status}")
 
@@ -71,6 +103,7 @@ class TelusSession:
             },
             headers=_NAV_HEADERS, allow_redirects=True,
         ) as resp:
+            self._raise_if_rate_limited(resp)
             final_url = str(resp.url)
             if "DetermineLandingPage" not in final_url and "web/system" not in final_url:
                 raise RuntimeError(f"TELUS SSO handoff failed, landed on {final_url} "

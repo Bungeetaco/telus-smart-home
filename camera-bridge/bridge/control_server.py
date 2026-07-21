@@ -376,9 +376,11 @@ async def start_control_server(
     site = web.TCPSite(runner, c.CONTROL_HOST, c.CONTROL_PORT)
     await site.start()
     log.info("Control endpoint listening on %s:%d", c.CONTROL_HOST, c.CONTROL_PORT)
-    # Kept as an attribute on the runner (rather than a bare fire-and-forget
-    # ensure_future) so main.py can cancel it in its shutdown path, and so
-    # asyncio has a live reference to it for its full (month-plus) lifetime.
-    runner.secret_rotation_task = asyncio.ensure_future(
+    # Stashed in the app's own dict-style storage (confirmed live: web.AppRunner
+    # itself rejects arbitrary attribute assignment -- AttributeError, no
+    # __slots__ escape hatch) rather than a bare fire-and-forget ensure_future,
+    # so main.py can cancel it in its shutdown path and asyncio has a live
+    # reference to it for its full (month-plus) lifetime.
+    app["secret_rotation_task"] = asyncio.ensure_future(
         _rotate_secret_periodically(app["current_secret"]))
     return runner

@@ -7,7 +7,7 @@ import aiohttp
 
 from . import config as c
 from . import control_server
-from .telus_auth import TelusSession
+from .telus_auth import RateLimited, TelusSession
 from .telus_rest import list_cameras, get_video_source
 from .camera_session import run_camera_forever
 from .lifecycle import CameraLifecycleManager
@@ -18,6 +18,10 @@ log = logging.getLogger(__name__)
 
 INITIAL_LOGIN_RETRIES = 3
 INITIAL_LOGIN_BACKOFF_S = (2, 4, 8)
+# Cap on how long a single Retry-After-driven sleep is allowed to run, even if
+# Cloudflare's own header asks for longer -- keeps container startup bounded
+# rather than hanging on an arbitrarily large server-specified value.
+RATE_LIMIT_RETRY_CAP_S = 300
 
 
 async def get_video_source_with_relogin(telus: TelusSession, camera_id: str, login_lock: asyncio.Lock) -> dict:
@@ -47,13 +51,35 @@ async def _login_with_retry(telus: TelusSession, login_lock: asyncio.Lock) -> No
     `unless-stopped`, so if we just let a transient network blip raise straight
     out of main(), the container hot-loops restarts against TELUS's auth
     endpoint. A few bounded retries absorb any brief outage before we give up
-    and let the process (and container restart backoff) take over."""
+    and let the process (and container restart backoff) take over.
+
+    A RateLimited failure (Cloudflare error 1015 on auth-gateway.telus.com,
+    confirmed live 2026-07-21 -- see telus_auth.RateLimited) is handled
+    separately from any other failure: sleeps for the server's own
+    Retry-After instead of the fixed short schedule below. Discovered the
+    hard way the same night this was added -- the previous fixed 2s/4s
+    backoff, compounded by several back-to-back container restarts, kept
+    re-triggering Cloudflare's rate limit instead of ever clearing it, turning
+    one incident into a multi-hour outage. Respecting the server's own stated
+    wait time is what actually recovers instead of compounding it further.
+    """
     last_exc: Exception | None = None
     for attempt in range(1, INITIAL_LOGIN_RETRIES + 1):
         try:
             async with login_lock:
                 await telus.login()
             return
+        except RateLimited as exc:
+            last_exc = exc
+            delay = min(exc.retry_after_s, RATE_LIMIT_RETRY_CAP_S) + 2  # small margin past what Cloudflare asked for
+            if attempt < INITIAL_LOGIN_RETRIES:
+                log.warning("Initial TELUS login rate-limited by Cloudflare (attempt %d/%d): "
+                            "retrying in %.0fs (server-specified Retry-After, not the usual "
+                            "fixed backoff -- see RateLimited)", attempt, INITIAL_LOGIN_RETRIES, delay)
+                await asyncio.sleep(delay)
+            else:
+                log.error("Initial TELUS login still rate-limited by Cloudflare after %d attempts, "
+                          "giving up: %s", INITIAL_LOGIN_RETRIES, exc)
         except Exception as exc:
             last_exc = exc
             if attempt < INITIAL_LOGIN_RETRIES:
@@ -242,7 +268,7 @@ async def main():
             # unexpected exception from one itself (see its deactivate()).
             await asyncio.gather(discovery_task, fallback_task)
         finally:
-            control_runner.secret_rotation_task.cancel()
+            control_runner.app["secret_rotation_task"].cancel()
             await control_runner.cleanup()
 
 
