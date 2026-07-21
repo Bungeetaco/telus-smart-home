@@ -28,6 +28,14 @@ from .device_type_langs import LANG_DOOR, LANG_WINDOW
 
 LOGGER = logging.getLogger(__name__)
 
+# device_class (below) used to loop over each of these ~100-word lists calling
+# a separate re.search per word on every property access -- a hot path, since
+# HA reads device_class on every state update for every contact sensor.
+# Combining each list into one compiled alternation pattern turns that into a
+# single-pass search per list instead of up to ~200 individual match attempts.
+_LANG_DOOR_PATTERN = re.compile("|".join(re.escape(word) for _, word in LANG_DOOR), re.IGNORECASE)
+_LANG_WINDOW_PATTERN = re.compile("|".join(re.escape(word) for _, word in LANG_WINDOW), re.IGNORECASE)
+
 
 @dataclass
 class AlarmdotcomAttributeDescriptionMixin:
@@ -132,26 +140,11 @@ class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore
             libSensor.Subtype.CONTACT_SENSOR,
             libSensor.Subtype.CONTACT_SHOCK_SENSOR,
         ]:
-            for _, word in LANG_DOOR:
-                if (
-                    re.search(
-                        word,
-                        str(self._device.name),
-                        re.IGNORECASE,
-                    )
-                    is not None
-                ):
-                    derived_class = BinarySensorDeviceClass.DOOR
-            for _, word in LANG_WINDOW:
-                if (
-                    re.search(
-                        word,
-                        str(self._device.name),
-                        re.IGNORECASE,
-                    )
-                    is not None
-                ):
-                    derived_class = BinarySensorDeviceClass.WINDOW
+            name = str(self._device.name)
+            if _LANG_DOOR_PATTERN.search(name) is not None:
+                derived_class = BinarySensorDeviceClass.DOOR
+            if _LANG_WINDOW_PATTERN.search(name) is not None:
+                derived_class = BinarySensorDeviceClass.WINDOW
 
         if derived_class is not None and raw_subtype in [
             libSensor.Subtype.CONTACT_SENSOR,
