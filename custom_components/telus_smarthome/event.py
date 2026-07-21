@@ -241,7 +241,12 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Activity"
+    # None (not "Activity") -- has_entity_name=True + a set name combines with
+    # the device's own name ("Activity" below) to produce a redundant
+    # entity_id (event.activity_activity, confirmed live 2026-07-21). None
+    # here means the entity is named purely from the device, same pattern
+    # TelusCameraEvent below relies on for its own camera devices.
+    _attr_name = None
     _attr_translation_key = "activity_event"
     _attr_event_types = EVENT_TYPES
 
