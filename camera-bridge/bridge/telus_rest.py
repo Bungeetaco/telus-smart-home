@@ -61,6 +61,24 @@ async def get_snapshot_url(telus, camera_id: str) -> str:
     return attrs["url"]
 
 
+def _parse_video_event(item: dict) -> dict:
+    """Shared by list_video_events (paginated) and get_video_events_by_ids
+    (batch-by-id, used to enrich Activity-feed entries below) -- both hit the
+    same videoEvents endpoint and get back the identical item shape, just
+    filtered differently server-side."""
+    a = item["attributes"]
+    cam_rel = item.get("relationships", {}).get("camera", {}).get("data") or {}
+    return {
+        "id": item["id"],
+        "camera_id": cam_rel.get("id"),
+        "timestamp": a["timestamp"],
+        "description": a.get("description") or "",
+        "thumbnail_url": a.get("thumbnail"),
+        "download_url": a.get("downloadUrl"),
+        "clip_duration_ms": a.get("clipDurationMs"),
+    }
+
+
 async def list_video_events(telus, limit: int = 20) -> list[dict]:
     """Most recent video clip events across all cameras on the account, newest
     first. TELUS's videoEvents endpoint has no per-camera filter param --
@@ -75,19 +93,68 @@ async def list_video_events(telus, limit: int = 20) -> list[dict]:
     async with telus.session.get(url, params=params, headers=telus.api_headers) as resp:
         resp.raise_for_status()
         body = await resp.json()
+    return [_parse_video_event(item) for item in body.get("data", [])]
+
+
+async def get_video_events_by_ids(telus, ids: list[str]) -> dict[str, dict]:
+    """Batch-fetch specific video events by id -- confirmed live via HAR capture
+    2026-07-20 (GET videoEvents?ids[]=A&ids[]=B...), same endpoint
+    list_video_events pages through, just filtered by explicit id instead.
+    Keyed by id for O(1) lookup. Used by list_history_events to enrich
+    Activity-feed entries that correlate to a saved clip -- historyEvents
+    itself never carries thumbnail/download data (confirmed live:
+    attributes.thumbnailUrl is always null there), so this is the only way
+    to get it for those entries without an extra request per event.
+    """
+    if not ids:
+        return {}
+    url = f"{c.TELUS_BASE}web/api/video/videoEvents"
+    params = [("ids[]", str(vid)) for vid in ids]
+    async with telus.session.get(url, params=params, headers=telus.api_headers) as resp:
+        resp.raise_for_status()
+        body = await resp.json()
+    return {item["id"]: _parse_video_event(item) for item in body.get("data", [])}
+
+
+async def list_history_events(telus, limit: int = 20) -> list[dict]:
+    """Most recent entries from TELUS's system-wide Activity feed -- arm/disarm,
+    door/lock, camera triggers, doorbell presses, etc across the whole
+    account, newest first (confirmed live via HAR capture 2026-07-20; TELUS's
+    own ordering, not sorted here). Broader than list_video_events, which only
+    covers saved camera clips. Entries TELUS can correlate to a saved clip
+    (relationships.media) are enriched here with that clip's thumbnail/
+    download URL via one batched get_video_events_by_ids call for the whole
+    page, so callers get the same clickable-clip shape as list_video_events
+    for the subset of activity that's camera-related.
+    """
+    url = f"{c.TELUS_BASE}web/api/activity/historyEvents"
+    params = {"includeCommands": "false", "numberOfEvents": str(limit)}
+    async with telus.session.get(url, params=params, headers=telus.api_headers) as resp:
+        resp.raise_for_status()
+        body = await resp.json()
+    raw_events = body.get("data", [])
+
+    def _media_id(item: dict) -> str | None:
+        media = item.get("relationships", {}).get("media", {}).get("data") or []
+        return media[0]["id"] if media else None
+
+    video_ids = [vid for item in raw_events if (vid := _media_id(item))]
+    videos_by_id = await get_video_events_by_ids(telus, video_ids)
 
     events = []
-    for item in body.get("data", []):
+    for item in raw_events:
         a = item["attributes"]
-        cam_rel = item.get("relationships", {}).get("camera", {}).get("data") or {}
+        video = videos_by_id.get(_media_id(item))
         events.append({
             "id": item["id"],
-            "camera_id": cam_rel.get("id"),
-            "timestamp": a["timestamp"],
+            "timestamp": a.get("eventDate") or a.get("date"),
             "description": a.get("description") or "",
-            "thumbnail_url": a.get("thumbnail"),
-            "download_url": a.get("downloadUrl"),
-            "clip_duration_ms": a.get("clipDurationMs"),
+            "device_id": a.get("globalDeviceId"),
+            "device_description": a.get("deviceDescription"),
+            "event_type_name": a.get("eventTypeName"),
+            "thumbnail_url": video["thumbnail_url"] if video else None,
+            "download_url": video["download_url"] if video else None,
+            "clip_duration_ms": video["clip_duration_ms"] if video else None,
         })
     return events
 

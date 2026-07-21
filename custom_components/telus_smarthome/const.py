@@ -148,6 +148,11 @@ CAMERA_BRIDGE_EVENTS_URL = "http://127.0.0.1:8199/control/events"
 # for the response shape.
 CAMERA_BRIDGE_AUTOMATIONS_URL = "http://127.0.0.1:8199/control/automations"
 
+# System-wide Activity feed (arm/disarm, door/lock, camera triggers, etc) --
+# broader than CAMERA_BRIDGE_EVENTS_URL, which is camera clips only. See
+# camera-bridge/bridge/control_server.py for the response shape.
+CAMERA_BRIDGE_HISTORY_URL = "http://127.0.0.1:8199/control/history"
+
 # Pause/resume one rule -- {rule_id} is str.format()'d in. POST, empty body.
 CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/pause"
 CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/resume"

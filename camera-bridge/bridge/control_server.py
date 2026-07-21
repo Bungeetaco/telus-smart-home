@@ -91,6 +91,21 @@ Contract (as implemented -- this is what callers must match):
                                "trigger": ..., "timeframe": ...}, ...]}
       Video-related automation rules (recording schedules etc).
 
+    GET http://127.0.0.1:<CONTROL_PORT>/control/history?limit=<N>
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"events": [{"id": ..., "timestamp": ..., "description": ...,
+                                "device_id": ..., "device_description": ...,
+                                "event_type_name": ..., "thumbnail_url": ...,
+                                "download_url": ..., "clip_duration_ms": ...}, ...]}
+      TELUS's system-wide Activity feed -- arm/disarm, door/lock, camera
+      triggers, doorbell presses, etc, newest first. Broader than
+      /control/events (which is camera clips only): entries the bridge could
+      correlate to a saved clip carry the same thumbnail_url/download_url/
+      clip_duration_ms shape as /control/events, so callers can offer the
+      same "click to see the clip" behavior here too; entries with no
+      correlated clip have those three fields as null.
+
     POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/activate
     POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/deactivate
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -131,6 +146,7 @@ from . import config as c
 from .telus_rest import (
     get_snapshot_url,
     list_automation_rules,
+    list_history_events,
     list_video_events,
     pause_rule,
     resume_rule,
@@ -287,6 +303,23 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         return web.json_response({"rules": rules})
 
+    async def handle_history(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        try:
+            limit = int(request.query.get("limit", "20"))
+        except ValueError:
+            limit = 20
+
+        try:
+            events = await _fetch_with_relogin(telus_session, login_lock, list_history_events, limit)
+        except Exception:
+            log.exception("Control endpoint: activity history fetch failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response({"events": events})
+
     async def _handle_rule_action(request: web.Request, action_fn) -> web.Response:
         if (err := _check_auth(request)) is not None:
             return err
@@ -360,6 +393,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
     app.router.add_get("/control/events", handle_events)
     app.router.add_get("/control/automations", handle_automations)
+    app.router.add_get("/control/history", handle_history)
     app.router.add_post("/control/automations/{rule_id}/pause", handle_pause_rule)
     app.router.add_post("/control/automations/{rule_id}/resume", handle_resume_rule)
     app.router.add_post("/control/cameras/by-path/{path_name}/activate", handle_activate_by_path)

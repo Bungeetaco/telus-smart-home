@@ -33,6 +33,7 @@ from .bridge_client import bridge_get
 from .camera import CameraBridgeCoordinator
 from .const import (
     CAMERA_BRIDGE_EVENTS_URL,
+    CAMERA_BRIDGE_HISTORY_URL,
     DATA_CAMERA_COORDINATOR,
     DOMAIN,
     VIDEO_EVENTS_POLL_INTERVAL_SECONDS,
@@ -128,6 +129,13 @@ async def async_setup_entry(
     _add_new_camera_events()
     config_entry.async_on_unload(camera_coordinator.async_add_listener(_add_new_camera_events))
 
+    # System-wide Activity feed -- one entity for the whole account, unlike
+    # TelusCameraEvent above (per-camera, video clips only). See
+    # ActivityHistoryCoordinator/TelusActivityEvent below.
+    activity_coordinator = ActivityHistoryCoordinator(hass, config_entry)
+    await activity_coordinator.async_refresh()
+    async_add_entities([TelusActivityEvent(activity_coordinator, config_entry)])
+
 
 class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
     """Fires when a new video clip event (person/vehicle/animal/other
@@ -181,5 +189,107 @@ class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
                     "clip_duration_ms": event.get("clip_duration_ms"),
                 })
             self._last_seen_id = max(int(e["id"]) for e in new_events)
+
+        super()._handle_coordinator_update()
+
+
+class ActivityHistoryCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+    """Polls the camera-bridge's /control/history endpoint -- TELUS's
+    system-wide Activity feed (arm/disarm, door/lock, camera triggers,
+    doorbell presses, etc), not just camera clips (VideoEventsCoordinator
+    above is video-only). Newest first, matching the bridge's own ordering.
+    """
+
+    def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            LOGGER,
+            config_entry=config_entry,
+            name="TELUS activity history",
+            update_interval=timedelta(seconds=VIDEO_EVENTS_POLL_INTERVAL_SECONDS),
+        )
+
+    async def _async_update_data(self) -> list[dict[str, Any]]:
+        """Fetch the current activity feed from the bridge."""
+
+        try:
+            body = await bridge_get(self.hass, CAMERA_BRIDGE_HISTORY_URL, params={"limit": "20"})
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
+
+        if body is None:
+            # Bridge not up yet -- not fatal, see CameraBridgeCoordinator in
+            # camera.py for the identical reasoning.
+            return self.data or []
+
+        return body.get("events", [])
+
+
+class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEntity):
+    """Fires for every new entry in TELUS's system-wide Activity feed.
+
+    One entity for the whole account (unlike TelusCameraEvent, which is
+    per-camera and video-clip-only) -- this also covers non-video activity
+    (arm/disarm, door/lock) that TelusCameraEvent never sees. Entries the
+    bridge could correlate to a saved clip (camera triggers, doorbell
+    presses) carry the same thumbnail_url/download_url/clip_duration_ms
+    attributes as TelusCameraEvent, so a dashboard card can offer the same
+    "click to see the clip" behavior for both -- e.g. an "Person at door"
+    entry here links to the exact same clip a camera's own event entity
+    would show for it.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Activity"
+    _attr_translation_key = "activity_event"
+    _attr_event_types = EVENT_TYPES
+
+    def __init__(self, coordinator: ActivityHistoryCoordinator, config_entry: ConfigEntry) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+
+        self._attr_unique_id = f"{config_entry.entry_id}_activity"
+        # Not part of any existing camera/panel device -- this feed spans the
+        # whole system (arm/disarm included), so it gets its own small device
+        # rather than incorrectly attaching to one camera or the alarm panel.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_activity")},
+            name="Activity",
+            manufacturer="TELUS Smart Home",
+        )
+
+        # Baseline is "whatever's newest right now", same reasoning as
+        # TelusCameraEvent -- a restart must never replay old history as new.
+        # Activity-feed ids are opaque strings (e.g. "M-1693490562889"), not
+        # sortable integers like video event ids, so track by timestamp
+        # instead -- these are fixed-width ISO 8601 strings (with or without
+        # a fractional-seconds component, both confirmed live), which still
+        # compare correctly with plain string ">" up through whole seconds.
+        self._last_seen_timestamp: str | None = self._newest_timestamp()
+
+    def _newest_timestamp(self) -> str | None:
+        events = self.coordinator.data or []
+        return events[0]["timestamp"] if events else None
+
+    @core.callback
+    def _handle_coordinator_update(self) -> None:
+        """Fire for any event newer than the last one seen, oldest-first."""
+
+        events = self.coordinator.data or []
+        new_events = [
+            e for e in events
+            if self._last_seen_timestamp is None or e["timestamp"] > self._last_seen_timestamp
+        ]
+        if new_events:
+            for event in sorted(new_events, key=lambda e: e["timestamp"]):
+                self._trigger_event(_classify(event["description"]), {
+                    "description": event["description"],
+                    "device_description": event.get("device_description"),
+                    "thumbnail_url": event.get("thumbnail_url"),
+                    "download_url": event.get("download_url"),
+                    "clip_duration_ms": event.get("clip_duration_ms"),
+                })
+            self._last_seen_timestamp = max(e["timestamp"] for e in new_events)
 
         super()._handle_coordinator_update()
