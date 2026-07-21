@@ -182,7 +182,9 @@ guarantees. No license has been specified for this repository yet.
 
 - **No MFA/2FA support in the camera bridge.** Its TELUS login is username/password only — if
   TELUS ever enables MFA on this account, the bridge's login breaks independently of the HA
-  integration (which does support 2FA/OTP).
-- The camera bridge's control-endpoint secret has no automatic rotation (manual only — delete
-  `control_secret` and restart the container to regenerate). Fine for a single-operator local
-  deployment, not designed for anything more exposed than that.
+  integration (which does support 2FA/OTP). See `camera-bridge/README.md`'s own limitations
+  section for why this one specifically needs a real MFA-challenge HAR capture rather than
+  being implementable from the existing reverse-engineering notes alone.
+- The camera bridge's control-endpoint secret now rotates automatically (see
+  `camera-bridge/README.md`); manual rotation (delete `control_secret`, restart the container)
+  still works too.

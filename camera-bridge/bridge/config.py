@@ -27,6 +27,17 @@ MEDIAMTX_RTSP_PORT = int(os.environ.get("MEDIAMTX_RTSP_PORT", "8554"))
 # stable across hosts/reboots if more than one GPU is present.
 VAAPI_DEVICE = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
 
+# Which hardware path ffmpeg_sink.py tries before falling back to software
+# libx264: "vaapi" (Intel QuickSync or AMD, via /dev/dri -- this project's own
+# deployment, unchanged default) or "nvenc" (NVIDIA, via nvidia-container-toolkit
+# device injection -- see docker-compose.yml's commented-out NVIDIA section).
+# "software" skips the hardware attempt entirely. Deliberately not "auto" --
+# probing an unavailable backend still costs a real (if fast, ~0.75s) failed
+# subprocess launch every reconnect, and this project only has Intel hardware
+# to verify against; an explicit choice avoids silently trying (and failing)
+# a backend nobody asked for on hosts with no GPU at all.
+ENCODE_BACKEND = os.environ.get("ENCODE_BACKEND", "vaapi").lower()
+
 # Local control endpoint -- lets the Home Assistant integration's reconfigure
 # flow push updated TELUS credentials into this already-running process
 # without a container restart. Bound to loopback only; both this container and
@@ -45,6 +56,13 @@ SHARED_DIR = "/shared"
 CONTROL_SECRET_PATH = f"{SHARED_DIR}/control_secret"
 CREDENTIALS_FALLBACK_PATH = f"{SHARED_DIR}/credentials.json"
 CREDENTIALS_FALLBACK_POLL_S = 30
+# The control secret previously never rotated automatically (manual only --
+# delete the file and restart). HA always reads it fresh off disk per-request
+# (bridge_client.py has no in-memory caching on that side), so an in-place
+# atomic rewrite here is picked up on HA's very next poll with zero downtime --
+# no dual-secret grace period needed. 30 days is arbitrary but reasonable for
+# a single-operator local deployment with no external exposure.
+CONTROL_SECRET_ROTATE_INTERVAL_S = 30 * 24 * 60 * 60
 
 
 def rtsp_path_for(camera_id: str) -> str:
@@ -67,6 +85,12 @@ RECONNECT_BACKOFF_MAX_S = 30
 # failure before this fires, comfortably past what the backoff alone absorbs
 # for an ordinary transient blip.
 MAX_CONSECUTIVE_SESSION_FAILURES = 5
+# Bounds session.close()'s call into aiortc's pc.close(), which has no timeout
+# of its own and is documented (lifecycle.py) as hangable under certain ICE
+# states. Comfortably above what a clean close takes (sub-second, normally)
+# but short enough that a hung close still gets counted as a failure well
+# within the ~60s the escape hatch above needs to fire.
+SESSION_CLOSE_TIMEOUT_S = 5
 # The mountpoint is created with "timeout_seconds": 180 (see janus_client.py) --
 # that's Alarm.com's own server-side kill timer, observed live to actually fire at
 # ~180s. Rotate comfortably before that so the RTSP feed never actually goes dark;

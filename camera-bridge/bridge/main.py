@@ -180,6 +180,11 @@ async def main():
     last_seen_creds_ts = _load_fallback_credentials_if_present()
     login_lock = asyncio.Lock()
     camera_registry: dict[str, dict] = {}
+    # Live per-camera diagnostics (state, consecutive_failures, last_frame_at,
+    # fps, hardware_encode, last_error), kept current by run_camera_forever
+    # itself and exposed read-only via the control server's /control/status --
+    # see control_server.py's module docstring for the response shape.
+    camera_status: dict[str, dict] = {}
 
     async with TelusSession() as telus:
         await _login_with_retry(telus, login_lock)
@@ -198,10 +203,11 @@ async def main():
         lifecycle = CameraLifecycleManager(
             lambda camera: run_camera_forever(
                 telus, camera,
-                lambda t, cid: get_video_source_with_relogin(t, cid, login_lock)))
+                lambda t, cid: get_video_source_with_relogin(t, cid, login_lock),
+                camera_status))
 
         control_runner = await control_server.start_control_server(
-            telus, login_lock, camera_registry, lifecycle
+            telus, login_lock, camera_registry, camera_status, lifecycle
         )
         try:
             # First discovery pass runs synchronously so /control/cameras is
@@ -236,6 +242,7 @@ async def main():
             # unexpected exception from one itself (see its deactivate()).
             await asyncio.gather(discovery_task, fallback_task)
         finally:
+            control_runner.secret_rotation_task.cancel()
             await control_runner.cleanup()
 
 

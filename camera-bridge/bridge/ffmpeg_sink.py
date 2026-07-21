@@ -14,23 +14,38 @@ Load-bearing flags, found by empirical testing against this exact stack:
 Without both of these, the Generic Camera config flow's live "can we read the
 stream" verification step times out with no clue in the REST response as to why.
 
-Encoding is hardware-accelerated (VAAPI, via the host's Intel iGPU / QuickSync)
-rather than libx264 -- the container needs /dev/dri passed through (see
-docker-compose.yml) for this to work. `format=nv12,hwupload` converts the raw
-software frames this class receives into the hardware surface h264_vaapi requires;
--g/-bf above are still respected by the hardware encoder and remain load-bearing
-for the same reason. -async_depth 1 (VAAPI-only, not a libx264 option) forces
-strictly sequential encoding rather than the encoder's default 2-frame pipeline --
-that parallelism trades latency for throughput across many concurrent streams
-sharing an encode session, which doesn't apply to this one-process-per-camera
-design.
+Encoding is hardware-accelerated by default -- config.ENCODE_BACKEND selects
+which path:
 
-If the VAAPI device is unavailable or broken (driver crash, device reset, a host
-without the passthrough at all), ffmpeg exits almost immediately after launch --
-`start()` detects that and falls back to software libx264 rather than leaving the
-camera dark. This is deliberately re-attempted on every start() call (i.e. every
-reconnect/rotation) rather than remembered as "permanently broken", so hardware
-encoding resumes automatically the moment the device comes back.
+  "vaapi" (default, this project's own deployment): the host's Intel iGPU
+    (QuickSync) or an AMD GPU via Mesa, through /dev/dri -- the container
+    needs /dev/dri passed through (see docker-compose.yml). `format=nv12,
+    hwupload` converts the raw software frames this class receives into the
+    hardware surface h264_vaapi requires; -g/-bf above are still respected by
+    the hardware encoder and remain load-bearing for the same reason.
+    -async_depth 1 (VAAPI-only, not a libx264/NVENC option) forces strictly
+    sequential encoding rather than the encoder's default 2-frame pipeline --
+    that parallelism trades latency for throughput across many concurrent
+    streams sharing an encode session, which doesn't apply to this
+    one-process-per-camera design.
+
+  "nvenc": an NVIDIA GPU, via nvidia-container-toolkit device injection (see
+    docker-compose.yml's commented-out NVIDIA section) -- no /dev/dri
+    involved. Unlike VAAPI, ffmpeg's h264_nvenc accepts the raw yuv420p pipe
+    input directly (no explicit hwupload step needed). NOT verified against
+    real NVIDIA hardware by this project (Intel-only host) -- ffmpeg's own
+    encoder support was confirmed present (`ffmpeg -encoders`), but the full
+    pipeline hasn't been exercised live the way the VAAPI path has.
+
+  "software": skip the hardware attempt entirely and always use libx264.
+
+If the selected hardware backend is unavailable or broken (driver crash,
+device reset, no passthrough at all), ffmpeg exits almost immediately after
+launch -- `start()` detects that and falls back to software libx264 rather
+than leaving the camera dark. This is deliberately re-attempted on every
+start() call (i.e. every reconnect/rotation) rather than remembered as
+"permanently broken", so hardware encoding resumes automatically the moment
+the device comes back.
 """
 import asyncio
 import logging
@@ -99,22 +114,35 @@ class FfmpegSink:
             "-async_depth", "1",
             *common_out,
         ]
+        nvenc_args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in,
+            # p1/ll: NVENC's fastest preset + low-latency tuning, mirroring the
+            # same latency-over-throughput choice vaapi_args makes with
+            # -async_depth 1 and software_args makes with ultrafast/zerolatency.
+            "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll", *common_out,
+        ]
         software_args = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", *common_out,
         ]
 
-        if await self._try_start(vaapi_args):
-            self.hardware_encode = True
-        else:
-            log.warning("%s: h264_vaapi failed to start (device unavailable?), "
-                        "falling back to software libx264", self.camera_id)
+        if c.ENCODE_BACKEND == "software":
             if not await self._try_start(software_args):
-                raise RuntimeError("ffmpeg failed to start with both hardware and software encoders")
+                raise RuntimeError("ffmpeg failed to start with the software encoder")
             self.hardware_encode = False
+        else:
+            hw_args = nvenc_args if c.ENCODE_BACKEND == "nvenc" else vaapi_args
+            if await self._try_start(hw_args):
+                self.hardware_encode = True
+            else:
+                log.warning("%s: %s failed to start (device unavailable?), "
+                            "falling back to software libx264", self.camera_id, c.ENCODE_BACKEND)
+                if not await self._try_start(software_args):
+                    raise RuntimeError("ffmpeg failed to start with both hardware and software encoders")
+                self.hardware_encode = False
 
         log.info("%s: ffmpeg publishing %dx%d@%dfps to %s (%s)", self.camera_id, width, height, fps,
-                  url, "hw/vaapi" if self.hardware_encode else "sw/libx264")
+                  url, f"hw/{c.ENCODE_BACKEND}" if self.hardware_encode else "sw/libx264")
 
     async def _try_start(self, args: list[str]) -> bool:
         proc = await asyncio.create_subprocess_exec(

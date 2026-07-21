@@ -43,3 +43,33 @@ services:
       - "${RENDER_GID:-992}"
     volumes:
       - ${HOST_SHARED_DIR:-/var/lib/homeassistant/share/telus_cam_bridge}:/shared
+    # Measured live (2 cameras, always-warm): ~14-31% of one core, ~326MB RSS.
+    # These caps leave generous headroom above that without being unbounded --
+    # a runaway leak (see the FD/socket leak and wedged-session history in this
+    # project) gets capped and OOM-killed into a clean restart instead of being
+    # free to consume the whole host. Override via .env if a future host has
+    # tighter constraints or more cameras change the real working set.
+    mem_limit: ${BRIDGE_MEM_LIMIT:-768m}
+    cpus: ${BRIDGE_CPU_LIMIT:-2.0}
+    # No log rotation previously configured -- this container logs continuously
+    # (ffmpeg stderr passthrough, per-frame drop warnings, connection state
+    # changes for 2 always-on streams) and could grow the default json-file
+    # driver's log unbounded over the container's lifetime.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # NVIDIA GPU support (opt-in, off by default -- this project's own host is
+    # Intel-only and has not verified this section against real NVIDIA
+    # hardware). To use: install nvidia-container-toolkit on the host, set
+    # ENCODE_BACKEND=nvenc in .env (see config.py), remove the /dev/dri
+    # devices/group_add block above if this host has no Intel/AMD GPU at all,
+    # and uncomment below.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: ["gpu"]

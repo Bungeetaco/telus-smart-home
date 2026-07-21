@@ -1,9 +1,19 @@
 FROM python:3.12-slim
 
+# intel-media-va-driver / mesa-va-drivers are the userspace VAAPI drivers for
+# Intel (QuickSync) and AMD GPUs respectively -- both can be installed
+# unconditionally since they're keyed off the actual PCI device libva finds at
+# runtime, not a build-time choice; ffmpeg's own h264_vaapi/h264_nvenc
+# encoders are already compiled into Debian's ffmpeg package (confirmed via
+# `ffmpeg -encoders` inside this image), so NVIDIA support needs no extra
+# package here at all -- see ffmpeg_sink.py's ENCODE_BACKEND=nvenc path,
+# which relies on the NVIDIA driver's libs being injected at container
+# runtime by nvidia-container-toolkit (see docker-compose.yml's commented-out
+# NVIDIA section), not anything baked into this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg curl ca-certificates \
+        ffmpeg curl ca-certificates bash \
         libavdevice-dev libavfilter-dev libopus-dev libvpx-dev libsrtp2-dev pkg-config gcc \
-        intel-media-va-driver \
+        intel-media-va-driver mesa-va-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # MediaMTX: single static binary, no runtime deps. Pin the version tested against this design.

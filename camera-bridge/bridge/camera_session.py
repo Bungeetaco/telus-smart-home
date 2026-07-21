@@ -10,11 +10,41 @@ from .ffmpeg_sink import FfmpegSink
 log = logging.getLogger(__name__)
 
 
-async def run_camera_forever(telus, camera: dict, get_video_source):
+async def _close_with_timeout(session: JanusCameraSession, camera_id: str) -> None:
+    """session.close() calls aiortc's pc.close(), which lifecycle.py already
+    documents as "a known-hangable call under certain ICE states" with no
+    timeout of its own. Both call sites below used to await it unbounded --
+    if it actually hangs (rather than just failing-and-retrying, which is what
+    2026-07-20's MAX_CONSECUTIVE_SESSION_FAILURES escape hatch was built for),
+    the loop can never get back around to accumulate toward that failure
+    count, since it's stuck on this very await. Bounding it here means a hang
+    surfaces as one more counted failure instead of an unrecoverable wedge."""
+    try:
+        await asyncio.wait_for(session.close(), timeout=c.SESSION_CLOSE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        log.error("%s: session.close() did not finish within %ss -- abandoning it, "
+                  "may leak resources (counted as a failure so the consecutive-failure "
+                  "escape hatch above can still fire)", camera_id, c.SESSION_CLOSE_TIMEOUT_S)
+
+
+async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
     consecutive_failures = 0  # reset on any successful frame batch; see the
     # os._exit() escape hatch in the except block below for why this exists.
     known_fps = None  # learned once, reused across rotations for this camera
+
+    camera_id = camera["id"]
+    # Live diagnostics surfaced read-only via control_server.py's
+    # /control/status -- deferred item from the original design ("no /status
+    # endpoint yet"), now backed by this loop updating its own entry directly
+    # rather than the control server having to infer state from the outside.
+    status[camera_id] = {
+        "state": "connecting", "consecutive_failures": 0, "last_frame_at": None,
+        "fps": None, "hardware_encode": None, "last_error": None,
+    }
+
+    def _update_status(**fields):
+        status[camera_id].update(fields)
 
     # The ffmpeg/RTSP publisher deliberately outlives individual Janus sessions.
     # Alarm.com kills every session server-side at ~180s, forcing a rotation
@@ -173,6 +203,9 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                 # actually driving the encoder's -r/-g, not a pre-clamp/burst-noisy
                 # measurement -- see FfmpegSink.start()'s own comment.
                 log.info("%s: streaming %dx%d@%dfps", camera["id"], w, h, sink.fps)
+                _update_status(state="streaming", consecutive_failures=0, fps=sink.fps,
+                               hardware_encode=sink.hardware_encode, last_error=None,
+                               last_frame_at=time.time())
 
                 # Alarm.com's own mountpoint timeout (see janus_client.py's "timeout_seconds":
                 # 180 in the create body) actually kills the stream server-side at ~180s --
@@ -202,11 +235,14 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                         raise RuntimeError("frame stream ended unexpectedly")
                     last_frame = frame
                     last_live = time.monotonic()
+                    _update_status(last_frame_at=time.time())
                     if not await sink.write_frame(frame):
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
 
-            except Exception:
+            except Exception as exc:
                 consecutive_failures += 1
+                _update_status(state="reconnecting", consecutive_failures=consecutive_failures,
+                               last_error=repr(exc))
                 log.exception("%s: camera session failed, reconnecting in %ss",
                               camera["id"], backoff)
                 if consecutive_failures >= c.MAX_CONSECUTIVE_SESSION_FAILURES:
@@ -217,14 +253,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                     # this loop isn't being fully released between attempts --
                     # lifecycle.py's deactivate() already documents aiortc's
                     # pc.close() as "a known-hangable call under certain ICE
-                    # states" that can leak resources when abandoned, and this
-                    # loop's own session.close() calls (right below, and in the
-                    # finally) have no equivalent timeout guard. Observed live
-                    # 2026-07-20: 26+ consecutive "no frames received" failures
-                    # across both cameras that never self-cleared, needing a
-                    # manual `docker restart` -- retries kept cycling but never
-                    # succeeding, consistent with a leaked/wedged resource
-                    # rather than a transient/retryable one.
+                    # states" that can leak resources when abandoned. Observed
+                    # live 2026-07-20: 26+ consecutive "no frames received"
+                    # failures across both cameras that never self-cleared,
+                    # needing a manual `docker restart` -- retries kept cycling
+                    # but never succeeding, consistent with a leaked/wedged
+                    # resource rather than a transient/retryable one.
                     #
                     # os._exit() (not sys.exit/raise) is deliberate: a graceful
                     # shutdown would run through the very cleanup path already
@@ -254,7 +288,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                 # real streaming problem when it was actually just an orphaned session
                 # nobody had told to stop yet.
                 if session:
-                    await session.close()
+                    await _close_with_timeout(session, camera["id"])
                     session = None
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, c.RECONNECT_BACKOFF_MAX_S)
@@ -263,7 +297,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source):
                 _start_hold()
             finally:
                 if session:
-                    await session.close()
+                    await _close_with_timeout(session, camera["id"])
     finally:
         await _stop_hold()
         if sink:

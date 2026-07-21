@@ -55,6 +55,33 @@ secrets.env.example for why), then `sudo docker compose up -d --build`.
   `--restart unless-stopped`, managed via `docker-compose.yml` (see
   "Installing" above and "Recreating the container" below).
 
+## Hardware encode backends
+
+`config.ENCODE_BACKEND` (env var `ENCODE_BACKEND`, see `.env.example`) picks
+which encoder `ffmpeg_sink.py` tries before falling back to software libx264:
+
+- **`vaapi`** (default) -- Intel QuickSync or AMD, via `/dev/dri`. This is
+  what this project's own host actually runs and has verified live (hardware
+  encode confirmed active in ffmpeg's own log, full pipeline exercised).
+  Debian's ffmpeg package already includes both `intel-media-va-driver` and
+  `mesa-va-drivers` in the image (see `Dockerfile`) -- which one actually
+  gets used is decided by libva against whatever GPU is at the passed-through
+  `/dev/dri` device, not by anything this project has to choose.
+- **`nvenc`** -- NVIDIA, via `nvidia-container-toolkit` device injection (see
+  `docker-compose.yml`'s commented-out NVIDIA section) instead of
+  `/dev/dri`. `h264_nvenc` is already compiled into Debian's ffmpeg package
+  (confirmed via `ffmpeg -encoders` inside this image), so no extra package
+  install is needed for it -- only the host-side NVIDIA driver +
+  `nvidia-container-toolkit`. **Not verified against real NVIDIA hardware by
+  this project** (Intel-only host) -- treat it as implemented-per-ffmpeg's-own-
+  documentation, not confirmed-live the way the VAAPI path is.
+- **`software`** -- always libx264, skip the hardware attempt entirely.
+
+Whichever backend is selected, an unavailable/broken device still falls back
+to software automatically per-`start()` call (see `ffmpeg_sink.py`'s module
+docstring) -- `ENCODE_BACKEND` only picks which hardware path is *attempted*
+first.
+
 ## The 120s proactive session-rotation fix -- do not regress
 
 Alarm.com kills a video session **server-side at ~180s**, unconditionally,
@@ -178,14 +205,23 @@ never blocked on this bridge being reachable.
 - **No MFA/2FA support.** `telus_auth.py`'s login is username/password only.
   If TELUS ever enables MFA on this account, this bridge's login breaks
   independently of the HA integration (which does support 2FA/OTP). Not
-  handled -- would need real design work if it ever becomes necessary.
-- No `/status` endpoint yet (per-camera reconnect counts, last-frame age,
-  etc) -- deferred so as not to touch the just-fixed reconnect logic in
-  `camera_session.py` in the same change as the control endpoint. If added
-  later, it can be a new route in `control_server.py` behind the same secret,
-  without touching `camera_session.py`.
-- The control secret has no automatic rotation -- manual only (see above).
-  Fine for a single-operator local deployment.
+  handled -- implementing this needs a HAR capture of a real MFA challenge
+  against this account to know the actual redirect/OTP-submission contract
+  (the same way the rest of `telus_auth.py` was built); guessing at that
+  contract without one risks a login flow that looks plausible but doesn't
+  actually work, or repeated failed attempts against TELUS's live auth
+  endpoint. Would need real design work (and that capture) if it ever
+  becomes necessary.
+- `GET /control/status` (per-camera `state`, `consecutive_failures`,
+  `last_frame_at`, `fps`, `hardware_encode`, `last_error`) -- added, same
+  auth as every other endpoint. `camera_session.py`'s `run_camera_forever`
+  updates its own entry directly; the control server just reflects it.
+- The control secret now rotates automatically every
+  `config.CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days by default) via an
+  atomic rewrite of `control_secret` -- safe with no coordination needed
+  since HA's `bridge_client.py` re-reads the file fresh on every request
+  rather than caching it. Manual rotation (delete the file, restart the
+  container) still works too.
 
 ## Recreating the container
 
