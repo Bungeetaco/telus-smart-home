@@ -83,6 +83,7 @@ DATA_CONTROLLER = "connection"
 # camera.py and event.py both read the same camera list rather than each
 # polling /control/cameras independently.
 DATA_CAMERA_COORDINATOR = "camera_coordinator"
+DATA_ACTIVITY_COORDINATOR = "activity_coordinator"
 
 ATTRIB_BATTERY_NORMAL = "Normal"
 ATTRIB_BATTERY_LOW = "Low"

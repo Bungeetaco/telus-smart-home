@@ -1,9 +1,14 @@
-"""Diagnostic sensor(s) for the TELUS Smart Home integration.
+"""Diagnostic and data-feed sensor(s) for the TELUS Smart Home integration.
 
-Currently exposes a single entity reflecting TELUS/Alarm.com session auth
-health, so the user can see in Home Assistant (as a normal entity/history
-graph) when authentication starts failing, rather than only discovering it
-via the reauth persistent-notification or raw logs.
+AuthHealthSensor reflects TELUS/Alarm.com session auth health, so the user
+can see in Home Assistant (as a normal entity/history graph) when
+authentication starts failing, rather than only discovering it via the
+reauth persistent-notification or raw logs.
+
+ActivityFeedSensor exposes the full recent Activity list (not just the
+single latest entry event.py's TelusActivityEvent tracks) as an attribute,
+for a dashboard card to render as a scrollable feed -- see that entity's
+own docstring for why an EventEntity alone can't do this.
 """
 
 from __future__ import annotations
@@ -20,8 +25,9 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DATA_CONTROLLER, DOMAIN
+from .const import DATA_ACTIVITY_COORDINATOR, DATA_CONTROLLER, DOMAIN
 from .controller import AlarmIntegrationController
+from .event import ActivityHistoryCoordinator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,8 +43,14 @@ async def async_setup_entry(
     """Set up the sensor platform."""
 
     controller: AlarmIntegrationController = hass.data[DOMAIN][config_entry.entry_id][DATA_CONTROLLER]
+    activity_coordinator: ActivityHistoryCoordinator = hass.data[DOMAIN][config_entry.entry_id][
+        DATA_ACTIVITY_COORDINATOR
+    ]
 
-    async_add_entities([AuthHealthSensor(controller, config_entry)])
+    async_add_entities([
+        AuthHealthSensor(controller, config_entry),
+        ActivityFeedSensor(activity_coordinator, config_entry),
+    ])
 
 
 class AuthHealthSensor(CoordinatorEntity, SensorEntity):  # type: ignore
@@ -84,3 +96,45 @@ class AuthHealthSensor(CoordinatorEntity, SensorEntity):  # type: ignore
                 self._controller.last_auth_success.isoformat() if self._controller.last_auth_success else None
             ),
         }
+
+
+class ActivityFeedSensor(CoordinatorEntity[ActivityHistoryCoordinator], SensorEntity):
+    """Exposes the full recent-Activity list as an attribute for a dashboard
+    card to render.
+
+    event.py's TelusActivityEvent (an EventEntity) can only ever hold the
+    single most-recently-fired event's attributes -- that's the EventEntity
+    model, useful for "notify me when something happens" automations but not
+    for a browsable list of recent clips. This sensor shares the exact same
+    coordinator (no extra bridge polling) and just reflects its whole current
+    page of results, so a card can iterate `events` directly.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Recent Events"
+    _attr_icon = "mdi:history"
+
+    def __init__(self, coordinator: ActivityHistoryCoordinator, config_entry: ConfigEntry) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+
+        self._attr_unique_id = f"{config_entry.entry_id}_activity_feed"
+        # Same device as event.py's TelusActivityEvent (identical identifier)
+        # so the two show up together rather than as two synthetic devices.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_activity")},
+            name="Activity",
+            manufacturer="TELUS Smart Home",
+        )
+
+    @property
+    def native_value(self) -> int:
+        """Number of events in the current page -- a small, glanceable number;
+        the actual content lives in extra_state_attributes below."""
+        return len(self.coordinator.data or [])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """The full current page of Activity-feed events, newest first --
+        same shape as control_server.py's /control/history response."""
+        return {"events": self.coordinator.data or []}

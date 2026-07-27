@@ -30,6 +30,7 @@ from .const import (
     CONF_FORCE_BYPASS,
     CONF_NO_ENTRY_DELAY,
     CONF_SILENT_ARM,
+    DATA_ACTIVITY_COORDINATOR,
     DATA_CAMERA_COORDINATOR,
     DATA_CONTROLLER,
     DEBUG_REQ_EVENT,
@@ -39,6 +40,7 @@ from .const import (
     STARTUP_MESSAGE,
 )
 from .controller import AlarmIntegrationController
+from .event import ActivityHistoryCoordinator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,10 +85,18 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # simply appear on a later poll once the bridge responds.
     await camera_coordinator.async_refresh()
 
+    # Same reasoning as camera_coordinator above -- created here (not inside
+    # event.py) and shared via hass.data so sensor.py's activity-feed sensor
+    # can read the exact same data event.py's TelusActivityEvent already
+    # polls, instead of each platform hitting the bridge independently.
+    activity_coordinator = ActivityHistoryCoordinator(hass, config_entry)
+    await activity_coordinator.async_refresh()
+
     # Store integration data for use during platform setup.
     hass.data[DOMAIN][config_entry.entry_id] = {
         DATA_CONTROLLER: controller,
         DATA_CAMERA_COORDINATOR: camera_coordinator,
+        DATA_ACTIVITY_COORDINATOR: activity_coordinator,
     }
 
     #

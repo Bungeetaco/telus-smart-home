@@ -34,6 +34,7 @@ from .camera import CameraBridgeCoordinator
 from .const import (
     CAMERA_BRIDGE_EVENTS_URL,
     CAMERA_BRIDGE_HISTORY_URL,
+    DATA_ACTIVITY_COORDINATOR,
     DATA_CAMERA_COORDINATOR,
     DOMAIN,
     VIDEO_EVENTS_POLL_INTERVAL_SECONDS,
@@ -130,10 +131,13 @@ async def async_setup_entry(
     config_entry.async_on_unload(camera_coordinator.async_add_listener(_add_new_camera_events))
 
     # System-wide Activity feed -- one entity for the whole account, unlike
-    # TelusCameraEvent above (per-camera, video clips only). See
-    # ActivityHistoryCoordinator/TelusActivityEvent below.
-    activity_coordinator = ActivityHistoryCoordinator(hass, config_entry)
-    await activity_coordinator.async_refresh()
+    # TelusCameraEvent above (per-camera, video clips only). Created in
+    # __init__.py (not here) and shared via hass.data, same reasoning as
+    # camera_coordinator above -- sensor.py's activity-feed sensor reads the
+    # exact same coordinator instance instead of polling the bridge again.
+    activity_coordinator: ActivityHistoryCoordinator = hass.data[DOMAIN][config_entry.entry_id][
+        DATA_ACTIVITY_COORDINATOR
+    ]
     async_add_entities([TelusActivityEvent(activity_coordinator, config_entry)])
 
 
