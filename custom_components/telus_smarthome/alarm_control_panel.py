@@ -99,8 +99,16 @@ class AlarmControlPanel(HardwareBaseDevice, AlarmControlPanelEntity):  # type: i
         }
 
     @property
-    def state(self) -> str | None:
-        """Return the state of the device."""
+    def alarm_state(self) -> AlarmControlPanelState | None:
+        """Return the state of the device.
+
+        Implements `alarm_state` rather than overriding `state`. Core now derives
+        `state` from this property (and marks its own `state` as the final,
+        not-to-be-overridden one), so overriding `state` directly is the deprecated
+        pattern and is scheduled to stop working. Returning the enum member itself is
+        also what core expects here -- the old str() conversion produced the enum's
+        value only incidentally.
+        """
 
         if self._device.malfunction:
             return None
@@ -108,23 +116,23 @@ class AlarmControlPanel(HardwareBaseDevice, AlarmControlPanelEntity):  # type: i
         if self._device.state == self._device.desired_state:
             match self._device.state:
                 case libPartition.DeviceState.DISARMED:
-                    return str(AlarmControlPanelState.DISARMED)
+                    return AlarmControlPanelState.DISARMED
                 case libPartition.DeviceState.ARMED_STAY:
-                    return str(AlarmControlPanelState.ARMED_HOME)
+                    return AlarmControlPanelState.ARMED_HOME
                 case libPartition.DeviceState.ARMED_AWAY:
-                    return str(AlarmControlPanelState.ARMED_AWAY)
+                    return AlarmControlPanelState.ARMED_AWAY
                 case libPartition.DeviceState.ARMED_NIGHT:
-                    return str(AlarmControlPanelState.ARMED_NIGHT)
+                    return AlarmControlPanelState.ARMED_NIGHT
         else:
             match self._device.desired_state:
                 case libPartition.DeviceState.DISARMED:
-                    return str(AlarmControlPanelState.DISARMING)
+                    return AlarmControlPanelState.DISARMING
                 case (
                     libPartition.DeviceState.ARMED_STAY
                     | libPartition.DeviceState.ARMED_AWAY
                     | libPartition.DeviceState.ARMED_NIGHT
                 ):
-                    return str(AlarmControlPanelState.ARMING)
+                    return AlarmControlPanelState.ARMING
 
         LOGGER.error(
             f"Cannot determine state. Found raw state of {self._device.state} and desired state of"

@@ -6,8 +6,7 @@ import logging
 from typing import Any
 
 from homeassistant import core
-from homeassistant.components import light
-from homeassistant.components.light import ATTR_BRIGHTNESS, LightEntity
+from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
@@ -54,13 +53,17 @@ class Light(HardwareBaseDevice, LightEntity):  # type: ignore
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(controller, device)
 
-        self._attr_supported_color_modes = (
-            [light.COLOR_MODE_BRIGHTNESS] if self._device.brightness else [light.COLOR_MODE_ONOFF]
-        )
-
-        self._attr_supported_features = light.SUPPORT_BRIGHTNESS
-
-        self._attr_color_mode = light.COLOR_MODE_BRIGHTNESS if self._device.brightness else light.COLOR_MODE_ONOFF
+        # light.COLOR_MODE_* and light.SUPPORT_BRIGHTNESS were deprecated and have
+        # since been REMOVED from Home Assistant core (confirmed absent on 2026.7.1) --
+        # referencing them raised AttributeError right here, so every light on the
+        # account failed to be created at all. The modern equivalents are the ColorMode
+        # enum and a set (not list) of supported modes; brightness support is expressed
+        # purely through the color mode now, so there is no supported_features flag to
+        # set -- SUPPORT_BRIGHTNESS was unconditionally applied here anyway, even to
+        # on/off-only lights.
+        mode = ColorMode.BRIGHTNESS if self._device.brightness else ColorMode.ONOFF
+        self._attr_supported_color_modes = {mode}
+        self._attr_color_mode = mode
 
         self._attr_assumed_state = self._device.supports_state_tracking is False
 

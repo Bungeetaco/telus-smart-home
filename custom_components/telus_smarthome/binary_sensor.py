@@ -184,7 +184,13 @@ class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore
     def available(self) -> bool:
         """Return True if entity is available."""
 
-        return self.is_on is not None
+        # super() carries both the coordinator's health and BaseDevice's
+        # device-still-exists check. Returning only `is_on is not None` discarded
+        # both, so when TELUS auth failed or polling died these sensors kept
+        # presenting their last known state as current -- actively misleading for
+        # door, smoke and glass-break sensors, which is exactly when a stale "closed"
+        # is worse than an honest "unavailable".
+        return super().available and self.is_on is not None
 
     @property
     def is_on(self) -> bool | None:

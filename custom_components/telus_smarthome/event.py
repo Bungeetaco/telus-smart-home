@@ -168,6 +168,15 @@ class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
         # after a restart), so a restart can never cause old clips to be
         # replayed as new events.
         self._last_seen_id = self._newest_id_for_camera()
+        # ...but only if there was actually anything to take a baseline FROM. The
+        # camera list and the event list come from two independent coordinators, so
+        # this entity is routinely created (camera list already populated) while the
+        # events coordinator is still empty -- e.g. the bridge came up a moment later,
+        # or its first /control/events poll failed. A None baseline then means "fire
+        # everything", so the first successful poll replayed up to 20 historical clips
+        # as brand-new events, triggering every automation attached to them. Adopt the
+        # first non-empty page as the baseline instead.
+        self._baseline_pending = not (coordinator.data or [])
 
     def _events_for_camera(self) -> list[dict[str, Any]]:
         return [e for e in (self.coordinator.data or []) if e.get("camera_id") == self._camera_id]
@@ -179,6 +188,13 @@ class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
     @core.callback
     def _handle_coordinator_update(self) -> None:
         """Fire for any event newer than the last one seen, oldest-first."""
+
+        if self._baseline_pending:
+            if self.coordinator.data:
+                self._baseline_pending = False
+                self._last_seen_id = self._newest_id_for_camera()
+            super()._handle_coordinator_update()
+            return
 
         new_events = [
             e for e in self._events_for_camera()
@@ -268,29 +284,41 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
             manufacturer="TELUS Smart Home",
         )
 
-        # Baseline is "whatever's newest right now", same reasoning as
+        # Baseline is "whatever's on the current page right now", same reasoning as
         # TelusCameraEvent -- a restart must never replay old history as new.
-        # Activity-feed ids are opaque strings (e.g. "M-1693490562889"), not
-        # sortable integers like video event ids, so track by timestamp
-        # instead -- these are fixed-width ISO 8601 strings (with or without
-        # a fractional-seconds component, both confirmed live), which still
-        # compare correctly with plain string ">" up through whole seconds.
-        self._last_seen_timestamp: str | None = self._newest_timestamp()
-
-    def _newest_timestamp(self) -> str | None:
-        events = self.coordinator.data or []
-        return events[0]["timestamp"] if events else None
+        #
+        # Tracked as a set of ids rather than a high-water-mark timestamp. Activity
+        # ids are opaque strings (e.g. "M-1693490562889") so they can't be compared
+        # for recency, but timestamps turned out to be worse: a strict ">" against
+        # the newest-seen timestamp permanently discards any event sharing that exact
+        # timestamp, and a doorbell press reliably produces several entries within the
+        # same second -- so the first one seen suppressed its siblings forever. String
+        # comparison is also unsound across the two formats TELUS actually emits
+        # (with and without fractional seconds): "...T10:00:00Z" sorts BELOW
+        # "...T10:00:00.5Z", so a fractional-second event could re-fire every poll.
+        # Membership in the last page has neither problem, and the page is bounded
+        # (20 events) so the set can't grow.
+        self._seen_ids: set[str] = {e["id"] for e in (coordinator.data or [])}
+        # See TelusCameraEvent for why an empty first page can't be used as a baseline.
+        self._baseline_pending = not (coordinator.data or [])
 
     @core.callback
     def _handle_coordinator_update(self) -> None:
-        """Fire for any event newer than the last one seen, oldest-first."""
+        """Fire for any event not seen on the previous page, oldest-first."""
 
         events = self.coordinator.data or []
-        new_events = [
-            e for e in events
-            if self._last_seen_timestamp is None or e["timestamp"] > self._last_seen_timestamp
-        ]
+
+        if self._baseline_pending:
+            if events:
+                self._baseline_pending = False
+                self._seen_ids = {e["id"] for e in events}
+            super()._handle_coordinator_update()
+            return
+
+        new_events = [e for e in events if e["id"] not in self._seen_ids]
         if new_events:
+            # TELUS returns the page newest-first; fire oldest-first so a listener
+            # sees them in the order they actually happened.
             for event in sorted(new_events, key=lambda e: e["timestamp"]):
                 self._trigger_event(_classify(event["description"]), {
                     "description": event["description"],
@@ -299,6 +327,12 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
                     "download_url": event.get("download_url"),
                     "clip_duration_ms": event.get("clip_duration_ms"),
                 })
-            self._last_seen_timestamp = max(e["timestamp"] for e in new_events)
+
+        # Rebase onto the current page. Anything that has scrolled off it is older
+        # than everything still on it, so it can never legitimately reappear as new.
+        # Guarded on non-empty so a transient empty response can't clear the set and
+        # cause the whole next page to re-fire.
+        if events:
+            self._seen_ids = {e["id"] for e in events}
 
         super()._handle_coordinator_update()

@@ -89,7 +89,9 @@ class Cover(HardwareBaseDevice, CoverEntity):  # type: ignore
     def is_closed(self) -> bool | None:
         """Return true if lock is locked."""
 
-        LOGGER.info("Processing is_closed %s for %s", self._device.state, self.name or self._device.name)
+        # debug, not info: this is a property, read on every state write for every
+        # cover, so at info level it filled the log with per-read noise.
+        LOGGER.debug("Processing is_closed %s for %s", self._device.state, self.name or self._device.name)
 
         if not self._device.malfunction:
             match self._device.state:

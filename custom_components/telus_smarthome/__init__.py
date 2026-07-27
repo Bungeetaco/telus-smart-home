@@ -103,7 +103,18 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # Initialize WebSocket listener
     #
 
-    asyncio.get_running_loop().create_task(controller.async_start_websocket_monitor())
+    # Tracked via the config entry rather than a bare create_task: the monitor loops
+    # forever (it only exits on WebSocketState.STOPPED), so an untracked task
+    # survived unload and kept running against a controller whose session had
+    # already been closed -- one leaked, permanently-reconnecting task per reload,
+    # and every options-flow save, reauth or reconfigure is a reload.
+    # async_create_background_task also gives asyncio a strong reference to it,
+    # which a bare create_task does not.
+    config_entry.async_create_background_task(
+        hass,
+        controller.async_start_websocket_monitor(),
+        name=f"{DOMAIN}_websocket_monitor",
+    )
 
     async def _async_stop_controller(event: Event) -> None:
         """Adapt controller.stop()'s no-arg signature to the bus listener contract,
@@ -138,35 +149,58 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # Will be used during virtual device creation.
     device_ids_via_hass: set[str] = set()
 
-    # Compare against device registry
+    # Compare against device registry.
+    #
+    # This pass previously decided removal *inside* the per-identifier loop, which
+    # made it wrong in three separate ways:
+    #   - Any device whose identifier isn't an Alarm.com "<digits>-<digits>" id was
+    #     deleted on EVERY setup. That is every device this fork adds itself: the
+    #     bridge-served cameras (keyed by TELUS camera UUID), the Activity feed
+    #     device, and the diagnostic "integration" device. They were recreated
+    #     immediately afterwards by their platforms, so the symptom wasn't missing
+    #     entities but silently discarded user customisations (renames, area
+    #     assignments, enabled/disabled state) on every restart.
+    #   - A device with several identifiers was judged on whichever one came first
+    #     out of an unordered set, so a still-present device could be removed
+    #     depending on iteration order.
+    #   - Removal ran once per non-matching identifier, and the second call for the
+    #     same device raises KeyError, aborting setup entirely.
+    # It is now one decision per device, made after inspecting all its identifiers,
+    # and it only ever considers devices that look like Alarm.com devices.
     for device_entry in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
-        for identifier in device_entry.identifiers:
-            if identifier[1] is None:
-                continue
+        keep = False
+        has_adc_identifier = False
 
-            matched_id: str
-
-            try:
-                # Remove _debug, _malfunction, etc. from IDs
-                id_matches = re.search(r"([0-9]+-[0-9]+)(?:_[a-zA-Z_]+)*", identifier[1])
-            except TypeError:
-                matched_id = identifier[1]
-            else:
-                if id_matches is not None:
-                    matched_id = id_matches.group(1)
-
-            if id_matches is not None and identifier[0] == DOMAIN and matched_id in device_ids_via_adc:
-                device_ids_via_hass.add(identifier[1])
+        for identifier_domain, identifier_id in device_entry.identifiers:
+            if identifier_domain != DOMAIN or identifier_id is None:
+                keep = True  # not ours to reason about
                 break
 
-            LOGGER.info(
-                "Removing device no longer present on Alarm.com: %s (%s | %s)",
-                device_entry.name,
-                device_entry.identifiers,
-                device_entry.id,
-            )
+            # Strip the _debug / _malfunction / etc. suffixes attribute entities add.
+            id_matches = re.search(r"([0-9]+-[0-9]+)(?:_[a-zA-Z_]+)*", str(identifier_id))
+            if id_matches is None:
+                # Not an Alarm.com device id -- one of this fork's own devices. The
+                # Alarm.com device list says nothing about whether it's still valid.
+                keep = True
+                break
 
-            device_registry.async_remove_device(device_entry.id)
+            has_adc_identifier = True
+            if id_matches.group(1) in device_ids_via_adc:
+                device_ids_via_hass.add(identifier_id)
+                keep = True
+                break
+
+        if keep or not has_adc_identifier:
+            continue
+
+        LOGGER.info(
+            "Removing device no longer present on Alarm.com: %s (%s | %s)",
+            device_entry.name,
+            device_entry.identifiers,
+            device_entry.id,
+        )
+
+        device_registry.async_remove_device(device_entry.id)
 
     # Create virtual DEVICES.
     # Currently, only Skybell cameras are virtual devices. We support modifying configuration attributes but not viewing video.

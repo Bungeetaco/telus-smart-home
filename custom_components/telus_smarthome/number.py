@@ -81,7 +81,11 @@ class ConfigOptionNumber(ConfigBaseDevice, NumberEntity):  # type: ignore
     def native_value(self) -> float | None:
         """Return the state of the sensor."""
 
-        return float(current_value) if (current_value := self._config_option.current_value) else None
+        # `is not None`, not truthiness: a legitimately-stored 0 (e.g. brightness
+        # turned all the way down) is falsy, so the old check reported the entity as
+        # unknown instead of 0 -- and the slider then had no value to render.
+        current_value = self._config_option.current_value
+        return float(current_value) if current_value is not None else None
 
     async def async_set_native_value(self, value: float) -> None:
         """Set new value."""

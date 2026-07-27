@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
 )
 from pyalarmdotcomajax.devices.registry import AllDevices_t
+from pyalarmdotcomajax.exceptions import UnkonwnDevice
 from pyalarmdotcomajax.extensions import ConfigurationOption as libConfigurationOption
 
 from . import const as c
@@ -51,6 +52,12 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
 
         self._attr_extra_state_attributes: MutableMapping[str, Any] = {}
 
+        # Set once the device stops being returned by the library (removed from
+        # Alarm.com mid-session). Not `_attr_available`: CoordinatorEntity defines
+        # `available` as a property, which takes precedence over the _attr_ shorthand,
+        # so setting that would have had no effect at all.
+        self._device_missing = False
+
         device_info: MutableMapping[str, Any] = {
             "manufacturer": "Alarm.com",
             "name": device.name,
@@ -75,6 +82,12 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
         """Return human readable device type name."""
 
         return self._device_type_name
+
+    @property
+    def available(self) -> bool:
+        """Available when the coordinator is healthy and the device still exists."""
+
+        return super().available and not self._device_missing
 
     async def async_added_to_hass(self) -> None:
         """Register callbacks."""
@@ -105,7 +118,27 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
     def _update_device_data(self) -> None:
         """Device-type specific update processes to run when new device data is available."""
 
-        self._device = self._controller.api.devices.get(self._adc_id)
+        try:
+            self._device = self._controller.api.devices.get(self._adc_id)
+        except UnkonwnDevice:  # noqa: N806 - spelling comes from pyalarmdotcomajax
+            # The device was removed from Alarm.com while HA was running. Unhandled,
+            # this propagates out of the coordinator's listener dispatch, which stops
+            # the remaining listeners in that cycle from running -- so ONE deleted
+            # device silently froze updates for other entities too, and did so on
+            # every refresh from then on. Mark just this entity unavailable and keep
+            # serving the last known device object; the stale entity is cleaned up by
+            # the device-pruning pass on the next setup.
+            if not self._device_missing:
+                LOGGER.warning(
+                    "%s (%s) is no longer present on Alarm.com; marking it unavailable.",
+                    self.name,
+                    self._adc_id,
+                )
+            self._device_missing = True
+            self.async_write_ha_state()
+            return
+
+        self._device_missing = False
 
         self._legacy_refresh_attributes()
 
@@ -205,7 +238,14 @@ class HardwareBaseDevice(BaseDevice):
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Return the client state attributes."""
 
-        raw = self._controller.api.devices.get(self._adc_id).raw_attributes
+        # Same removed-from-Alarm.com hazard as _update_device_data: this lookup runs
+        # on every state write, so once the device is gone it would raise from inside
+        # HA's own state machine rather than the coordinator. Fall back to the last
+        # known device object, which is retained precisely for this.
+        try:
+            raw = self._controller.api.devices.get(self._adc_id).raw_attributes
+        except UnkonwnDevice:
+            raw = self._device.raw_attributes
 
         return {k: raw[k] for k in DEVICE_STATIC_ATTRIBUTES if k in raw}
 

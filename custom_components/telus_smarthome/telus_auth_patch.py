@@ -31,7 +31,7 @@ from datetime import datetime
 import aiohttp
 
 import pyalarmdotcomajax.const as c
-from pyalarmdotcomajax import AlarmController
+from pyalarmdotcomajax import AlarmController, extensions
 from pyalarmdotcomajax.const import OtpType
 from pyalarmdotcomajax.exceptions import (
     AuthenticationFailed,
@@ -88,6 +88,21 @@ _NAV_HEADERS = {
 # Patch the base URL used to build every other API/template URL in the library.
 c.URL_BASE = TELUS_BASE
 
+# ...but URL_BASE only covers URLs the library *formats* from it at call time. The
+# camera-settings extension bakes a fully-qualified alarm.com URL into a class
+# attribute at its own import time -- which has already happened by the time this
+# module runs (importing AlarmController above pulls in extensions) -- so it would
+# keep pointing at www.alarm.com no matter what URL_BASE says, and every Skybell
+# config option (the switch/select/number platforms) would silently talk to the
+# wrong host. Rewrite the host portion in place, preserving the path.
+for _ext_cls in (extensions.CameraSkybellControllerExtension,):
+    _endpoint = getattr(_ext_cls, "ENDPOINT", None)
+    if isinstance(_endpoint, str) and "alarm.com" in _endpoint:
+        _ext_cls.ENDPOINT = _endpoint.replace(
+            "https://www.alarm.com/", TELUS_BASE
+        ).replace("https://alarm.com/", TELUS_BASE)
+        log.debug("Repointed %s.ENDPOINT to %s", _ext_cls.__name__, _ext_cls.ENDPOINT)
+
 
 async def _telus_async_login(self: AlarmController) -> None:
     """Replacement for AlarmController.async_login that authenticates via TELUS SSO."""
@@ -127,9 +142,11 @@ async def _telus_async_login(self: AlarmController) -> None:
                     raise UnexpectedResponse(f"TELUS login gateway returned {resp.status}")
                 log.error("TELUS smarthome_login_v1 failed with status %s", resp.status)
                 raise AuthenticationFailed("Invalid TELUS username or password.")
-            body = await resp.text()
-            if "error" in body.lower() and resp.status != 200:
-                raise AuthenticationFailed("TELUS login rejected credentials.")
+            # (A body check for "error" used to live here guarded by
+            # `resp.status != 200`, inside a branch only reachable WHEN the status is
+            # 200 -- it could never fire. Removed rather than re-enabled: a substring
+            # match for "error" anywhere in a successful response body is far too
+            # eager to turn into an authentication failure.)
 
         # Step 2: complete the login flow (issues the gateway session).
         # NOTE: must send an explicit empty JSON body (not a truly bodiless POST) --
@@ -245,7 +262,18 @@ async def _telus_async_login(self: AlarmController) -> None:
         ) as resp:
             json_rsp = await resp.json()
         await self._async_handle_server_errors(json_rsp, "2FA requirements", False)
-    except (aiohttp.ClientResponseError, NotAuthorized) as err:
+    except (
+        aiohttp.ClientResponseError,
+        NotAuthorized,
+        # _async_handle_server_errors raises UnexpectedResponse for a JSON:API error
+        # body, and a non-JSON body raises from resp.json() itself. Both are the
+        # normal shape of "this white-label doesn't expose alarm.com's 2FA engine",
+        # which the comment above says to treat as "no 2FA needed" -- but they
+        # escaped this handler and turned a perfectly good login into a hard failure.
+        UnexpectedResponse,
+        aiohttp.ClientError,
+        ValueError,
+    ) as err:
         log.info("2FA requirements check not available for this TELUS account (%s) -- skipping.", err)
         return
 
@@ -257,6 +285,15 @@ async def _telus_async_login(self: AlarmController) -> None:
         raise ConfigureTwoFactorAuthentication
 
     enabled_otp_types_bitmask = attribs.get("enabledTwoFactorTypes")
+    # Guard BEFORE the comprehension. The falsy/missing check used to sit in the
+    # condition below, i.e. after the bitmask had already been &-ed against every
+    # OtpType -- so a response omitting enabledTwoFactorTypes (or sending null,
+    # which is exactly what "2FA not configured" looks like) raised TypeError from
+    # the comprehension. Nothing maps that to a config-flow error, so it surfaced as
+    # a bare "unknown" failure on an account with no 2FA at all.
+    if not enabled_otp_types_bitmask:
+        return
+
     enabled_2fa_methods = [
         otp_type for otp_type in OtpType if bool(enabled_otp_types_bitmask & otp_type.value)
     ]
@@ -264,7 +301,6 @@ async def _telus_async_login(self: AlarmController) -> None:
     if (
         (OtpType.disabled in enabled_2fa_methods)
         or (attribs.get("isCurrentDeviceTrusted") is True)
-        or not enabled_otp_types_bitmask
         or not enabled_2fa_methods
     ):
         return

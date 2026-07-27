@@ -38,6 +38,11 @@ from .const import (
 
 LOGGER = logging.getLogger(__name__)
 
+# How long the websocket may sit in a pre-RUNNING state before we give up on this
+# attempt and restart it. Generous relative to a normal connect (sub-second) --
+# this is a stuck-forever backstop, not a latency budget.
+WEBSOCKET_START_TIMEOUT_SECONDS = 60
+
 
 class AlarmIntegrationController:
     """Config-entry initiated Alarm Hub."""
@@ -183,7 +188,10 @@ class AlarmIntegrationController:
 
         try:
             return await self.api.keep_alive()  # type: ignore
-        except AlarmdotcomException:
+        # Network-level failures are not AlarmdotcomException subclasses, so a plain
+        # connection blip still produced an uncaught-exception traceback from HA's
+        # scheduler every 60 seconds -- the exact noise this handler exists to stop.
+        except (AlarmdotcomException, aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
             # Cosmetic only: if the session has actually degraded, the
             # coordinator's own refresh (async_update, every
             # CONF_UPDATE_INTERVAL seconds) will hit the same failure and
@@ -253,7 +261,32 @@ class AlarmIntegrationController:
                 self._ws_close_event.clear()
                 self.api.start_websocket(self._ws_state_handler)
 
-                await self._ws_close_event.wait()
+                # start_websocket() only spawns a task; if that task dies before it
+                # ever reaches ws_connect (network error at connect time, an
+                # unexpected library exception), no state callback fires at all --
+                # _ws_state_handler only sets the close event for DISCONNECTED and
+                # STOPPED, so the state stays STARTING and this await would block
+                # forever. Real-time alarm/lock/sensor updates would then be silently
+                # dead for the rest of the HA session with nothing in the log.
+                # So bound the wait only while still in the pre-running state; once
+                # RUNNING is reached, a healthy connection legitimately stays open
+                # indefinitely and must not be torn down on a timer.
+                while True:
+                    try:
+                        async with asyncio.timeout(WEBSOCKET_START_TIMEOUT_SECONDS):
+                            await self._ws_close_event.wait()
+                        break
+                    except TimeoutError:
+                        if self._ws_state == WebSocketState.RUNNING:
+                            await self._ws_close_event.wait()
+                            break
+                        LOGGER.warning(
+                            "Websocket did not reach RUNNING within %ss (state=%s) -- "
+                            "restarting it rather than waiting forever",
+                            WEBSOCKET_START_TIMEOUT_SECONDS,
+                            self._ws_state,
+                        )
+                        break
 
                 if self._ws_state == WebSocketState.STOPPED:
                     break

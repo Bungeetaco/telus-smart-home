@@ -18,10 +18,10 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_UNIT_OF_MEASUREMENT, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import selector
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
@@ -169,6 +169,12 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
                     TimeoutError,
                     aiohttp.ClientError,
                     asyncio.exceptions.CancelledError,
+                    # initialize_lite already converts the network-level errors above
+                    # into ConfigEntryNotReady for its setup-path caller, so by the
+                    # time they reach here they are no longer any of those types --
+                    # without this, "cannot_connect" was unreachable and a plain
+                    # unreachable-TELUS became the generic "unknown" error instead.
+                    ConfigEntryNotReady,
                 ):
                     LOGGER.warning("%s: user login failed to contact Alarm.com.", __name__)
                     errors["base"] = "cannot_connect"
@@ -372,7 +378,12 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
             )
             return
 
-        session = async_create_clientsession(self.hass)
+        # Shared session, not async_create_clientsession: a created session lives
+        # until HA shuts down, so making a fresh one for every credential push leaked
+        # one session (and its connector/sockets) per reconfigure/reauth. Nothing
+        # about this request needs an isolated cookie jar -- unlike the SSO login in
+        # controller.initialize_lite, which does and correctly creates its own.
+        session = async_get_clientsession(self.hass)
         try:
             async with async_timeout.timeout(5):
                 async with session.post(
@@ -454,6 +465,12 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
                     TimeoutError,
                     aiohttp.ClientError,
                     asyncio.exceptions.CancelledError,
+                    # initialize_lite already converts the network-level errors above
+                    # into ConfigEntryNotReady for its setup-path caller, so by the
+                    # time they reach here they are no longer any of those types --
+                    # without this, "cannot_connect" was unreachable and a plain
+                    # unreachable-TELUS became the generic "unknown" error instead.
+                    ConfigEntryNotReady,
                 ):
                     LOGGER.warning("Reconfigure: could not reach Alarm.com/TELUS.")
                     errors["base"] = "cannot_connect"

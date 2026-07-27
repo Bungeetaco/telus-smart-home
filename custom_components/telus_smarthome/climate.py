@@ -116,8 +116,14 @@ class Climate(HardwareBaseDevice, ClimateEntity):  # type: ignore
         self._attr_target_temperature_high = None
         self._attr_target_temperature_low = None
         self._attr_target_temperature = None
-        self._attr_max_temp = None
-        self._attr_min_temp = None
+        # max/min are removed rather than set to None. ClimateEntity.max_temp/min_temp
+        # fall back to sane defaults only when the _attr_ is ABSENT (a hasattr check);
+        # a None satisfies hasattr and is then returned as the actual limit, which
+        # breaks the thermostat card's range and async_set_temperature's validation
+        # for every state where the branches below don't assign one -- e.g. whenever
+        # the thermostat is simply off.
+        self.__dict__.pop("_attr_max_temp", None)
+        self.__dict__.pop("_attr_min_temp", None)
 
         # Set target temperature parameters
         if not self._device.attributes.supports_setpoints:
@@ -150,11 +156,9 @@ class Climate(HardwareBaseDevice, ClimateEntity):  # type: ignore
         else:
             self._attr_fan_mode = None
 
-        #
-        # Aux Heat
-        #
-
-        self._attr_is_aux_heat = self._device.state == libThermostat.DeviceState.AUX_HEAT
+        # Aux heat: no longer represented as its own entity attribute -- core removed
+        # is_aux_heat/AUX_HEAT entirely. The AUX_HEAT device state is already mapped
+        # onto HVACMode.HEAT above, which is how core expects it to be surfaced now.
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set HVAC mode."""
@@ -254,9 +258,12 @@ class Climate(HardwareBaseDevice, ClimateEntity):  # type: ignore
         if self._device.attributes.supports_fan_mode:
             supported_features |= ClimateEntityFeature.FAN_MODE
 
-        if self._device.attributes.supports_heat_aux:
-            supported_features |= ClimateEntityFeature.AUX_HEAT
-
+        # ClimateEntityFeature.AUX_HEAT has been REMOVED from Home Assistant core
+        # (confirmed absent on 2026.7.1) along with the whole aux-heat concept --
+        # referencing it raised AttributeError, so any thermostat reporting
+        # supports_heat_aux failed to be created at all. Nothing replaces it in core;
+        # aux heat is still surfaced through the HEAT hvac mode, which
+        # _legacy_refresh_attributes already maps AUX_HEAT state onto.
         self._attr_supported_features = supported_features
 
         #

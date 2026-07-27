@@ -113,6 +113,12 @@ class ActivityFeedSensor(CoordinatorEntity[ActivityHistoryCoordinator], SensorEn
     _attr_has_entity_name = True
     _attr_name = "Recent Events"
     _attr_icon = "mdi:history"
+    # The events blob is several KB and changes on EVERY 30s poll even when nothing
+    # happened, because TELUS re-signs the thumbnail/download URLs each time. Recorded
+    # normally that is a multi-KB row written to the database ~2,880 times a day
+    # forever, for data that is already ephemeral (the signed URLs expire, so old rows
+    # are worthless). The state itself (an event count) still records fine.
+    _unrecorded_attributes = frozenset({"events"})
 
     def __init__(self, coordinator: ActivityHistoryCoordinator, config_entry: ConfigEntry) -> None:
         """Initialize the entity."""
