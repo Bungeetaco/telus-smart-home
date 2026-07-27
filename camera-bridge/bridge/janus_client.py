@@ -150,6 +150,12 @@ class JanusCameraSession:
         })
         watch_event = await self._wait_for(txn)
         while "jsep" not in watch_event:
+            # An error reply carries no jsep and no further messages follow it, so
+            # without this check the loop just blocks until _wait_for's 15s timeout --
+            # turning an immediate, self-describing rejection into a slow generic
+            # timeout that also delays the reconnect by those 15 seconds.
+            if watch_event.get("janus") == "error":
+                raise RuntimeError(f"{self.camera['id']}: watch failed: {watch_event}")
             watch_event = await self._wait_for(txn)
         offer_sdp = watch_event["jsep"]["sdp"]
 

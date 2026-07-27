@@ -9,16 +9,25 @@
 # layout. See the top-level README's "Non-Supervised installs" note if that
 # path doesn't exist on your system.
 #
-# Credentials live in secrets.env, deliberately NOT named .env: Compose
-# auto-interpolates ${...}-looking references inside whichever file is
-# literally named .env (needed here so ${HOST_SHARED_DIR} below resolves),
-# and a password containing a "$" -- entirely plausible for anything
-# reasonably random -- gets silently mangled if it goes through that same
-# interpolation pass. secrets.env, as an explicitly-named (not
-# auto-interpolated) env_file, is passed to the container as literal
-# key=value pairs with no such processing. Verified live: a real password
-# with a "$" in it came through corrupted via .env and intact via
-# secrets.env -- this isn't a theoretical concern, keep these files separate.
+# Credentials live in secrets.env, separate from .env, so that a gitignored
+# secrets file stays distinct from ordinary config -- NOT because the two files
+# are processed differently. They are not: Compose interpolates $-references in
+# the values of EVERY env_file, secrets.env included, so a password containing a
+# literal "$" must be escaped as "$$" in either file. install.sh does this
+# escaping automatically; secrets.env.example documents it for hand-editing.
+#
+# This comment previously claimed the opposite -- that secrets.env was passed
+# through as literal key=value pairs with no interpolation -- which directly
+# contradicted install.sh and secrets.env.example. Re-verified live against this
+# deployment: the on-disk secrets.env value contains "$$" and the password the
+# container actually receives contains a single "$" and matches the working
+# credentials, i.e. interpolation definitely happens here. Believing the old
+# comment would lead someone to remove install.sh's escaping and silently break
+# every login with a "$" in the password.
+#
+# .env additionally feeds Compose's substitution of ${...} in THIS file (which is
+# what makes ${HOST_SHARED_DIR} and ${RENDER_GID} below resolve); that is the only
+# genuine behavioral difference between the two.
 #
 # /dev/dri passthrough + group_add is for hardware (QuickSync/VAAPI) video
 # encoding in ffmpeg_sink.py -- the render node (/dev/dri/renderD128) is

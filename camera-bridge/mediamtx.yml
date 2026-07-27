@@ -1,5 +1,23 @@
 rtsp: yes
 rtspAddress: 127.0.0.1:8554
+# Without this block MediaMTX runs its default "any" user: anonymous publish AND
+# read on every path. Binding to 127.0.0.1 is not a substitute -- this container
+# and Home Assistant's both run with --network host, so "loopback" here means every
+# process and every other host-networked container on the box. Path names are
+# derived deterministically from the camera id (config.rtsp_path_for), so they are
+# guessable, which made both passive viewing of the camera feeds and publishing a
+# replacement stream over them trivial for anything running locally.
+#
+# __RTSP_PASSWORD__ is substituted at container start by entrypoint.sh from
+# /shared/rtsp_password; the bridge reads the same file to build the URLs it
+# publishes with and hands to Home Assistant.
+authInternalUsers:
+  - user: bridge
+    pass: __RTSP_PASSWORD__
+    ips: ['127.0.0.1/32']
+    permissions:
+      - action: publish
+      - action: read
 # The default 10s read timeout races bridge/config.py's FRAME_SILENCE_TIMEOUT_S
 # (15s): when Alarm.com's RTP silently stalls mid-session, ffmpeg has nothing to
 # send, and MediaMTX would kill the publisher connection at 10s -- destroying the

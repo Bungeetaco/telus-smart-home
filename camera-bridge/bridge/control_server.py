@@ -143,6 +143,7 @@ import aiohttp
 from aiohttp import web
 
 from . import config as c
+from .telus_auth import relogin_if_stale
 from .telus_rest import (
     get_snapshot_url,
     list_automation_rules,
@@ -167,8 +168,7 @@ async def _fetch_with_relogin(telus_session, login_lock, coro_fn, *args):
         if err.status in (401, 403):
             log.warning("Control endpoint: %s got %s, re-logging in to TELUS",
                         coro_fn.__name__, err.status)
-            async with login_lock:
-                await telus_session.login()
+            await relogin_if_stale(telus_session, login_lock)
             return await coro_fn(telus_session, *args)
         raise
 
@@ -214,7 +214,19 @@ async def _rotate_secret_periodically(current_secret: dict) -> None:
     while True:
         await asyncio.sleep(c.CONTROL_SECRET_ROTATE_INTERVAL_S)
         new_secret = secrets_mod.token_hex(32)
-        _write_secret(new_secret)
+        try:
+            _write_secret(new_secret)
+        except OSError:
+            # Keep serving the CURRENT secret and try again next interval. Updating
+            # the in-memory value after a failed write would be far worse than not
+            # rotating: HA reads the secret from this very file, so every subsequent
+            # request would 401 until someone noticed. An unhandled raise here was
+            # also silently fatal -- it killed the rotation task for the life of the
+            # process with no retry and no log, since nothing awaits this task.
+            log.exception("Control endpoint: failed to write rotated secret to %s; keeping "
+                          "the current secret and retrying in %ss",
+                          c.CONTROL_SECRET_PATH, c.CONTROL_SECRET_ROTATE_INTERVAL_S)
+            continue
         current_secret["value"] = new_secret
         log.info("Control endpoint: rotated shared secret (scheduled %ss rotation)",
                   c.CONTROL_SECRET_ROTATE_INTERVAL_S)
@@ -237,7 +249,15 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         """Returns a 401 response if the request's Bearer token doesn't match,
         else None. Shared by every authed endpoint below."""
         provided = request.headers.get("Authorization", "")
-        if not secrets_mod.compare_digest(provided, f"Bearer {current_secret['value']}"):
+        try:
+            matches = secrets_mod.compare_digest(provided, f"Bearer {current_secret['value']}")
+        except TypeError:
+            # compare_digest refuses non-ASCII str operands outright. A header with a
+            # stray non-ASCII byte is simply a failed authentication, but unguarded it
+            # escaped as a 500 -- contradicting the documented contract (401) and
+            # turning a trivially-triggerable bad header into an error-level traceback.
+            matches = False
+        if not matches:
             log.warning("Control endpoint: rejected %s request with missing/bad secret", request.path)
             return web.json_response({"error": "bad_secret"}, status=401)
         return None

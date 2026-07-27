@@ -92,8 +92,13 @@ Settings → Devices & Services as usual.
 cd telus-smart-home/camera-bridge
 cp .env.example .env
 cp secrets.env.example secrets.env   # fill in TELUS_EMAIL / TELUS_PASSWORD
+chmod 600 secrets.env                # it holds your password in plaintext
 sudo docker compose up -d --build
 ```
+
+`chmod 600` is not optional housekeeping: `cp` creates the file using your umask,
+which on most distributions leaves it world-readable (0644) — so every local user
+could read your TELUS password. `install.sh` sets these permissions for you.
 
 If your TELUS password contains a literal `$`, escape it as `$$` in `secrets.env` — Docker Compose
 interpolates `$`-references in `env_file` values, and an unescaped `$` gets silently corrupted

@@ -65,17 +65,38 @@ CREDENTIALS_FALLBACK_POLL_S = 30
 CONTROL_SECRET_ROTATE_INTERVAL_S = 30 * 24 * 60 * 60
 
 
+# Credentials for the bundled MediaMTX, generated once by entrypoint.sh and shared
+# with it through /shared/rtsp_password (see mediamtx.yml's authInternalUsers).
+# Empty only if this process is somehow started outside that entrypoint, in which
+# case the URLs below stay in their old credential-less form rather than emitting
+# something guaranteed to be rejected.
+RTSP_USER = "bridge"
+RTSP_PASSWORD = os.environ.get("RTSP_PASSWORD", "")
+
+
 def rtsp_path_for(camera_id: str) -> str:
     return "telus_" + camera_id.replace("-", "_")
 
 
 def rtsp_publish_url(camera_id: str) -> str:
-    return f"rtsp://{MEDIAMTX_RTSP_HOST}:{MEDIAMTX_RTSP_PORT}/{rtsp_path_for(camera_id)}"
+    # Used both as ffmpeg's publish target and as the stream URL reported to Home
+    # Assistant via /control/cameras, so the credentials only have to be threaded
+    # through this one place. The password is hex, so it needs no URL-escaping.
+    auth = f"{RTSP_USER}:{RTSP_PASSWORD}@" if RTSP_PASSWORD else ""
+    return f"rtsp://{auth}{MEDIAMTX_RTSP_HOST}:{MEDIAMTX_RTSP_PORT}/{rtsp_path_for(camera_id)}"
 
 
 # Reconnect / hygiene
 RECONNECT_BACKOFF_INITIAL_S = 2
 RECONNECT_BACKOFF_MAX_S = 30
+# Cap on how long a single Retry-After-driven sleep is allowed to run, even if
+# Cloudflare's own header asks for longer -- keeps startup (and a mid-run
+# reconnect) bounded rather than hanging on an arbitrarily large server-specified
+# value. Shared by main.py's startup login retry and camera_session.py's
+# reconnect loop, which must both honor Retry-After rather than the fixed
+# backoff below: the short fixed schedule just re-triggers the same rate-limit
+# window instead of ever clearing it.
+RATE_LIMIT_RETRY_CAP_S = 300
 # If a single camera's session fails this many times in a row with no
 # successful frame batch in between, camera_session.py gives up on in-process
 # retrying and hard-exits the whole bridge (os._exit) so Docker's

@@ -6,6 +6,7 @@ import time
 from . import config as c
 from .janus_client import JanusCameraSession
 from .ffmpeg_sink import FfmpegSink
+from .telus_auth import RateLimited
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,18 @@ async def _close_with_timeout(session: JanusCameraSession, camera_id: str) -> No
         log.error("%s: session.close() did not finish within %ss -- abandoning it, "
                   "may leak resources (counted as a failure so the consecutive-failure "
                   "escape hatch above can still fire)", camera_id, c.SESSION_CLOSE_TIMEOUT_S)
+    except Exception:
+        # Anything else raised by aiortc's pc.close() or the websocket close must be
+        # swallowed here. Both call sites are inside the reconnect loop's own
+        # `except`/`finally` blocks, so an exception raised from this cleanup escapes
+        # `while True` entirely and returns from run_camera_forever -- permanently and
+        # silently killing this one camera. Nothing would restart it:
+        # discover_and_launch_cameras skips ids already in the registry, and
+        # CameraLifecycleManager holds the finished task forever without inspecting
+        # its result, so even asyncio's "exception was never retrieved" warning never
+        # fires. Log and let the loop go around instead.
+        log.exception("%s: session.close() raised; ignoring so the reconnect loop survives",
+                      camera_id)
 
 
 async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
@@ -97,6 +110,14 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 await hold_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # The hold task belongs to the PREVIOUS session cycle, but this await
+                # happens inside the next one -- re-raising here would fail a fresh,
+                # otherwise-healthy session for something that went wrong before it
+                # started, and (being raised before the sink-repair block below) would
+                # do so on every subsequent cycle too.
+                log.exception("%s: frame-hold task failed; continuing with this session",
+                              camera["id"])
             hold_task = None
 
     try:
@@ -169,11 +190,19 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         and (known_fps is None or 0.5 * known_fps <= measured <= 1.5 * known_fps)
                     )
                     if plausible:
-                        fps = measured
+                        # Only a measurement we actually trust becomes this camera's
+                        # remembered fps. Promoting the 15fps *fallback* into known_fps
+                        # (what the unconditional assignment used to do) permanently
+                        # locked the tolerance check below to 7-22fps, so a real 30fps
+                        # camera whose very first measurement happened to be burst-
+                        # contaminated could never correct itself for the life of the
+                        # process -- every later good reading was rejected as
+                        # implausible against the bad baseline.
+                        fps = known_fps = measured
                     elif known_fps is None:
-                        log.warning("%s: implausible fps measurement %s, defaulting to %s",
+                        log.warning("%s: implausible fps measurement %s, using %s for this "
+                                    "session without locking it in as this camera's fps",
                                     camera["id"], measured, fps)
-                known_fps = fps
 
                 # The hold must be stopped before touching the sink so nothing
                 # else is writing while we inspect/replace it. The publisher is
@@ -182,15 +211,26 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # corrupt the encode) -- otherwise the same RTSP session
                 # carries straight on and readers never notice the rotation.
                 await _stop_hold()
+                # `sink.proc is None` means a previous start() raised partway through
+                # (both encoders failed to survive the startup grace period -- what an
+                # RTSP ANNOUNCE to a momentarily-down MediaMTX looks like). Such a sink
+                # must count as dead: treating it as healthy left every subsequent
+                # write_frame raising AttributeError on None.stdin, which no path in
+                # this loop could repair, so each otherwise-perfect session counted as
+                # a failure until the os._exit escape hatch below restarted the whole
+                # bridge -- long after the original blip had cleared.
                 if sink is not None and (
-                        (sink.proc is not None and sink.proc.returncode is not None)
+                        sink.proc is None
+                        or sink.proc.returncode is not None
                         or sink_wh != (w, h)):
                     await sink.stop()
                     sink = None
                 if sink is None:
-                    sink = FfmpegSink(camera["id"])
-                    await sink.start(w, h, fps)
-                    sink_wh = (w, h)
+                    # Adopt the new sink only once start() has actually succeeded --
+                    # assigning first is what left the poisoned proc=None sink behind.
+                    new_sink = FfmpegSink(camera["id"])
+                    await new_sink.start(w, h, fps)
+                    sink, sink_wh = new_sink, (w, h)
 
                 for _, frame in first_frames:
                     last_frame = frame
@@ -240,7 +280,15 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
 
             except Exception as exc:
-                consecutive_failures += 1
+                rate_limited = isinstance(exc, RateLimited)
+                if not rate_limited:
+                    # A Cloudflare rate-limit is an explicitly-transient server-side
+                    # condition, not the leaked/wedged local resource the os._exit
+                    # escape hatch below exists for -- and restarting the container is
+                    # actively counterproductive there, since every restart re-attempts
+                    # a login and re-triggers the same window (see main.py's
+                    # _login_with_retry). Don't let it count toward that threshold.
+                    consecutive_failures += 1
                 _update_status(state="reconnecting", consecutive_failures=consecutive_failures,
                                last_error=repr(exc))
                 log.exception("%s: camera session failed, reconnecting in %ss",
@@ -290,8 +338,23 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 if session:
                     await _close_with_timeout(session, camera["id"])
                     session = None
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, c.RECONNECT_BACKOFF_MAX_S)
+                if rate_limited:
+                    # Honor Cloudflare's own Retry-After instead of the fixed
+                    # 2/4/8/16/30s schedule. main.py's startup path already learned
+                    # this the hard way -- the short schedule just keeps re-entering
+                    # the same rate-limit window rather than ever clearing it -- but
+                    # that handling only ever covered the startup login, so a
+                    # RateLimited raised by a mid-run re-login (the far more common
+                    # case, since the session expires every few hours) landed here and
+                    # got the exact backoff that compounds the problem.
+                    delay = min(exc.retry_after_s, c.RATE_LIMIT_RETRY_CAP_S) + 2
+                    log.warning("%s: rate-limited by Cloudflare, sleeping %.0fs "
+                                "(server-specified Retry-After, not the fixed backoff)",
+                                camera["id"], delay)
+                    await asyncio.sleep(delay)
+                else:
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, c.RECONNECT_BACKOFF_MAX_S)
             else:
                 # Clean proactive rotation: bridge the reconnect gap.
                 _start_hold()

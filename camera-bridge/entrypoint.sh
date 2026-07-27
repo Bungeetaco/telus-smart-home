@@ -6,8 +6,39 @@
 # own MAX_CONSECUTIVE_SESSION_FAILURES restart, but only after several failed
 # sessions -- this makes MediaMTX dying trigger an immediate, direct restart
 # of the whole container instead of relying on that indirect path).
-set -e
-/usr/local/bin/mediamtx /app/mediamtx.yml &
+# NOT `set -e`: with errexit on, a non-zero exit from `wait -n` below aborts the
+# script immediately, making every line after it -- the diagnostic "which child
+# died" message and the cleanup kill -- unreachable dead code. That is exactly the
+# path the bridge's own MAX_CONSECUTIVE_SESSION_FAILURES escape hatch takes
+# (os._exit(1)), so the one failure mode most in need of a clear log line was the
+# one guaranteed not to produce it. Errors are handled explicitly instead.
+set -uo pipefail
+
+# RTSP auth. MediaMTX's default is a single anonymous user with publish+read on
+# every path, so before this any local process (or any other host-networked
+# container -- this one runs with --network host) could read the security-camera
+# feeds off 127.0.0.1:8554, or publish to the same well-known path names
+# (config.rtsp_path_for is a pure function of the camera id) and replace the live
+# feed. The generated password is shared with the Python bridge through the same
+# /shared mount already used for the control secret, and gets embedded in the RTSP
+# URLs handed to Home Assistant via /control/cameras -- so nothing needs to be
+# configured by hand on either side.
+RTSP_PASS_FILE=/shared/rtsp_password
+if [ ! -s "$RTSP_PASS_FILE" ]; then
+  python3 -c 'import secrets; print(secrets.token_hex(16))' > "$RTSP_PASS_FILE"
+  chmod 600 "$RTSP_PASS_FILE"
+  echo "entrypoint.sh: generated a new RTSP password at $RTSP_PASS_FILE" >&2
+fi
+RTSP_PASSWORD="$(cat "$RTSP_PASS_FILE")"
+export RTSP_PASSWORD
+
+# mediamtx.yml is baked into the image read-only and MediaMTX does not interpolate
+# environment variables inside it, so render a runtime copy with the password
+# substituted in. /tmp is container-local, never the bind mount.
+RUNTIME_CONF=/tmp/mediamtx.runtime.yml
+sed "s|__RTSP_PASSWORD__|${RTSP_PASSWORD}|" /app/mediamtx.yml > "$RUNTIME_CONF"
+
+/usr/local/bin/mediamtx "$RUNTIME_CONF" &
 MEDIAMTX_PID=$!
 
 # wait for MediaMTX's RTSP listener before starting the bridge

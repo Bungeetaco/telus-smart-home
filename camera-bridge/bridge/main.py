@@ -7,7 +7,7 @@ import aiohttp
 
 from . import config as c
 from . import control_server
-from .telus_auth import RateLimited, TelusSession
+from .telus_auth import RateLimited, TelusSession, relogin_if_stale
 from .telus_rest import list_cameras, get_video_source
 from .camera_session import run_camera_forever
 from .lifecycle import CameraLifecycleManager
@@ -18,10 +18,6 @@ log = logging.getLogger(__name__)
 
 INITIAL_LOGIN_RETRIES = 3
 INITIAL_LOGIN_BACKOFF_S = (2, 4, 8)
-# Cap on how long a single Retry-After-driven sleep is allowed to run, even if
-# Cloudflare's own header asks for longer -- keeps container startup bounded
-# rather than hanging on an arbitrarily large server-specified value.
-RATE_LIMIT_RETRY_CAP_S = 300
 
 
 async def get_video_source_with_relogin(telus: TelusSession, camera_id: str, login_lock: asyncio.Lock) -> dict:
@@ -29,19 +25,18 @@ async def get_video_source_with_relogin(telus: TelusSession, camera_id: str, log
     SSO login once and retry before giving up (camera_session's own backoff loop
     handles further/persistent failures).
 
-    The re-login is serialized against every other caller of telus.login()
-    (the control endpoint's credential push, and the fallback-file watcher)
-    via login_lock, since TelusSession.login() clears the whole cookie jar
-    with no locking of its own -- two concurrent logins would race and could
-    leave the session with a mix of cookies from two different login attempts.
+    The re-login goes through relogin_if_stale, which both serializes against every
+    other caller of telus.login() (the control endpoint's credential push, the
+    fallback-file watcher, the other cameras) and skips the login entirely if one of
+    those already refreshed the session while this call was queued -- see that
+    helper for why the de-duplication matters as much as the serialization.
     """
     try:
         return await get_video_source(telus, camera_id)
     except aiohttp.ClientResponseError as err:
         if err.status in (401, 403):
             log.warning("%s: video source fetch got %s, re-logging in to TELUS", camera_id, err.status)
-            async with login_lock:
-                await telus.login()
+            await relogin_if_stale(telus, login_lock)
             return await get_video_source(telus, camera_id)
         raise
 
@@ -71,7 +66,7 @@ async def _login_with_retry(telus: TelusSession, login_lock: asyncio.Lock) -> No
             return
         except RateLimited as exc:
             last_exc = exc
-            delay = min(exc.retry_after_s, RATE_LIMIT_RETRY_CAP_S) + 2  # small margin past what Cloudflare asked for
+            delay = min(exc.retry_after_s, c.RATE_LIMIT_RETRY_CAP_S) + 2  # small margin past what Cloudflare asked for
             if attempt < INITIAL_LOGIN_RETRIES:
                 log.warning("Initial TELUS login rate-limited by Cloudflare (attempt %d/%d): "
                             "retrying in %.0fs (server-specified Retry-After, not the usual "
@@ -101,17 +96,27 @@ def _load_fallback_credentials_if_present() -> str | None:
     try:
         with open(c.CREDENTIALS_FALLBACK_PATH) as f:
             data = json.load(f)
-        c.TELUS_EMAIL = data["username"].strip()
-        c.TELUS_PASSWORD = data["password"].strip()
-        log.info("Loaded credentials from fallback file (updated_at=%s), overriding .env",
-                  data.get("updated_at"))
-        return data.get("updated_at")
+        # Parse BOTH fields before assigning EITHER. Assigning inline meant a file
+        # whose "password" was missing or a non-string left TELUS_EMAIL already
+        # overwritten while TELUS_PASSWORD kept the .env value -- a mismatched pair
+        # that can only ever fail to log in. AttributeError/TypeError are caught
+        # alongside KeyError because valid JSON with the wrong *shape* (null, a
+        # number, a nested object) is exactly as likely as a truncated file, and
+        # previously escaped this handler entirely to kill the process at import
+        # time -- a crash loop, since the bad file is still there on restart.
+        username = data["username"].strip()
+        password = data["password"].strip()
     except FileNotFoundError:
         return None
-    except (json.JSONDecodeError, KeyError, OSError):
+    except (json.JSONDecodeError, KeyError, AttributeError, TypeError, OSError):
         log.warning("Fallback credentials file present but unreadable/corrupt; "
                      "using .env credentials", exc_info=True)
         return None
+
+    c.TELUS_EMAIL, c.TELUS_PASSWORD = username, password
+    log.info("Loaded credentials from fallback file (updated_at=%s), overriding .env",
+              data.get("updated_at"))
+    return data.get("updated_at")
 
 
 def _camera_registry_entry(cam: dict) -> dict:
@@ -188,8 +193,20 @@ async def watch_credentials_fallback(telus: TelusSession, login_lock: asyncio.Lo
             continue
         try:
             username, password = data["username"].strip(), data["password"].strip()
-        except (KeyError, AttributeError):
-            log.warning("credentials.json missing username/password this cycle, skipping")
+        except (KeyError, AttributeError, TypeError):
+            log.warning("credentials.json missing/malformed username/password this cycle, skipping")
+            continue
+
+        if (username, password) == (c.TELUS_EMAIL, c.TELUS_PASSWORD):
+            # Already in effect -- almost always because HA's live push to
+            # /control/credentials beat this poll to it (the config flow writes this
+            # file first, then pushes). Record the marker so we stop re-reading it,
+            # but skip the login: it would clear a perfectly good cookie jar and add
+            # a pointless second hit to the Cloudflare-fronted auth gateway within
+            # 30s of the push that already succeeded.
+            last_seen = updated_at
+            log.debug("Credentials file updated_at moved but credentials are already "
+                       "applied (live push); skipping redundant re-login")
             continue
 
         last_seen = updated_at
@@ -240,13 +257,30 @@ async def main():
             # populated before we consider startup done, rather than racing the HA
             # integration's first poll against an empty registry. Every subsequent
             # pass happens inside discover_and_launch_cameras's own loop.
-            initial_cameras = await list_cameras(telus)
-            log.info("Discovered %d cameras: %s", len(initial_cameras),
-                      [(cam["id"], cam["description"]) for cam in initial_cameras])
-            if not initial_cameras:
-                log.warning("No cameras returned by TELUS (filterByLiveViewDisplayable=true) "
-                            "on startup -- will keep polling every %ss in case one is added.",
-                            c.CAMERA_DISCOVERY_INTERVAL_S)
+            #
+            # A failure here must NOT propagate: unhandled, a transient TELUS API
+            # blip in the seconds right after a successful login killed the whole
+            # process, and Docker's `restart: unless-stopped` then brought it back
+            # into a *fresh SSO login* -- turning one flaky response into a restart
+            # loop that hammers the Cloudflare-fronted auth gateway, which is the
+            # documented route to a rate-limit lockout. The discovery loop started
+            # below already retries this exact call every
+            # CAMERA_DISCOVERY_INTERVAL_S with its own error handling, so degrade to
+            # an empty registry and let it recover in place.
+            try:
+                initial_cameras = await list_cameras(telus)
+            except Exception:
+                log.exception("Initial camera discovery failed; starting with an empty registry "
+                              "and retrying on the discovery loop's own %ss cycle",
+                              c.CAMERA_DISCOVERY_INTERVAL_S)
+                initial_cameras = []
+            else:
+                log.info("Discovered %d cameras: %s", len(initial_cameras),
+                          [(cam["id"], cam["description"]) for cam in initial_cameras])
+                if not initial_cameras:
+                    log.warning("No cameras returned by TELUS (filterByLiveViewDisplayable=true) "
+                                "on startup -- will keep polling every %ss in case one is added.",
+                                c.CAMERA_DISCOVERY_INTERVAL_S)
             for cam in initial_cameras:
                 entry = _camera_registry_entry(cam)
                 camera_registry[cam["id"]] = entry

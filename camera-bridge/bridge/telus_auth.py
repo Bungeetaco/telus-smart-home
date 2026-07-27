@@ -40,6 +40,25 @@ _NAV_HEADERS = {**_BROWSER_HEADERS, "Accept": "text/html,application/xhtml+xml",
                 "upgrade-insecure-requests": "1"}
 
 
+async def relogin_if_stale(telus: "TelusSession", login_lock) -> None:
+    """Re-login unless another caller already refreshed the session while we waited.
+
+    The single shared login_lock serializes logins so they can't interleave and mix
+    two attempts' cookies together, but serializing them does nothing to stop them
+    being *redundant*: on a session expiry every camera's next request 401s at
+    roughly the same moment, and each one queues here behind the others. Comparing
+    login_generation across the lock boundary collapses that whole burst into one
+    real login -- see the attribute's own comment in TelusSession for why the burst
+    is actively harmful rather than merely wasteful.
+    """
+    seen = telus.login_generation
+    async with login_lock:
+        if telus.login_generation != seen:
+            log.debug("Skipping redundant re-login; session already refreshed by another caller")
+            return
+        await telus.login()
+
+
 class TelusSession:
     """Owns one aiohttp session authenticated against smarthome-security.telus.com."""
 
@@ -47,6 +66,17 @@ class TelusSession:
         self._session: aiohttp.ClientSession | None = None
         self._ajax_headers: dict[str, str] = {}
         self._context_id: str | None = None
+        # Bumped on every SUCCESSFUL login. Callers that react to a 401 by
+        # re-logging-in capture this before queueing on the shared login_lock and
+        # re-check it after acquiring the lock: if it moved, somebody else already
+        # refreshed the session and this caller must NOT log in again. Without that
+        # check, every camera that 401s in the same window runs its own full 3-step
+        # SSO login, and since login() clears the whole cookie jar each one
+        # invalidates the session the previous one just established -- a
+        # self-sustaining stampede against the Cloudflare-fronted auth gateway,
+        # which is exactly the request pattern RateLimited below documents as
+        # having caused a multi-hour outage.
+        self.login_generation: int = 0
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
@@ -135,6 +165,10 @@ class TelusSession:
             # Fall back to the first (only) system if none is explicitly flagged.
             self._context_id = body["data"][0]["id"]
         log.info("TELUS active system (Context-Id) = %s", self._context_id)
+
+        # Last statement of a fully-successful login -- a login that raised partway
+        # through must not look to waiters like a usable refreshed session.
+        self.login_generation += 1
 
     @property
     def session(self) -> aiohttp.ClientSession:

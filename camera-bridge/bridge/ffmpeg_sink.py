@@ -49,6 +49,7 @@ the device comes back.
 """
 import asyncio
 import logging
+import re
 
 from . import config as c
 
@@ -58,6 +59,14 @@ log = logging.getLogger(__name__)
 # trusting it -- a doomed VAAPI attempt (missing/broken device) exits almost
 # immediately; a working one is still running past this, quietly waiting on stdin.
 _STARTUP_GRACE_S = 0.75
+
+# Matches the "user:password@" userinfo section of a URL.
+_URL_CREDENTIALS_RE = re.compile(r"://[^/@]+:[^/@]*@")
+
+
+def _redact_url(url: str) -> str:
+    """Strip credentials out of a URL before it reaches a log line."""
+    return _URL_CREDENTIALS_RE.sub("://***:***@", url)
 
 
 class FfmpegSink:
@@ -153,9 +162,13 @@ class FfmpegSink:
                     raise RuntimeError("ffmpeg failed to start with both hardware and software encoders")
                 self.hardware_encode = False
 
+        # Mask the RTSP credentials: this URL now carries the MediaMTX password, and
+        # container logs are persisted by Docker's json-file driver (and routinely
+        # pasted into issues), so logging it verbatim would defeat the point of
+        # requiring auth at all.
         log.info("%s: ffmpeg publishing %dx%d@%dfps (source %dx%d) to %s (%s)", self.camera_id,
                   enc_width, enc_height, fps, width, height,
-                  url, f"hw/{c.ENCODE_BACKEND}" if self.hardware_encode else "sw/libx264")
+                  _redact_url(url), f"hw/{c.ENCODE_BACKEND}" if self.hardware_encode else "sw/libx264")
 
     async def _try_start(self, args: list[str]) -> bool:
         proc = await asyncio.create_subprocess_exec(
@@ -188,6 +201,23 @@ class FfmpegSink:
 
     async def write_frame(self, frame) -> bool:
         """Returns False if the pipe is broken (caller should restart the sink)."""
+        # Never started (start() raised partway through), or already stopped. Report
+        # this the same way as a broken pipe rather than raising AttributeError on
+        # None.stdin below -- an exception here isn't caught by any caller and, from
+        # inside the frame-hold task, propagates into an unrelated later session.
+        if self.proc is None or self.proc.stdin is None:
+            return False
+        # ffmpeg was launched with a fixed `-s WxH` raw input size. A frame of any
+        # other size writes the wrong number of bytes into the pipe, permanently
+        # desynchronising the raw stream so every subsequent frame is decoded from
+        # the wrong offset -- visible as persistent garbage rather than a clean
+        # failure. Force a sink rebuild instead; the caller's own size check then
+        # relaunches ffmpeg with the new dimensions.
+        if self._wh is not None and (frame.width, frame.height) != self._wh:
+            log.warning("%s: frame size changed mid-session (%dx%d -> %dx%d); "
+                        "restarting the encoder rather than corrupting the stream",
+                        self.camera_id, self._wh[0], self._wh[1], frame.width, frame.height)
+            return False
         # to_ndarray()/tobytes() is a real synchronous CPU cost -- a full pixel-format
         # copy of the whole frame (e.g. ~3.1MB for this codebase's 1440x1440 doorbell
         # camera) done in pure Python/numpy, not I/O. Running it inline on the event

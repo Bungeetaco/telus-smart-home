@@ -90,18 +90,26 @@ request (see `janus_client.py`). This was a real production bug: earlier
 versions of this bridge used far longer values and would go dark and hang
 once the server-side timer won the race.
 
-The current, tested, working fix (`config.py`'s `SESSION_MAX_LIFETIME_S = 120`
+The current, tested, working fix (`config.py`'s `SESSION_MAX_LIFETIME_S = 165`
 and the rotation loop in `camera_session.py`'s `run_camera_forever`):
 
-- Proactively **rotates every camera session every 120s**, comfortably before
-  Alarm.com's 180s server-side kill, so the RTSP feed never actually goes
-  dark waiting for a server-initiated teardown.
+- Proactively **rotates every camera session every 165s**, before Alarm.com's
+  ~180s server-side kill, so the RTSP feed never goes dark waiting for a
+  server-initiated teardown. (This was 120s in an earlier design that tore the
+  ffmpeg publisher down along with each session; once the publisher was made to
+  outlive rotations and the gap bridged by repeating the last frame, the margin
+  could be tightened to 15s -- matching `FRAME_SILENCE_TIMEOUT_S` -- to keep
+  those frame-hold gaps as infrequent as possible.)
 - Independently detects a **dead session via frame silence**
   (`FRAME_SILENCE_TIMEOUT_S = 15`) -- if no frame arrives for 15s, the session
-  is torn down and reconnected immediately, without waiting for the 120s
-  rotation deadline. This check runs unconditionally on every loop iteration
+  is torn down and reconnected immediately, without waiting for the rotation
+  deadline. This check runs unconditionally on every loop iteration
   (including when zero frames have ever arrived for that session), which is
   what makes it safe against a camera that stalls immediately.
+- Bridges each rotation/reconnect gap by **repeating the last real frame** into
+  the still-running publisher (`FRAME_HOLD_MAX_S = 60`), so readers see a brief
+  freeze rather than a torn-down RTSP path. A genuinely offline camera stops
+  being held after 60s and the feed is allowed to go dark honestly.
 
 **If you touch `camera_session.py` or `janus_client.py`: read them in full
 first.** The frame-silence check and the rotation deadline check are two

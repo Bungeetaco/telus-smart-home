@@ -87,8 +87,17 @@ if [ ! -f secrets.env ]; then
   # as "$$" here. Verified live during development: an unescaped "$" in a
   # real password reached the container mangled; this escaping is what fixes
   # it, not just defensive paranoia.
+  # Escape BOTH values, not just the password: Compose applies the same
+  # interpolation pass to every value in the file, and while a "$" in an email
+  # address is unusual it is legal, and would be corrupted exactly the same way.
+  ESCAPED_EMAIL="${INPUT_EMAIL//\$/\$\$}"
   ESCAPED_PASSWORD="${INPUT_PASSWORD//\$/\$\$}"
-  printf 'TELUS_EMAIL=%s\nTELUS_PASSWORD=%s\n' "$INPUT_EMAIL" "$ESCAPED_PASSWORD" > secrets.env
+  # Create the file with restrictive permissions BEFORE writing to it -- a plain
+  # `> secrets.env` creates it under the caller's umask (world-readable on most
+  # distributions), leaving the plaintext password briefly exposed even though
+  # chmod follows immediately after.
+  ( umask 077; : > secrets.env )
+  printf 'TELUS_EMAIL=%s\nTELUS_PASSWORD=%s\n' "$ESCAPED_EMAIL" "$ESCAPED_PASSWORD" > secrets.env
   chmod 600 secrets.env
   echo "  Wrote secrets.env (mode 600)."
 else
@@ -108,6 +117,32 @@ if ! grep -q '^HOST_SHARED_DIR=' .env 2>/dev/null; then
 fi
 echo "  Prepared $HOST_SHARED_DIR (owned by the bridge's non-root container user,"
 echo "  uid $BRIDGE_UID)."
+
+# The whole credential-sync contract rests on BOTH containers seeing this one host
+# directory -- the bridge writes control_secret there, Home Assistant reads it to
+# authenticate its credential push and every camera/event poll. Preparing the
+# host-side path says nothing about whether HA's container actually mounts it, and
+# if it doesn't, nothing fails loudly: HA's bridge_client just reads no secret,
+# treats it as "bridge not up yet", and silently reports no cameras forever. Check
+# it here, where it is cheap to fix, rather than leaving it to be discovered as an
+# unexplained absence of camera entities.
+if [ -n "$HA_CONTAINER" ]; then
+  if sudo docker inspect "$HA_CONTAINER" \
+       --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null \
+       | grep -qx "$HOST_SHARED_DIR"; then
+    echo "  OK: '$HA_CONTAINER' mounts $HOST_SHARED_DIR."
+  else
+    echo
+    echo "  WARNING: '$HA_CONTAINER' does NOT appear to mount $HOST_SHARED_DIR."
+    echo "  Home Assistant must see this same directory (conventionally at"
+    echo "  /share/telus_cam_bridge inside its container) or credential sync and the"
+    echo "  camera/event platforms will silently do nothing. Add a bind mount such as:"
+    echo "      -v $HOST_SHARED_DIR:/share/telus_cam_bridge"
+    echo "  to the Home Assistant container and restart it."
+    read -r -p "  Continue anyway? [y/N] " REPLY
+    [[ "$REPLY" =~ ^[Yy]$ ]] || exit 1
+  fi
+fi
 echo
 
 # --- Step 5: build and start -----------------------------------------------
