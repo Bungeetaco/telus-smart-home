@@ -117,6 +117,18 @@ FRAME_HOLD_MAX_S = 60
 # camera goes offline mid-session), and must be short enough that a live view
 # doesn't appear frozen for long before recovering.
 FRAME_SILENCE_TIMEOUT_S = 15
+# Upper bound on the larger side of the RTSP-published H.264 frame. Some TELUS
+# cameras (the doorbell, in particular) publish natively at 1440x1440 -- fine
+# for the RTSP/WebRTC pipeline itself, but decoding that continuously turned
+# out to exceed what a modest kiosk box's browser/iGPU pipeline can sustain
+# alongside a second camera: confirmed live 2026-07-26/27, the doorbell's
+# video element would keep receiving RTP (go2rtc's own consumer stats kept
+# climbing) while the picture itself froze for minutes at a time -- a
+# decoder/paint stall on the viewer, not a network one. Downscaling at the
+# encode step cuts the actual pixel throughput any viewer's decoder has to
+# sustain, at the cost of some detail -- cheaper and more reliable than
+# relying on every viewing device to keep up with native resolution.
+MAX_ENCODE_DIMENSION = 960
 WEBRTCUP_TIMEOUT_S = 20
 FIRST_FRAME_TIMEOUT_S = 20
 JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side; keep well under that

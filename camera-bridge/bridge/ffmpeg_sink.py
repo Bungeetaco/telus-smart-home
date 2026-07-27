@@ -80,6 +80,16 @@ class FfmpegSink:
         # (camera_session.py) made the doorbell's real 30fps look like "39fps" in
         # logs, since a burst-artifact measurement can exceed this clamp.
         self.fps = fps
+
+        # Downscale the larger side to config.MAX_ENCODE_DIMENSION if the camera's
+        # native resolution exceeds it -- see that constant for why. h264/yuv420p
+        # needs even dimensions, so round down to the nearest even number rather
+        # than risk ffmpeg rejecting an odd one.
+        scale = min(1.0, c.MAX_ENCODE_DIMENSION / max(width, height))
+        enc_width = max(2, (int(width * scale) // 2) * 2)
+        enc_height = max(2, (int(height * scale) // 2) * 2)
+        scale_filter = f"scale={enc_width}:{enc_height}" if scale < 1.0 else None
+
         url = c.rtsp_publish_url(self.camera_id)
         common_in = [
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}",
@@ -100,10 +110,11 @@ class FfmpegSink:
             "-g", str(fps), "-bf", "0",
             "-f", "rtsp", "-rtsp_transport", "tcp", "-pkt_size", "1200", url,
         ]
+        vaapi_vf = f"{scale_filter}," if scale_filter else ""
         vaapi_args = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
             "-vaapi_device", c.VAAPI_DEVICE, *common_in,
-            "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+            "-vf", f"{vaapi_vf}format=nv12,hwupload", "-c:v", "h264_vaapi",
             # Default 2: lets the encoder have up to 2 frames in flight for pipeline
             # parallelism, which mainly helps *throughput* across many concurrent
             # streams sharing one encode session -- not our case (one process, one
@@ -114,15 +125,16 @@ class FfmpegSink:
             "-async_depth", "1",
             *common_out,
         ]
+        scale_vf = ["-vf", scale_filter] if scale_filter else []
         nvenc_args = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in,
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in, *scale_vf,
             # p1/ll: NVENC's fastest preset + low-latency tuning, mirroring the
             # same latency-over-throughput choice vaapi_args makes with
             # -async_depth 1 and software_args makes with ultrafast/zerolatency.
             "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll", *common_out,
         ]
         software_args = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in,
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", *common_in, *scale_vf,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", *common_out,
         ]
 
@@ -141,7 +153,8 @@ class FfmpegSink:
                     raise RuntimeError("ffmpeg failed to start with both hardware and software encoders")
                 self.hardware_encode = False
 
-        log.info("%s: ffmpeg publishing %dx%d@%dfps to %s (%s)", self.camera_id, width, height, fps,
+        log.info("%s: ffmpeg publishing %dx%d@%dfps (source %dx%d) to %s (%s)", self.camera_id,
+                  enc_width, enc_height, fps, width, height,
                   url, f"hw/{c.ENCODE_BACKEND}" if self.hardware_encode else "sw/libx264")
 
     async def _try_start(self, args: list[str]) -> bool:
