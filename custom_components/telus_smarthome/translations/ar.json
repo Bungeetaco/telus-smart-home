@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "اختر طريقة المصادقة الثنائية",
-                "data": { "otp_method": "الطريقة" }
+                "data": {
+                    "otp_method": "الطريقة"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "النشاط الأخير",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "شخص",
+                            "vehicle": "مركبة",
+                            "animal": "حيوان",
+                            "other": "آخر"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "النشاط",
                 "state_attributes": {
                     "event_type": {
                         "state": {

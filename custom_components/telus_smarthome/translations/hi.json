@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "दो-चरणीय प्रमाणीकरण विधि चुनें",
-                "data": { "otp_method": "विधि" }
+                "data": {
+                    "otp_method": "विधि"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "हाल की गतिविधि",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "व्यक्ति",
+                            "vehicle": "वाहन",
+                            "animal": "जानवर",
+                            "other": "अन्य"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "गतिविधि",
                 "state_attributes": {
                     "event_type": {
                         "state": {

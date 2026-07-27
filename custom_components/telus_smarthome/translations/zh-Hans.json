@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "选择双重验证方式",
-                "data": { "otp_method": "方式" }
+                "data": {
+                    "otp_method": "方式"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "近期活动",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "人",
+                            "vehicle": "车辆",
+                            "animal": "动物",
+                            "other": "其他"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "活动",
                 "state_attributes": {
                     "event_type": {
                         "state": {

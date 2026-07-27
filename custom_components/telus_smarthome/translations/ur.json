@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "دو مرحلہ توثیقی طریقہ منتخب کریں",
-                "data": { "otp_method": "طریقہ" }
+                "data": {
+                    "otp_method": "طریقہ"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "حالیہ سرگرمی",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "شخص",
+                            "vehicle": "گاڑی",
+                            "animal": "جانور",
+                            "other": "دیگر"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "سرگرمی",
                 "state_attributes": {
                     "event_type": {
                         "state": {

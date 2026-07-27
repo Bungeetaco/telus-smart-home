@@ -79,4 +79,3 @@ the bridge's own README for the other half of this contract.
   `cannot_connect`), not by inspecting TELUS's actual response bodies —
   doing that safely would require deliberately triggering those responses
   against a live account, which risks rate-limiting/lockout.
-- No `diagnostics.py` (downloadable diagnostics dump) yet.

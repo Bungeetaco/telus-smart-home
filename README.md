@@ -3,7 +3,7 @@
 **Bring a TELUS Smart Home (white-labeled Alarm.com) system into Home Assistant — panel, lock, sensors, and live camera video — with credentials that stay in sync from HA's own GUI.**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1.0%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.11.0%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
 [![Docker](https://img.shields.io/badge/camera%20bridge-Docker-2496ED?logo=docker&logoColor=white)](camera-bridge)
 ![Status](https://img.shields.io/badge/status-unofficial%20%26%20reverse--engineered-yellow)
 

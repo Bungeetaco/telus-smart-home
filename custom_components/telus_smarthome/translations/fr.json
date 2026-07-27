@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "Sélectionner la méthode d'authentification à deux facteurs",
-                "data": { "otp_method": "Méthode" }
+                "data": {
+                    "otp_method": "Méthode"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "Activité récente",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "Personne",
+                            "vehicle": "Véhicule",
+                            "animal": "Animal",
+                            "other": "Autre"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "Activité",
                 "state_attributes": {
                     "event_type": {
                         "state": {

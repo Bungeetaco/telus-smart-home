@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "দ্বি-স্তরীয় প্রমাণীকরণ পদ্ধতি নির্বাচন করুন",
-                "data": { "otp_method": "পদ্ধতি" }
+                "data": {
+                    "otp_method": "পদ্ধতি"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "সাম্প্রতিক কার্যকলাপ",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "ব্যক্তি",
+                            "vehicle": "যানবাহন",
+                            "animal": "প্রাণী",
+                            "other": "অন্যান্য"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "কার্যকলাপ",
                 "state_attributes": {
                     "event_type": {
                         "state": {

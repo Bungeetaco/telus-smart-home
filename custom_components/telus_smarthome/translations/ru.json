@@ -29,7 +29,9 @@
             },
             "otp_select_method": {
                 "title": "Выберите метод двухфакторной аутентификации",
-                "data": { "otp_method": "Метод" }
+                "data": {
+                    "otp_method": "Метод"
+                }
             }
         },
         "error": {
@@ -99,6 +101,19 @@
         "event": {
             "video_event": {
                 "name": "Недавняя активность",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "person": "Человек",
+                            "vehicle": "Транспортное средство",
+                            "animal": "Животное",
+                            "other": "Другое"
+                        }
+                    }
+                }
+            },
+            "activity_event": {
+                "name": "Активность",
                 "state_attributes": {
                     "event_type": {
                         "state": {
