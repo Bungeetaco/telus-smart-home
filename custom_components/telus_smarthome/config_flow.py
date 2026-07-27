@@ -5,6 +5,7 @@ from __future__ import annotations
 from . import telus_auth_patch  # noqa: F401  (applies TELUS SSO monkeypatch on import)
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -147,6 +148,9 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
 
             LOGGER.debug("Logging in to Alarm.com...")
 
+            # Release the session from any previous attempt in this same flow (a
+            # mistyped password, say) before replacing the controller.
+            await self._async_close_controller()
             self._controller = AlarmIntegrationController(self.hass, self.config)
 
             async with async_timeout.timeout(60):
@@ -332,6 +336,9 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
             LOGGER.debug("Existing entry found — updating in place (%s).", self._success_abort_reason)
 
             await self._async_sync_bridge_credentials()
+            # The entry is served by a controller async_setup_entry creates for
+            # itself; this flow's own is finished with.
+            await self._async_close_controller()
 
             return self.async_update_reload_and_abort(
                 self._existing_entry,
@@ -343,8 +350,28 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
 
         self._abort_if_unique_id_configured(error="already_configured_account")
 
+        await self._async_close_controller()
+
         # Named async_ but doesn't require await!
         return self.async_create_entry(title=self._config_title, data=self.config, options=CONF_OPTIONS_DEFAULT)
+
+    async def _async_close_controller(self) -> None:
+        """Close the session belonging to a controller this flow created.
+
+        Every login attempt builds a throwaway AlarmIntegrationController, and
+        initialize_lite gives each one its own aiohttp session (correctly -- the SSO
+        handshake needs an isolated cookie jar). Those sessions are only closed when
+        Home Assistant itself shuts down, so without this each retyped password, each
+        reauth and each reconfigure left one behind, along with its connector and
+        sockets. The controller that actually serves the entry is a different one,
+        created later by async_setup_entry, so closing this one is always safe.
+        """
+        controller = getattr(self, "_controller", None)
+        if controller is None:
+            return
+        with contextlib.suppress(Exception):
+            await controller.api.close_websession()
+        self._controller = None  # type: ignore[assignment]
 
     @staticmethod
     def _normalize_creds(user_input: dict[str, Any]) -> tuple[str, str]:
@@ -447,6 +474,9 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
 
             LOGGER.debug("Reconfigure: logging in to Alarm.com with updated credentials...")
 
+            # Release the session from any previous attempt in this same flow (a
+            # mistyped password, say) before replacing the controller.
+            await self._async_close_controller()
             self._controller = AlarmIntegrationController(self.hass, self.config)
 
             async with async_timeout.timeout(60):
