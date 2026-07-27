@@ -26,6 +26,7 @@ against.
 - [Installing](#installing)
 - [Components](#components)
 - [How the two talk to each other](#how-the-two-talk-to-each-other)
+- [Camera stream authentication](#camera-stream-authentication)
 - [For developers](#for-developers)
 - [Status and disclaimer](#status-and-disclaimer)
 
@@ -33,16 +34,21 @@ against.
 
 - 🔐 **Full panel control** — arm/disarm the alarm panel, lock/unlock, and read every
   door/motion/glass-break sensor as native HA entities.
-- 📹 **Live camera video** — cameras stream as ordinary RTSP entities in HA, not a proprietary
-  WebRTC blob; the bridge does the translation so HA's Generic Camera integration (and go2rtc)
-  just works.
+- 📹 **Live camera video** — cameras appear as native HA camera entities, created automatically
+  from whatever the bridge currently sees; under the hood the bridge translates Alarm.com's
+  proprietary WebRTC signaling into ordinary RTSP that HA (and its bundled go2rtc) consumes
+  directly. Nothing to configure by hand — the integration reads the stream URLs, credentials
+  included, straight from the bridge.
+- 🔒 **Authenticated camera streams** — the bridge's RTSP server requires a password (generated
+  per install), so nothing else on the host can quietly read your camera feeds or publish over
+  them.
 - 🔄 **Credentials that actually stay in sync** — update your TELUS username/password once, from
   HA's own Reconfigure flow, and both the integration *and* the separate camera bridge process
   pick it up — no more silently-stale bridge credentials after a password change.
 - 🩺 **Self-healing camera sessions** — Alarm.com force-closes video sessions server-side every
-  ~180s; the bridge proactively rotates ahead of that, detects dead/silent sessions independently,
-  and (as of the latest release) hard-restarts itself if a session gets truly wedged rather than
-  retrying forever in a broken state.
+  ~180s; the bridge proactively rotates ahead of that, bridges the gap so viewers see at most a
+  brief freeze, detects dead/silent sessions independently, and hard-restarts itself if a session
+  gets truly wedged rather than retrying forever in a broken state.
 - 🩹 **A diagnostic Auth Health sensor** — see login/session state from within HA instead of
   guessing from logs.
 - 🧩 **No official API required** — both the SSO login and the camera signaling were
@@ -114,10 +120,10 @@ automatically if you let it prompt for credentials instead of hand-editing the f
 | --- | --- | --- | --- |
 | `TELUS_EMAIL` | **yes** | — | TELUS account email. Lives in `secrets.env`, not `.env` — see the `$`-escaping note above for why the two files are kept separate. |
 | `TELUS_PASSWORD` | **yes** | — | TELUS account password. Same file/reasoning as above. |
-| `MEDIAMTX_RTSP_PORT` | no | `8554` | Port MediaMTX (bundled in the container) serves RTSP on. |
+| `MEDIAMTX_RTSP_PORT` | no | `8554` | Port MediaMTX (bundled in the container) serves RTSP on. Requires authentication — see [Camera stream authentication](#camera-stream-authentication). |
 | `LOG_LEVEL` | no | `INFO` | Python logging level for the bridge process. |
 | `CONTROL_PORT` | no | `8199` | Loopback-only port for the credential-sync control endpoint HA's Reconfigure flow pushes to. |
-| `HOST_SHARED_DIR` | no | `/var/lib/homeassistant/share/telus_cam_bridge` | Host-side path shared with the Home Assistant container — holds the control secret and the credential fallback file. Override if you're not on the HA Supervised default layout. |
+| `HOST_SHARED_DIR` | no | `/var/lib/homeassistant/share/telus_cam_bridge` | Host-side path shared with the Home Assistant container — holds the control secret, the credential fallback file, and the generated RTSP password. Override if you're not on the HA Supervised default layout. |
 | `VAAPI_DEVICE` | no | `/dev/dri/renderD128` | Render node passed to ffmpeg for hardware (QuickSync) H.264 encoding. Override if your host has more than one GPU and the numbering differs. |
 | `RENDER_GID` | no | `992` | Host GID of the `render` group, granted to the container's non-root user for `/dev/dri` access. Must match `getent group render` on your actual host if it differs. |
 
@@ -150,6 +156,33 @@ update them via the integration's Reconfigure flow, HA pushes the new credential
 bridge over a local-only authenticated HTTP endpoint, and also writes them to a shared fallback
 file the bridge polls independently — so the bridge stays in sync even if it was down at the
 moment of the update. See `camera-bridge/bridge/control_server.py` for the exact contract.
+
+The same shared directory carries the camera streams' RTSP password, which is how the integration
+knows how to authenticate to them without you configuring anything.
+
+## Camera stream authentication
+
+**As of v1.4.0 the bridge's RTSP server requires a username and password.** Before that it ran
+with MediaMTX's default anonymous access, which — because both containers use `--network host` —
+meant any process on the host could read the camera feeds, or publish over them, using path names
+that are trivially derived from the camera ID.
+
+You don't have to set this up. On first start the bridge generates a random password into
+`<shared dir>/rtsp_password` (mode `0600`) and builds it into the stream URLs it hands to Home
+Assistant, so the integration's camera entities keep working with no configuration.
+
+It only matters if you point something else at a stream directly:
+
+```
+rtsp://bridge:<contents of rtsp_password>@127.0.0.1:8554/telus_<camera_id_with_underscores>
+```
+
+> **Upgrading from v1.3.0 or earlier:** anything already holding a credential-less
+> `rtsp://127.0.0.1:8554/...` URL will start getting `401 Unauthorized`. Home Assistant's own
+> camera entities fix themselves once HA is restarted (they re-read the URLs from the bridge), but
+> a hand-configured **Generic Camera** entity pointing at the old URL must be updated to the
+> authenticated form above, or replaced by the integration's own camera entities. To rotate the
+> password, delete `rtsp_password`, restart the bridge, then restart Home Assistant.
 
 ## For developers
 

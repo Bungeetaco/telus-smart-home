@@ -151,6 +151,11 @@ sudo docker compose up -d --build
 echo
 echo "Done."
 echo "  Logs:    sudo docker compose -f $SCRIPT_DIR/camera-bridge/docker-compose.yml logs -f"
-echo "  Once you see 'webrtcup' for each camera, add it in Home Assistant as a"
-echo "  Generic Camera entity using rtsp://127.0.0.1:8554/<camera-path>"
-echo "  (see camera-bridge/README.md for exact path names and next steps)."
+echo "  Once you see 'webrtcup' for each camera, the TELUS Smart Home integration"
+echo "  creates its camera entities automatically -- it reads the RTSP URLs (with the"
+echo "  credentials the bridge now requires) straight from the bridge, so there is"
+echo "  nothing to add by hand."
+echo
+echo "  To point something else at a stream directly, note that the RTSP server"
+echo "  requires authentication as of v1.4.0: user 'bridge', password in"
+echo "  $HOST_SHARED_DIR/rtsp_password."
