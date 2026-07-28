@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from . import telus_auth_patch  # noqa: F401  (applies TELUS SSO monkeypatch on import)
+from . import telus_ws_heartbeat_patch  # noqa: F401  (keepalive pings so the push websocket survives idle)
 
 import asyncio
 import json
