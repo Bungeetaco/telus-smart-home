@@ -85,6 +85,22 @@ cd telus-smart-home
 This walks through the network pre-flight check, TELUS credentials, the shared directory Home
 Assistant and the bridge use to sync credentials, and building/starting the container.
 
+### Integration options (state-change latency)
+
+Sensor/light state changes arrive over Alarm.com's push websocket, with a REST poll as
+fallback. The server closes that websocket roughly **6 minutes after every connect**
+regardless of traffic (verified live with keepalive pings — it's a token lifetime, not an
+idle timeout), so the two options under **Settings → Devices & Services → TELUS Smart Home →
+Configure** are what govern how stale the fallback windows get:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| Websocket reconnect timeout | `30` s | How long to wait before reconnecting push after the server drops it. At 30s, push is up ~92% of the time; the old 300s default left it dead half the time. |
+| Update interval | `300` s | REST poll period — the worst-case staleness for a change that lands while push is down. Don't go below 300s: aggressive polling risks Alarm.com rate-limiting/locking the account. |
+
+Existing installs keep whatever they have — these defaults only apply to new config entries,
+so update the two values via Configure if you installed before they changed.
+
 <details>
 <summary><strong>Prefer to do it by hand, or just want the manual-install alternative?</strong></summary>
 

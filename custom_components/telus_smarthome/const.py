@@ -31,8 +31,15 @@ MIGRATE_MSG_ALERT = (
 )
 
 KEEP_ALIVE_INTERVAL_SECONDS = 60
-CONF_DEFAULT_UPDATE_INTERVAL_SECONDS = 900  # 15 minutes
-CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT = 300  # 5 minutes
+# The REST poll is only the fallback behind the push websocket, but the server
+# closes that websocket ~6 minutes after every connect (token lifetime -- a
+# keepalive ping doesn't prevent it, see telus_ws_heartbeat_patch), so both
+# knobs matter for real-world latency: reconnect fast so push is up ~92% of
+# the time, and poll at 5 minutes so a change landing in the reconnect gap
+# isn't stale for long. Values below 300s for the poll risk Alarm.com
+# rate-limiting a live account.
+CONF_DEFAULT_UPDATE_INTERVAL_SECONDS = 300  # 5 minutes
+CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT = 30  # seconds
 
 LOGGER = logging.getLogger(__package__)
 
