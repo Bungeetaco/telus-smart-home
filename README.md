@@ -145,10 +145,32 @@ ffmpeg -nostdin -ss 12 -i clip.mp4 -frames:v 1 -q:v 3 frame.jpg
 ```
 
 The signed token in both URLs is **self-contained** — the image fetches with no session,
-cookies or headers — but it expires within hours, so fetch at event time rather than storing
-the URL for later. An expired token returns a small JPEG reading "You don't have permission to
-view this clip" (or "Clip supprimé"), not an HTTP error, so check the payload rather than just
-the status code.
+cookies or headers — but Alarm.com mints it when the event is created and never re-signs it,
+so it expires within hours. Fetch at event time rather than storing the URL for later.
+
+**An expired token is not an error.** It returns HTTP 200 with a small JPEG reading "You don't
+have permission to view this clip" (or "Clip supprimé"), so `curl -f` succeeds and silently
+saves a placeholder. Validate the payload: real doorbell frames are 50 KB+, the placeholders
+about 4–6 KB. To recover a fresh token, re-query the events endpoint with an authenticated
+session:
+
+```python
+from custom_components.telus_smarthome import telus_auth_patch  # noqa: F401  (SSO patch)
+from pyalarmdotcomajax import AlarmController
+
+alarm = AlarmController(username=..., password=..., websession=session,
+                        twofactorcookie=...)
+await alarm.async_login()
+async with session.get(
+    "https://smarthome-security.telus.com/web/api/video/videoEvents/getSignificantEvents",
+    headers=dict(alarm._ajax_headers),
+) as resp:
+    events = (await resp.json(content_type=None))["data"]
+```
+
+Each event carries a freshly-signed `thumbnail`, its `timestamp`, and `timestampToStartClip`
+— use the last of these as the ffmpeg seek offset instead of a fixed guess, since it varies
+per clip (12–13 s observed on a doorbell).
 
 <details>
 <summary><strong>Prefer to do it by hand, or just want the manual-install alternative?</strong></summary>
