@@ -43,3 +43,11 @@ async def _connect_with_heartbeat(self):
 
 
 WebSocketClient._connect = _connect_with_heartbeat
+
+# NOTE (2026-07-29): the live portal connects to
+#   wss://webskt.alarm.com:8443/?f=1&auth=<token>&ver=A
+# while the library uses only `?auth=<token>`. Mirroring the portal's form was
+# tried and REJECTED by the server: the socket reached RUNNING and closed 1ms
+# later, every time, looping on the reconnect timer. The portal's extra params
+# evidently pair with something else in a browser session (token type, headers,
+# or cookies), so do not "fix" the endpoint to match the capture.

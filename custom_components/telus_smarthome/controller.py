@@ -27,6 +27,7 @@ from pyalarmdotcomajax.exceptions import (
     UnexpectedResponse,
 )
 
+from . import telus_ws_push_patch
 from .const import (
     CONF_2FA_COOKIE,
     CONF_DEFAULT_UPDATE_INTERVAL_SECONDS,
@@ -107,6 +108,11 @@ class AlarmIntegrationController:
             update_method=self.async_update,
             update_interval=timedelta(seconds=update_interval),
         )
+
+        # Websocket pushes update the library's device objects; entities read
+        # those live, so this is what makes a push visible in HA immediately
+        # instead of at the next REST poll. Costs no extra API calls.
+        telus_ws_push_patch.register_coordinator(self.update_coordinator)
 
         await self.update_coordinator.async_config_entry_first_refresh()
 

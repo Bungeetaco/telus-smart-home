@@ -87,16 +87,35 @@ Assistant and the bridge use to sync credentials, and building/starting the cont
 
 ### Integration options (state-change latency)
 
-Sensor/light state changes arrive over Alarm.com's push websocket, with a REST poll as
-fallback. The server closes that websocket roughly **6 minutes after every connect**
-regardless of traffic (verified live with keepalive pings — it's a token lifetime, not an
-idle timeout), so the two options under **Settings → Devices & Services → TELUS Smart Home →
-Configure** are what govern how stale the fallback windows get:
+Door/window/lock changes arrive over Alarm.com's push websocket in **well under a second**
+(measured: sensor tripped at `17:16:40.729Z`, Home Assistant state written at `17:16:41.223`).
+The REST poll is only a backstop for events pushed while the socket happens to be down.
+
+The socket goes down predictably: **the server closes it roughly every 6 minutes**, regardless
+of traffic. It's a token lifetime, not an idle timeout — keepalive pings don't prevent it.
+Everything pushed between that drop and the reconnect is lost and only surfaces on the next
+poll, so the reconnect delay is the single biggest factor in perceived latency.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| Websocket reconnect timeout | `30` s | How long to wait before reconnecting push after the server drops it. At 30s, push is up ~92% of the time; the old 300s default left it dead half the time. |
-| Update interval | `300` s | REST poll period — the worst-case staleness for a change that lands while push is down. Don't go below 300s: aggressive polling risks Alarm.com rate-limiting/locking the account. |
+| Websocket reconnect timeout | `30` s | Delay before reconnecting after the server drops the socket — i.e. **how long the blind window lasts**. Lowering it does not increase request volume: the reconnect *count* is fixed by the server's ~6 min cycle, so only the gap shrinks. `5` s is strictly better; at `30` s roughly 8% of events miss the socket entirely and wait for the poll. |
+| Update interval | `300` s | REST poll period — the backstop, and the worst-case latency for a push lost in a blind window. |
+
+If a change ever seems slow, it almost certainly landed in a reconnect gap rather than meaning
+push is broken. To tell which path delivered a state, check the log: a push updates one device
+(`Got update for <name> ... from WebSocket message`), whereas a poll logs `Requesting update
+from Alarm.com` and then updates *every* device in the same millisecond.
+
+Alarm.com's rate limits are undocumented and, if tripped, can lock the account. Since push
+carries the latency-sensitive path, there is little reason to poll aggressively — `300` s is a
+sound default. `60` s has been run without a single HTTP `429`, but watch the log if you
+shorten it.
+
+**Do not "fix" the websocket endpoint to match a browser capture.** The live portal connects to
+`wss://webskt.alarm.com:8443/?f=1&auth=<token>&ver=A` while the library uses only
+`?auth=<token>`. Mirroring the portal's form was tested and rejected by the server: the socket
+reached RUNNING and closed 1 ms later, every time, looping on the reconnect timer. Those params
+evidently pair with something else in a browser session.
 
 Existing installs keep whatever they have — these defaults only apply to new config entries,
 so update the two values via Configure if you installed before they changed.
