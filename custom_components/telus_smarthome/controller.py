@@ -62,6 +62,7 @@ class AlarmIntegrationController:
         self._stop_keep_alive: CALLBACK_TYPE
 
         self._ws_state: WebSocketState = WebSocketState.STOPPED
+        self._ws_seen_running = False
         self._ws_close_event = asyncio.Event()
 
         # Diagnostic auth/session health, surfaced via a diagnostic sensor entity
@@ -240,10 +241,25 @@ class AlarmIntegrationController:
     def _ws_state_handler(self, state: WebSocketState) -> None:
         """Handle websocket state changes in the Alarm.com API."""
 
+        previous = self._ws_state
         self._ws_state = state
 
         if state in {WebSocketState.DISCONNECTED, WebSocketState.STOPPED}:
             self._ws_close_event.set()
+            return
+
+        # Anything Alarm.com pushed while the socket was down is simply gone --
+        # it does not replay on reconnect -- so without this the stale state
+        # persists until the next REST poll (up to update_interval). Measured
+        # live 2026-07-29: a patio door close was pushed one second before the
+        # server's routine ~6 minute drop; two seconds later and it would have
+        # vanished for a full poll cycle with nothing in the log to show for it.
+        # Refresh once per reconnect, not on the initial connect (setup has just
+        # polled), so the blind window costs ~1s instead of a poll interval.
+        if state == WebSocketState.RUNNING and previous not in (None, WebSocketState.STOPPED):
+            if self._ws_seen_running:
+                self.hass.async_create_task(self.update_coordinator.async_request_refresh())
+            self._ws_seen_running = True
 
     async def async_start_websocket_monitor(self) -> None:
         """Start a websocket connection and monitor it for disconnection.
