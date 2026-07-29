@@ -120,6 +120,36 @@ evidently pair with something else in a browser session.
 Existing installs keep whatever they have — these defaults only apply to new config entries,
 so update the two values via Configure if you installed before they changed.
 
+### Doorbell / camera event snapshots
+
+The `event.*_recent_activity` entities carry two useful attributes when a clip is recorded:
+`thumbnail_url` and `download_url`. For "who was at the door" snapshots, prefer these over
+grabbing a frame from the live camera — two measured reasons:
+
+- **The clip starts before the subject is in view.** Alarm.com's video-events API reports
+  `timestampToStartClip` (12 s on a doorbell here), so a frame captured when the event fires
+  shows an empty scene.
+- **Camera stills can be stale.** `async_camera_image()` returns the stream's last cached
+  keyframe rather than waiting for a fresh one, so a stalled RTSP publisher yields the same
+  image indefinitely — observed as byte-identical files across events minutes apart, and one
+  frame 42 minutes old.
+
+`thumbnail_url` is Alarm.com's own detection frame: the moment the subject was classified,
+with a labelled rectangle drawn around them. **That rectangle is rendered server-side and no
+query parameter removes it** — `vvui` and `easi` make no difference to the returned bytes, and
+`culture` only switches the label language (`2` = French "personne", `1` = English). If you
+need an unannotated image, fetch `download_url` and seek into the clip instead:
+
+```bash
+ffmpeg -nostdin -ss 12 -i clip.mp4 -frames:v 1 -q:v 3 frame.jpg
+```
+
+The signed token in both URLs is **self-contained** — the image fetches with no session,
+cookies or headers — but it expires within hours, so fetch at event time rather than storing
+the URL for later. An expired token returns a small JPEG reading "You don't have permission to
+view this clip" (or "Clip supprimé"), not an HTTP error, so check the payload rather than just
+the status code.
+
 <details>
 <summary><strong>Prefer to do it by hand, or just want the manual-install alternative?</strong></summary>
 
