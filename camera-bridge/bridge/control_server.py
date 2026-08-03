@@ -42,14 +42,18 @@ Contract (as implemented -- this is what callers must match):
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
 
     Response: 200 {"cameras": {"<camera_id>": {"state": "streaming"|"connecting"|
-                                                 "reconnecting", "consecutive_failures": ...,
+                                                 "reconnecting"|"restart_deferred",
+                                                 "consecutive_failures": ...,
                                                  "last_frame_at": <unix ts or null>,
                                                  "fps": ..., "hardware_encode": ...,
                                                  "last_error": <str or null>}, ...}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
       reconnect counts, last-frame age, and current encode mode, without
-      needing to grep container logs.
+      needing to grep container logs. "restart_deferred" is the rarest and
+      most informative one: this camera hit the MAX_CONSECUTIVE_SESSION_FAILURES
+      escape hatch, but it has fired too often lately to be a local wedge, so
+      restart_guard.py is holding the process before it exits (see there).
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>

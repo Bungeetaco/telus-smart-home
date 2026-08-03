@@ -48,7 +48,9 @@ against.
 - 🩺 **Self-healing camera sessions** — Alarm.com force-closes video sessions server-side every
   ~180s; the bridge proactively rotates ahead of that, bridges the gap so viewers see at most a
   brief freeze, detects dead/silent sessions independently, and hard-restarts itself if a session
-  gets truly wedged rather than retrying forever in a broken state.
+  gets truly wedged rather than retrying forever in a broken state — while a cross-process restart
+  guard (`bridge/restart_guard.py`) keeps that same hard restart from turning an *upstream* outage
+  into a crash-restart loop against it.
 - 🩹 **A diagnostic Auth Health sensor** — see login/session state from within HA instead of
   guessing from logs.
 - 🧩 **No official API required** — both the SSO login and the camera signaling were
@@ -285,9 +287,11 @@ Interested in how it works or want to hack on it? Both component READMEs
   `streaming` plugin's WebRTC signaling to pull frames — also reverse-engineered, comments there
   document the exact request/response shapes it was built against.
 - **`camera-bridge/bridge/camera_session.py`** owns the per-camera reconnect/backoff loop,
-  including the escalation to a full process restart if a session gets stuck failing — read it in
-  full before touching it, the comments explain several previously-shipped bugs and why the
-  current logic looks the way it does.
+  including the escalation to a full process restart if a session gets stuck failing (throttled by
+  `camera-bridge/bridge/restart_guard.py`, which is what distinguishes a local wedge worth
+  restarting for from an upstream outage a restart only makes worse) — read it in full before
+  touching it, the comments explain several previously-shipped bugs and why the current logic looks
+  the way it does.
 
 If TELUS or Alarm.com change their web portal, SSO flow, or camera platform, the place to start
 debugging is a fresh HAR capture compared against what these files currently expect.

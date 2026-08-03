@@ -4,6 +4,7 @@ import os
 import time
 
 from . import config as c
+from . import restart_guard
 from .janus_client import JanusCameraSession
 from .ffmpeg_sink import FfmpegSink
 from .telus_auth import RateLimited
@@ -321,6 +322,38 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         "frame in between -- likely a leaked/wedged resource that "
                         "only a fresh process can clear; forcing container restart",
                         camera["id"], consecutive_failures)
+                    # ...unless we've already done exactly that several times in
+                    # the last hour. A wedged resource is gone after the first
+                    # restart; a hatch that keeps firing means the failures are
+                    # coming from *outside* this process (alarm.com down,
+                    # Cloudflare rate-limiting the login every restart re-runs),
+                    # where restarting immediately only re-hammers the upstream --
+                    # 89 restarts in 7 days, one 14-minute tight loop. The guard
+                    # holds this process up first (see restart_guard.py); the
+                    # container physically cannot restart while we're sleeping,
+                    # and the other cameras plus the control endpoint keep serving
+                    # meanwhile. It never *cancels* the exit -- a real wedge still
+                    # gets its fresh process, just not at loop speed.
+                    hold_s, exits_in_window = restart_guard.record_exit()
+                    if hold_s:
+                        log.critical(
+                            "%s: that's %d hatch-triggered exits within the last %ds -- "
+                            "treating this as a sustained upstream failure rather than a "
+                            "local wedge, and holding the process for %.0fs before exiting "
+                            "so the container can't restart-loop into it",
+                            camera["id"], exits_in_window, c.RESTART_GUARD_WINDOW_S, hold_s)
+                        _update_status(state="restart_deferred",
+                                       consecutive_failures=consecutive_failures)
+                        # Close before the hold for the same reason the backoff
+                        # sleep below closes first: left running, the dead
+                        # session's _pump_track keeps decoding RTP nobody drains
+                        # for the entire sleep -- and this sleep is minutes, not
+                        # seconds. Bounded by SESSION_CLOSE_TIMEOUT_S, so even a
+                        # hung close only costs 5s of the wait.
+                        if session:
+                            await _close_with_timeout(session, camera["id"])
+                            session = None
+                        await asyncio.sleep(hold_s)
                     os._exit(1)
                 _start_hold()
                 # Close the dead/dying session BEFORE the backoff sleep, not after --
@@ -347,10 +380,16 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # RateLimited raised by a mid-run re-login (the far more common
                     # case, since the session expires every few hours) landed here and
                     # got the exact backoff that compounds the problem.
-                    delay = min(exc.retry_after_s, c.RATE_LIMIT_RETRY_CAP_S) + 2
+                    # The full server-stated wait, not a locally truncated one:
+                    # this used to min() against a 300s cap, so a longer window
+                    # had us knocking again before Cloudflare said we could,
+                    # which restarts the window instead of clearing it. Only
+                    # RATE_LIMIT_RETRY_MAX_S (30min) clamps it now, as a guard
+                    # against an absurd header value.
+                    delay = c.rate_limit_sleep_s(exc.retry_after_s)
                     log.warning("%s: rate-limited by Cloudflare, sleeping %.0fs "
-                                "(server-specified Retry-After, not the fixed backoff)",
-                                camera["id"], delay)
+                                "(server-specified Retry-After=%.0fs, not the fixed backoff)",
+                                camera["id"], delay, exc.retry_after_s)
                     await asyncio.sleep(delay)
                 else:
                     await asyncio.sleep(backoff)

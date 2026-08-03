@@ -228,6 +228,14 @@ and write these files without any new host path or supervisor config change.
   Read back on every later start and built into the RTSP URLs this bridge
   publishes with and reports over `/control/cameras`. See "RTSP
   authentication" above.
+- `restart_guard.json` -- `{"exits": [<unix ts>, ...]}`, written by this bridge
+  every time it deliberately ends its own process (camera_session.py's
+  escape hatch, or a terminal startup-login failure). It lives here purely
+  because it has to outlive the process it is counting; nothing else reads it.
+  More than a few entries inside an hour means the bridge stops exiting
+  immediately and holds itself up first, so the container can't restart-loop
+  against an upstream outage -- see `bridge/restart_guard.py`. Deleting it is
+  harmless (it just resets the count).
 - `credentials.json` -- `{"username", "password", "updated_at"}`, written by
   the HA integration on **every** successful credential update (reconfigure or
   reauth), regardless of whether the live push to `/control/credentials`

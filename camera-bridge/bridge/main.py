@@ -7,6 +7,7 @@ import aiohttp
 
 from . import config as c
 from . import control_server
+from . import restart_guard
 from .telus_auth import RateLimited, TelusSession, relogin_if_stale
 from .telus_rest import list_cameras, get_video_source
 from .camera_session import run_camera_forever
@@ -56,7 +57,14 @@ async def _login_with_retry(telus: TelusSession, login_lock: asyncio.Lock) -> No
     backoff, compounded by several back-to-back container restarts, kept
     re-triggering Cloudflare's rate limit instead of ever clearing it, turning
     one incident into a multi-hour outage. Respecting the server's own stated
-    wait time is what actually recovers instead of compounding it further.
+    wait time is what actually recovers instead of compounding it further --
+    all of it, which is why the sleep is no longer truncated by a local cap
+    (see config.rate_limit_sleep_s).
+
+    Giving up at the end still lets the process die into a container restart,
+    but only after restart_guard has had its say: that restart re-runs this
+    very login, so an upstream that stays down would otherwise get one fresh
+    login attempt per restart, forever.
     """
     last_exc: Exception | None = None
     for attempt in range(1, INITIAL_LOGIN_RETRIES + 1):
@@ -66,11 +74,12 @@ async def _login_with_retry(telus: TelusSession, login_lock: asyncio.Lock) -> No
             return
         except RateLimited as exc:
             last_exc = exc
-            delay = min(exc.retry_after_s, c.RATE_LIMIT_RETRY_CAP_S) + 2  # small margin past what Cloudflare asked for
+            delay = c.rate_limit_sleep_s(exc.retry_after_s)  # full server-stated wait + small margin
             if attempt < INITIAL_LOGIN_RETRIES:
                 log.warning("Initial TELUS login rate-limited by Cloudflare (attempt %d/%d): "
-                            "retrying in %.0fs (server-specified Retry-After, not the usual "
-                            "fixed backoff -- see RateLimited)", attempt, INITIAL_LOGIN_RETRIES, delay)
+                            "retrying in %.0fs (server-specified Retry-After=%.0fs, not the usual "
+                            "fixed backoff -- see RateLimited)", attempt, INITIAL_LOGIN_RETRIES,
+                            delay, exc.retry_after_s)
                 await asyncio.sleep(delay)
             else:
                 log.error("Initial TELUS login still rate-limited by Cloudflare after %d attempts, "
@@ -85,6 +94,21 @@ async def _login_with_retry(telus: TelusSession, login_lock: asyncio.Lock) -> No
             else:
                 log.error("Initial TELUS login failed after %d attempts, giving up: %s",
                           INITIAL_LOGIN_RETRIES, exc)
+
+    # This raise kills the process and `restart: unless-stopped` immediately
+    # starts another one that runs this same login again -- the identical
+    # restart-loop-into-the-upstream shape camera_session.py's escape hatch
+    # has, so it shares the same cross-process guard. A one-off startup failure
+    # (booting during a network blip) is inside the guard's free allowance and
+    # still dies straight away; only a repeating pattern gets held back, and
+    # then Docker cannot recycle us faster than that hold.
+    hold_s, exits_in_window = restart_guard.record_exit()
+    if hold_s:
+        log.critical("Startup login has now failed terminally %d times within the last %ds -- "
+                     "holding the process for %.0fs before exiting, so the container's restart "
+                     "policy can't keep re-attempting logins against an upstream that is "
+                     "plainly still down", exits_in_window, c.RESTART_GUARD_WINDOW_S, hold_s)
+        await asyncio.sleep(hold_s)
     raise last_exc
 
 

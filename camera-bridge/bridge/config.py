@@ -89,14 +89,34 @@ def rtsp_publish_url(camera_id: str) -> str:
 # Reconnect / hygiene
 RECONNECT_BACKOFF_INITIAL_S = 2
 RECONNECT_BACKOFF_MAX_S = 30
-# Cap on how long a single Retry-After-driven sleep is allowed to run, even if
-# Cloudflare's own header asks for longer -- keeps startup (and a mid-run
-# reconnect) bounded rather than hanging on an arbitrarily large server-specified
-# value. Shared by main.py's startup login retry and camera_session.py's
-# reconnect loop, which must both honor Retry-After rather than the fixed
-# backoff below: the short fixed schedule just re-triggers the same rate-limit
+# Absolute ceiling on a single Retry-After-driven sleep, shared by main.py's
+# startup login retry and camera_session.py's reconnect loop -- both of which
+# must sleep for Cloudflare's own Retry-After rather than the fixed backoff
+# below, since the short fixed schedule just re-triggers the same rate-limit
 # window instead of ever clearing it.
-RATE_LIMIT_RETRY_CAP_S = 300
+#
+# This is a sanity clamp on a garbage/absurd header value, NOT a second-guess
+# of a reasonable one. It used to be 300s and was applied as a plain min()
+# against the server's value, which meant any window longer than 5 minutes had
+# us coming back *sooner than the server explicitly asked* -- precisely the
+# behaviour that re-enters a rate-limit window instead of clearing it (see
+# telus_auth.RateLimited and the multi-hour outage documented on main.py's
+# _login_with_retry). Observed real values are ~101s, so 30 minutes sits far
+# past anything legitimate while still bounding an accidental
+# "Retry-After: 86400".
+RATE_LIMIT_RETRY_MAX_S = 30 * 60
+# Small margin added on top of the server's stated wait, so a clock/rounding
+# skew of a second or two can't land the retry just inside the window again.
+RATE_LIMIT_RETRY_MARGIN_S = 2
+
+
+def rate_limit_sleep_s(retry_after_s: float) -> float:
+    """How long to sleep for a RateLimited exception's Retry-After. Single
+    source of truth for both call sites so the two can't drift apart -- they
+    previously each open-coded the same min()/margin expression."""
+    return min(max(float(retry_after_s), 0.0), RATE_LIMIT_RETRY_MAX_S) + RATE_LIMIT_RETRY_MARGIN_S
+
+
 # If a single camera's session fails this many times in a row with no
 # successful frame batch in between, camera_session.py gives up on in-process
 # retrying and hard-exits the whole bridge (os._exit) so Docker's
@@ -106,6 +126,38 @@ RATE_LIMIT_RETRY_CAP_S = 300
 # failure before this fires, comfortably past what the backoff alone absorbs
 # for an ordinary transient blip.
 MAX_CONSECUTIVE_SESSION_FAILURES = 5
+
+# --- Restart-frequency guard for that escape hatch (see restart_guard.py) ---
+# The hatch is right for a one-off local wedge and wrong for a sustained
+# upstream failure: every failure looks identical from inside the reconnect
+# loop, so with `restart: unless-stopped` behind it, an alarm.com/Cloudflare
+# outage turned the hatch into an unbounded crash-restart loop (measured on
+# this deployment: 89 restarts in 7 days, one stretch looping tightly for 14
+# minutes) that re-ran a full SSO login against the very rate limiter it was
+# reacting to. The guard below throttles that without removing the hatch.
+#
+# State file: the hatch kills the process, so no in-memory counter can survive
+# to tell a fresh process it's the Nth restart in a row -- the count has to
+# live on disk. /shared is the one writable directory that outlives both a
+# process exit and a container recreate (bind mount, see docker-compose.yml).
+RESTART_GUARD_STATE_PATH = f"{SHARED_DIR}/restart_guard.json"
+# Rolling window over which hatch exits are counted; anything older is dropped,
+# so genuine one-off wedges weeks apart never accumulate into a throttle.
+RESTART_GUARD_WINDOW_S = 60 * 60
+# Exits allowed inside that window before throttling starts. A real wedged
+# resource is cleared by the very first restart and doesn't come back minutes
+# later, so the first few exits stay immediate -- keeping the fast recovery the
+# hatch was built for -- and only a *repeating* pattern (the signature of a
+# sustained upstream failure) gets held back.
+RESTART_GUARD_MAX_EXITS = 3
+# Past that threshold, sleep before exiting: 60s, 120s, 240s ... capped. The
+# sleep runs in-process, so Docker cannot restart the container until it
+# finishes -- that is the hard floor on restart frequency. The cap is well past
+# the ~101s Retry-After Cloudflare hands out (telus_auth.RateLimited), so a
+# sustained upstream failure stops re-hammering the limiter that caused it.
+RESTART_GUARD_BACKOFF_INITIAL_S = 60
+RESTART_GUARD_BACKOFF_MAX_S = 15 * 60
+
 # Bounds session.close()'s call into aiortc's pc.close(), which has no timeout
 # of its own and is documented (lifecycle.py) as hangable under certain ICE
 # states. Comfortably above what a clean close takes (sub-second, normally)
