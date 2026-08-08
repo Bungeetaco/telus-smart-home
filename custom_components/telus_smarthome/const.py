@@ -161,6 +161,21 @@ CAMERA_BRIDGE_AUTOMATIONS_URL = "http://127.0.0.1:8199/control/automations"
 # camera-bridge/bridge/control_server.py for the response shape.
 CAMERA_BRIDGE_HISTORY_URL = "http://127.0.0.1:8199/control/history"
 
+# Re-mints a fresh signed download URL for one saved clip --
+# {video_event_id} is str.format()'d in. The signed URLs in event
+# attributes expire within minutes of the poll that fetched them (the clip
+# itself never does), so clip_view.py calls this at click time and
+# redirects to the result. See camera-bridge/bridge/control_server.py for
+# the response shape.
+CAMERA_BRIDGE_CLIP_URL_TEMPLATE = "http://127.0.0.1:8199/control/clip/{video_event_id}"
+
+# Per-install random secret (config entry data) that signs the /api
+# clip-redirect links clip_view.py serves. Deliberately NOT the bridge's
+# rotating control secret: these signatures live inside already-delivered
+# phone notifications, so rotating the key would break every clip link
+# older than the rotation interval -- the exact bug this feature removes.
+CONF_CLIP_LINK_SECRET = "clip_link_secret"
+
 # Pause/resume one rule -- {rule_id} is str.format()'d in. POST, empty body.
 CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/pause"
 CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/resume"

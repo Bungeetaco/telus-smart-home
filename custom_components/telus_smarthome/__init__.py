@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -25,10 +26,12 @@ from pyalarmdotcomajax.exceptions import (
 )
 
 from .camera import CameraBridgeCoordinator
+from .clip_view import TelusClipRedirectView
 from .const import (
     CONF_ARM_AWAY,
     CONF_ARM_HOME,
     CONF_ARM_NIGHT,
+    CONF_CLIP_LINK_SECRET,
     CONF_FORCE_BYPASS,
     CONF_NO_ENTRY_DELAY,
     CONF_SILENT_ARM,
@@ -57,6 +60,26 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         LOGGER.info(STARTUP_MESSAGE)
 
     hass.data.setdefault(DOMAIN, {})
+
+    # Per-install secret signing the clip-redirect links (see clip_view.py).
+    # Generated once and then persisted in the entry forever -- the
+    # signatures live inside already-delivered phone notifications, so a
+    # fresh secret would break every clip link older than itself. Done
+    # before the coordinators below are created so event.py can always
+    # assume the secret exists.
+    if CONF_CLIP_LINK_SECRET not in config_entry.data:
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data={**config_entry.data, CONF_CLIP_LINK_SECRET: secrets.token_hex(32)},
+        )
+
+    # Views can't be unregistered, so this is once per HA run (not per entry
+    # setup -- reloads land here again). The view looks its secrets up from
+    # the live config entries on every request, so re-registration would add
+    # nothing and aiohttp raises on duplicate routes.
+    if not hass.data[DOMAIN].get("clip_view_registered"):
+        hass.http.register_view(TelusClipRedirectView(hass))
+        hass.data[DOMAIN]["clip_view_registered"] = True
 
     #
     # Initialize Alarm.com Connection & Data Update Coordinator

@@ -110,6 +110,27 @@ Contract (as implemented -- this is what callers must match):
       same "click to see the clip" behavior here too; entries with no
       correlated clip have those three fields as null.
 
+    GET http://127.0.0.1:<CONTROL_PORT>/control/clip/<video_event_id>
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"download_url": ..., "thumbnail_url": ..., "clip_duration_ms": ...}
+      Re-mints a FRESH signed download URL for one saved clip, on demand.
+      The signed URLs embedded in /control/events and /control/history
+      responses expire within minutes of being issued (alarm.com stamps
+      each mint into the token; the clip itself never expires --
+      ageLimitDays is -1 on every event observed live 2026-08-08), so a
+      URL captured at poll time and opened later (e.g. from a phone
+      notification) lands on alarm.com's "You don't have permission to
+      view this clip" page. Every videoEvents fetch returns freshly-signed
+      URLs -- this endpoint is a by-id fetch of exactly one event
+      (get_video_events_by_ids, the same call list_history_events already
+      uses for enrichment), so callers hit it at click time and redirect
+      to the result.
+      404 {"error": "unknown_event"} if TELUS returns no event for that id
+      (deleted clip, or a bogus id -- TELUS omits it from the response
+      rather than erroring).
+      502 {"error": "telus_error"} if the TELUS-side fetch itself fails.
+
     POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/activate
     POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/by-path/<path_name>/deactivate
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -150,6 +171,7 @@ from . import config as c
 from .telus_auth import relogin_if_stale
 from .telus_rest import (
     get_snapshot_url,
+    get_video_events_by_ids,
     list_automation_rules,
     list_history_events,
     list_video_events,
@@ -315,6 +337,28 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         return web.json_response({"events": events})
 
+    async def handle_clip(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        video_event_id = request.match_info["video_event_id"]
+        try:
+            videos = await _fetch_with_relogin(
+                telus_session, login_lock, get_video_events_by_ids, [video_event_id])
+        except Exception:
+            log.exception("Control endpoint: fresh clip URL fetch failed for %s", video_event_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        video = videos.get(video_event_id)
+        if video is None or not video.get("download_url"):
+            return web.json_response({"error": "unknown_event"}, status=404)
+
+        return web.json_response({
+            "download_url": video["download_url"],
+            "thumbnail_url": video["thumbnail_url"],
+            "clip_duration_ms": video["clip_duration_ms"],
+        })
+
     async def handle_automations(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
             return err
@@ -416,6 +460,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_get("/control/status", handle_status)
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
     app.router.add_get("/control/events", handle_events)
+    app.router.add_get("/control/clip/{video_event_id}", handle_clip)
     app.router.add_get("/control/automations", handle_automations)
     app.router.add_get("/control/history", handle_history)
     app.router.add_post("/control/automations/{rule_id}/pause", handle_pause_rule)

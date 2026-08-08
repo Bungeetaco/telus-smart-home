@@ -31,9 +31,11 @@ from homeassistant.helpers.update_coordinator import (
 
 from .bridge_client import bridge_get
 from .camera import CameraBridgeCoordinator
+from .clip_view import make_clip_link
 from .const import (
     CAMERA_BRIDGE_EVENTS_URL,
     CAMERA_BRIDGE_HISTORY_URL,
+    CONF_CLIP_LINK_SECRET,
     DATA_ACTIVITY_COORDINATOR,
     DATA_CAMERA_COORDINATOR,
     DOMAIN,
@@ -43,6 +45,24 @@ from .const import (
 LOGGER = logging.getLogger(__name__)
 
 EVENT_TYPES = ["person", "vehicle", "animal", "other"]
+
+
+def _clip_link_for(config_entry: ConfigEntry, video_event_id: str | None) -> str | None:
+    """Signed durable link to this clip's redirect view, or None for
+    entries with no correlated clip.
+
+    The download_url attribute alongside it expires within minutes of the
+    poll that fetched it; this path re-mints a fresh URL at click time (see
+    clip_view.py), so it's what notifications should put behind their tap
+    action -- prefixed with whatever base URL reaches this HA instance from
+    the phone.
+    """
+    if video_event_id is None:
+        return None
+    secret = config_entry.data.get(CONF_CLIP_LINK_SECRET)
+    if not secret:
+        return None
+    return make_clip_link(secret, str(video_event_id))
 
 
 def _classify(description: str) -> str:
@@ -207,6 +227,11 @@ class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
                     "thumbnail_url": event.get("thumbnail_url"),
                     "download_url": event.get("download_url"),
                     "clip_duration_ms": event.get("clip_duration_ms"),
+                    # /control/events items ARE videoEvents, so their id is
+                    # the video event id (unlike the Activity feed below,
+                    # where id is the activity entry's own id).
+                    "video_event_id": event["id"],
+                    "clip_link": _clip_link_for(self.coordinator.config_entry, event["id"]),
                 })
             self._last_seen_id = max(int(e["id"]) for e in new_events)
 
@@ -326,6 +351,9 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
                     "thumbnail_url": event.get("thumbnail_url"),
                     "download_url": event.get("download_url"),
                     "clip_duration_ms": event.get("clip_duration_ms"),
+                    "video_event_id": event.get("video_event_id"),
+                    "clip_link": _clip_link_for(
+                        self.coordinator.config_entry, event.get("video_event_id")),
                 })
 
         # Rebase onto the current page. Anything that has scrolled off it is older

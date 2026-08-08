@@ -155,6 +155,14 @@ async def list_history_events(telus, limit: int = 20) -> list[dict]:
             "thumbnail_url": video["thumbnail_url"] if video else None,
             "download_url": video["download_url"] if video else None,
             "clip_duration_ms": video["clip_duration_ms"] if video else None,
+            # The videoEvents id behind this entry's clip, so callers can
+            # re-mint a fresh download_url later via /control/clip/<id> --
+            # the signed URLs above expire within minutes of being issued
+            # (alarm.com stamps each mint; the clip itself never expires,
+            # ageLimitDays is -1), so anything that stores or displays
+            # download_url beyond the immediate poll cycle needs this id,
+            # not the URL.
+            "video_event_id": video["id"] if video else None,
         })
     return events
 
