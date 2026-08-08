@@ -101,14 +101,18 @@ Contract (as implemented -- this is what callers must match):
     Response: 200 {"events": [{"id": ..., "timestamp": ..., "description": ...,
                                 "device_id": ..., "device_description": ...,
                                 "event_type_name": ..., "thumbnail_url": ...,
-                                "download_url": ..., "clip_duration_ms": ...}, ...]}
+                                "download_url": ..., "clip_duration_ms": ...,
+                                "video_event_id": ...}, ...]}
       TELUS's system-wide Activity feed -- arm/disarm, door/lock, camera
       triggers, doorbell presses, etc, newest first. Broader than
       /control/events (which is camera clips only): entries the bridge could
       correlate to a saved clip carry the same thumbnail_url/download_url/
       clip_duration_ms shape as /control/events, so callers can offer the
       same "click to see the clip" behavior here too; entries with no
-      correlated clip have those three fields as null.
+      correlated clip have those fields as null. video_event_id is the id of
+      the correlated saved clip (null when there is none) -- pass it to
+      /control/clip to re-mint a fresh download_url, since the one embedded
+      here expires within minutes of this fetch (the clip itself does not).
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/clip/<video_event_id>
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -163,6 +167,7 @@ import asyncio
 import logging
 import os
 import secrets as secrets_mod
+import time
 
 import aiohttp
 from aiohttp import web
@@ -233,10 +238,12 @@ def _write_secret(secret: str) -> None:
 
 async def _rotate_secret_periodically(current_secret: dict) -> None:
     """Regenerate the shared secret every CONTROL_SECRET_ROTATE_INTERVAL_S and
-    atomically rewrite it to disk. Safe with zero downtime: HA's bridge_client
-    reads the secret fresh off disk on every single request rather than
-    caching it, so the very next poll after a rotation just picks up the new
-    value -- no coordination or grace period with the HA side needed."""
+    atomically rewrite it to disk. No coordination or grace period with the HA
+    side is needed: HA's bridge_client reads the secret fresh off disk on every
+    single request rather than caching it, so the very next poll after a rotation
+    picks up the new value. Not strictly zero-downtime -- an HA request that read
+    the old secret microseconds before os.replace lands can 401 once -- but that
+    is at most one request per 30-day rotation and every caller already retries."""
     while True:
         await asyncio.sleep(c.CONTROL_SECRET_ROTATE_INTERVAL_S)
         new_secret = secrets_mod.token_hex(32)
@@ -264,6 +271,9 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     # `secret = ...` reassignment elsewhere wouldn't be visible to these
     # already-created closures.
     current_secret = {"value": _load_or_create_secret()}
+
+    # video_event_id -> (monotonic_ts, response_payload). See handle_clip.
+    _clip_cache: dict[str, tuple[float, dict]] = {}
 
     def _camera_for_path(path_name: str) -> dict | None:
         return next(
@@ -342,6 +352,18 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             return err
 
         video_event_id = request.match_info["video_event_id"]
+
+        # Short TTL cache of re-minted responses, keyed by event id. The signed
+        # URL alarm.com returns is valid for minutes, so serving the same one for
+        # CLIP_URL_CACHE_TTL_S turns a burst of taps on one notification (or a
+        # browser that re-requests on tab-restore) into a single TELUS round trip
+        # instead of one per tap -- the endpoint is otherwise a 1:1 unauthenticated
+        # proxy into TELUS's videoEvents API for any holder of a valid link.
+        now = time.monotonic()
+        cached = _clip_cache.get(video_event_id)
+        if cached is not None and now - cached[0] < c.CLIP_URL_CACHE_TTL_S:
+            return web.json_response(cached[1])
+
         try:
             videos = await _fetch_with_relogin(
                 telus_session, login_lock, get_video_events_by_ids, [video_event_id])
@@ -353,11 +375,17 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         if video is None or not video.get("download_url"):
             return web.json_response({"error": "unknown_event"}, status=404)
 
-        return web.json_response({
+        payload = {
             "download_url": video["download_url"],
             "thumbnail_url": video["thumbnail_url"],
             "clip_duration_ms": video["clip_duration_ms"],
-        })
+        }
+        # Evict expired entries opportunistically so the cache can't grow without
+        # bound across many distinct clips over the process's month-plus lifetime.
+        for vid in [k for k, (ts, _) in _clip_cache.items() if now - ts >= c.CLIP_URL_CACHE_TTL_S]:
+            del _clip_cache[vid]
+        _clip_cache[video_event_id] = (now, payload)
+        return web.json_response(payload)
 
     async def handle_automations(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:

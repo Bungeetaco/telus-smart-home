@@ -29,12 +29,15 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
+from homeassistant.util import dt as dt_util
+
 from .bridge_client import bridge_get
 from .camera import CameraBridgeCoordinator
 from .clip_view import make_clip_link
 from .const import (
     CAMERA_BRIDGE_EVENTS_URL,
     CAMERA_BRIDGE_HISTORY_URL,
+    CLIP_LINK_TTL_SECONDS,
     CONF_CLIP_LINK_SECRET,
     DATA_ACTIVITY_COORDINATOR,
     DATA_CAMERA_COORDINATOR,
@@ -62,7 +65,10 @@ def _clip_link_for(config_entry: ConfigEntry, video_event_id: str | None) -> str
     secret = config_entry.data.get(CONF_CLIP_LINK_SECRET)
     if not secret:
         return None
-    return make_clip_link(secret, str(video_event_id))
+    # Expiry is stamped at link-creation time and signed into the link, so a
+    # notification delivered now stays tappable for the whole TTL window.
+    expiry = int(dt_util.utcnow().timestamp()) + CLIP_LINK_TTL_SECONDS
+    return make_clip_link(secret, str(video_event_id), expiry)
 
 
 def _classify(description: str) -> str:
@@ -233,6 +239,13 @@ class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
                     "video_event_id": event["id"],
                     "clip_link": _clip_link_for(self.coordinator.config_entry, event["id"]),
                 })
+                # Write state after EACH event, not once at the end. _trigger_event
+                # only stores __last_event_attributes (it does not write state),
+                # so a single trailing write would collapse a multi-event poll to
+                # its last event -- every earlier clip's state_changed, and any
+                # automation keyed on it, would be lost. One write per event gives
+                # each its own state_changed.
+                self.async_write_ha_state()
             self._last_seen_id = max(int(e["id"]) for e in new_events)
 
         super()._handle_coordinator_update()
@@ -343,8 +356,17 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
         new_events = [e for e in events if e["id"] not in self._seen_ids]
         if new_events:
             # TELUS returns the page newest-first; fire oldest-first so a listener
-            # sees them in the order they actually happened.
-            for event in sorted(new_events, key=lambda e: e["timestamp"]):
+            # sees them in the order they actually happened. Sort by PARSED
+            # datetime, not the raw string: TELUS emits two timestamp formats
+            # (with and without fractional seconds), and "...T10:00:00Z" sorts
+            # BELOW "...T10:00:00.5Z" as a string -- the same unsoundness the
+            # _seen_ids comment documents for equality. Always return a datetime
+            # (epoch 0 for an unparseable value) so the key type is uniform and a
+            # single malformed entry can't raise TypeError mid-sort.
+            def _when(ev: dict[str, Any]):
+                return dt_util.parse_datetime(ev["timestamp"]) or dt_util.utc_from_timestamp(0)
+
+            for event in sorted(new_events, key=_when):
                 self._trigger_event(_classify(event["description"]), {
                     "description": event["description"],
                     "device_description": event.get("device_description"),
@@ -355,6 +377,10 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
                     "clip_link": _clip_link_for(
                         self.coordinator.config_entry, event.get("video_event_id")),
                 })
+                # One state write per event -- see TelusCameraEvent for why a
+                # single trailing write drops every event but the last when a
+                # poll returns several new activity entries at once.
+                self.async_write_ha_state()
 
         # Rebase onto the current page. Anything that has scrolled off it is older
         # than everything still on it, so it can never legitimately reappear as new.

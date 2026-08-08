@@ -176,6 +176,13 @@ CAMERA_BRIDGE_CLIP_URL_TEMPLATE = "http://127.0.0.1:8199/control/clip/{video_eve
 # older than the rotation interval -- the exact bug this feature removes.
 CONF_CLIP_LINK_SECRET = "clip_link_secret"
 
+# How long a signed clip link stays valid, baked into each link's signature at
+# creation and re-checked on every tap. Wide enough that tapping an old
+# notification still works, but finite so an exfiltrated link is not a
+# perpetual bearer token to security-camera footage. Bounded exposure comes
+# from this per-link expiry, not from rotating the (never-rotated) secret.
+CLIP_LINK_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 days
+
 # Pause/resume one rule -- {rule_id} is str.format()'d in. POST, empty body.
 CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/pause"
 CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/resume"

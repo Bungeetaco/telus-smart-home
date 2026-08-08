@@ -340,11 +340,19 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
             # itself; this flow's own is finished with.
             await self._async_close_controller()
 
+            # data_updates=, NOT data=. `data=` REPLACES entry data wholesale;
+            # self.config carries only the three credential keys, so a reauth or
+            # reconfigure would drop clip_link_secret (and any other non-credential
+            # data key). async_setup_entry then regenerates a fresh secret, and
+            # every clip link already delivered to a phone 401s permanently -- the
+            # exact never-rotate invariant clip_view.py depends on. data_updates
+            # merges into the existing data, preserving the secret. (HA reauth is
+            # user-completed, but the moment they ever do one, links die silently.)
             return self.async_update_reload_and_abort(
                 self._existing_entry,
                 unique_id=self.unique_id,
                 title=self._config_title,
-                data=self.config,
+                data_updates=self.config,
                 reason=self._success_abort_reason,
             )
 

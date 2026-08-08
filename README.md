@@ -148,7 +148,42 @@ ffmpeg -nostdin -ss 12 -i clip.mp4 -frames:v 1 -q:v 3 frame.jpg
 
 The signed token in both URLs is **self-contained** — the image fetches with no session,
 cookies or headers — but Alarm.com mints it when the event is created and never re-signs it,
-so it expires within hours. Fetch at event time rather than storing the URL for later.
+so it expires within minutes. Fetch at event time rather than storing the URL for later.
+
+#### Durable clip links for notifications (`clip_link`)
+
+Because `download_url` dies within minutes, a phone notification that embeds it directly is
+dead by the time you tap it — Alarm.com serves its "no permission to view this clip" page for
+an expired token. To make a *tappable* notification, use the `clip_link` attribute instead of
+`download_url`. Every clip-bearing `event.*` state and the `sensor.*_recent_events` list carry
+a `clip_link` such as `/api/telus_smarthome/clip/<video_event_id>?exp=<ts>&sig=<hmac>`. Prefix
+it with the base URL that reaches your instance from the phone (e.g. your external hostname or
+Nabu Casa URL) and point the notification's tap action at it:
+
+```yaml
+data:
+  url: "https://your-ha.example.com{{ trigger.to_state.attributes.clip_link }}"
+  clickAction: "https://your-ha.example.com{{ trigger.to_state.attributes.clip_link }}"
+```
+
+Tapping it hits a `requires_auth=False` view (`clip_view.py`) that re-mints a fresh
+`download_url` at that moment via the bridge's `/control/clip/<video_event_id>` endpoint and
+302-redirects the browser to it — so the link works no matter how old the notification is,
+until it expires. It is safe to expose unauthenticated only because it is **signed**: each
+link carries an HMAC-SHA256 over `<video_event_id>:<exp>` under a per-install secret
+(`clip_link_secret`, generated once and stored in the config entry). Without it, the
+near-sequential event ids would let anyone enumerate your clip archive; with it, a link is a
+bearer token to exactly one clip until `exp` (default 90 days, `CLIP_LINK_TTL_SECONDS`).
+
+**Key management.** The secret is deliberately **never rotated** — its signatures live inside
+notifications already on your phone, so rotating it would 401 every link older than the
+rotation. Bounded exposure comes from the per-link `exp` instead. To **revoke** every
+outstanding link at once (e.g. a phone is lost), rotate the secret manually: delete the
+`clip_link_secret` key from this integration's entry in `.storage/core.config_entries` (with
+HA stopped) and restart, or remove and re-add the integration. A new secret is generated on
+next setup and all prior links stop resolving. The secret sits in `.storage` (and therefore
+in backups) in plaintext, like every other integration credential — treat backups
+accordingly.
 
 **An expired token is not an error.** It returns HTTP 200 with a small JPEG reading "You don't
 have permission to view this clip" (or "Clip supprimé"), so `curl -f` succeeds and silently

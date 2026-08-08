@@ -27,7 +27,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DATA_ACTIVITY_COORDINATOR, DATA_CONTROLLER, DOMAIN
 from .controller import AlarmIntegrationController
-from .event import ActivityHistoryCoordinator
+from .event import ActivityHistoryCoordinator, _clip_link_for
 
 LOGGER = logging.getLogger(__name__)
 
@@ -142,5 +142,16 @@ class ActivityFeedSensor(CoordinatorEntity[ActivityHistoryCoordinator], SensorEn
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """The full current page of Activity-feed events, newest first --
-        same shape as control_server.py's /control/history response."""
-        return {"events": self.coordinator.data or []}
+        same shape as control_server.py's /control/history response, plus a
+        durable `clip_link` per clip-bearing event so a dashboard card renders
+        the same self-re-minting link the notification uses instead of the raw
+        download_url (which is already stale by the time the card is viewed).
+        New dicts, so the shared coordinator data the EventEntity reads is not
+        mutated."""
+        entry = self.coordinator.config_entry
+        return {
+            "events": [
+                {**e, "clip_link": _clip_link_for(entry, e.get("video_event_id"))}
+                for e in (self.coordinator.data or [])
+            ]
+        }

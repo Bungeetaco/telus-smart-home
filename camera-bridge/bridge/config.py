@@ -64,6 +64,12 @@ CREDENTIALS_FALLBACK_POLL_S = 30
 # a single-operator local deployment with no external exposure.
 CONTROL_SECRET_ROTATE_INTERVAL_S = 30 * 24 * 60 * 60
 
+# How long /control/clip serves a re-minted download URL from its per-event
+# cache before re-fetching from TELUS. Kept well under alarm.com's own signed-URL
+# lifetime (minutes) so a cached URL is always still valid when handed out, while
+# collapsing a burst of taps on one notification into a single upstream request.
+CLIP_URL_CACHE_TTL_S = 60
+
 
 # Credentials for the bundled MediaMTX, generated once by entrypoint.sh and shared
 # with it through /shared/rtsp_password (see mediamtx.yml's authInternalUsers).
