@@ -337,6 +337,16 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
         # Membership in the last page has neither problem, and the page is bounded
         # (20 events) so the set can't grow.
         self._seen_ids: set[str] = {e["id"] for e in (coordinator.data or [])}
+        # Ids already fired WHILE carrying a clip. TELUS's historyEvents entry can
+        # appear a poll or two BEFORE its media relationship is attached, so a
+        # doorbell clip's first sighting may have download_url=None (the automation
+        # suppresses that, correctly) and the clip only shows up later -- by which
+        # time the id is in _seen_ids and would never fire again, permanently losing
+        # the clip notification. Tracking whether we have fired an id *with* a clip
+        # lets such an event fire exactly once more when the clip finally attaches.
+        self._fired_with_clip: set[str] = {
+            e["id"] for e in (coordinator.data or []) if e.get("download_url")
+        }
         # See TelusCameraEvent for why an empty first page can't be used as a baseline.
         self._baseline_pending = not (coordinator.data or [])
 
@@ -350,10 +360,19 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
             if events:
                 self._baseline_pending = False
                 self._seen_ids = {e["id"] for e in events}
+                self._fired_with_clip = {e["id"] for e in events if e.get("download_url")}
             super()._handle_coordinator_update()
             return
 
-        new_events = [e for e in events if e["id"] not in self._seen_ids]
+        def _needs_fire(e: dict[str, Any]) -> bool:
+            if e["id"] not in self._seen_ids:
+                return True
+            # Already seen: re-fire only if it has gained a clip it lacked when it
+            # first fired (the enrichment race above). Bounded to one extra fire
+            # per id by _fired_with_clip, so no duplicate storm.
+            return bool(e.get("download_url")) and e["id"] not in self._fired_with_clip
+
+        new_events = [e for e in events if _needs_fire(e)]
         if new_events:
             # TELUS returns the page newest-first; fire oldest-first so a listener
             # sees them in the order they actually happened. Sort by PARSED
@@ -381,6 +400,8 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
                 # single trailing write drops every event but the last when a
                 # poll returns several new activity entries at once.
                 self.async_write_ha_state()
+                if event.get("download_url"):
+                    self._fired_with_clip.add(event["id"])
 
         # Rebase onto the current page. Anything that has scrolled off it is older
         # than everything still on it, so it can never legitimately reappear as new.
@@ -388,5 +409,8 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
         # cause the whole next page to re-fire.
         if events:
             self._seen_ids = {e["id"] for e in events}
+            # Keep _fired_with_clip bounded to the current page too, so it can't
+            # grow without bound over the process lifetime.
+            self._fired_with_clip &= self._seen_ids
 
         super()._handle_coordinator_update()
