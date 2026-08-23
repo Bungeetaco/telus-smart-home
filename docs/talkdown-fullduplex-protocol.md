@@ -287,17 +287,41 @@ ADC cameras) does NOT yet apply the filter -- apply it there too so ALL talk
 audio is conditioned regardless of path; **E20** the tuned chain is
 VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
 
-- **E1 Session renegotiation (long-duration + resilient streaming).** The `<cli>`
-  port + stream password are PER-SESSION and expire around `cstet`; short clips
-  finish inside that window but an arbitrarily long or interrupted stream will
-  outlive it. Design (resume with no lost audio): keep a running audio byte
-  offset; on an unrecoverable mid-stream PUT failure (connection reset, an auth
-  failure a single 401 re-challenge doesn't fix, or nearing `cstet`) do NOT end
-  the talk -- best-effort `EndLiveStream`, re-`GetDoorbellCameraList` (fresh port/
-  password/URL), re-`StartFullDuplex`, reconnect and resume from the saved
-  offset; bound the number of renegotiations per talk; proactively renegotiate
-  slightly BEFORE `cstet` to avoid an audible seam. Kept out today only because
-  <=10-min clips work without it.
+- **E1 (DONE 2026-08-23) Session renegotiation -- long-duration + resilient streaming.**
+  The PutAudioStream URL, port and password are per-session, so a long clip or a
+  network blip can outlive the session the talk opened, and the failure lands
+  mid-clip with the audio half-played. Implemented as follows:
+    * `talk_fullduplex.stream_talkdown()` takes an optional async `renegotiate`
+      callback and owns the audio byte offset. When a session dies mid-stream
+      (5xx, a 401 the Digest middleware can't recover, a connection reset or a
+      socket-read timeout) it calls the callback for fresh credentials, rebuilds
+      the HTTP session, and **resumes from the exact byte offset** -- nothing lost,
+      nothing repeated.
+    * `talk.py` supplies that callback, keeping all MWS work on its side of the
+      boundary: best-effort `EndLiveStream` on the dying session ->
+      `GetDoorbellCameraList` for a fresh port/password/URL -> `StartFullDuplex`
+      to re-arm. The final teardown follows whichever session ended up live.
+    * Bounded by `config.TALK_MAX_RENEGOTIATIONS` (default 2), so a persistently
+      broken session fails the request instead of looping.
+    * The swap is dead air, not audio time: the safety deadline is extended by
+      what the swap cost, and the pacing schedule is re-baselined so the stream
+      continues at real time rather than bursting to "catch up" (which would
+      overrun the doorbell's small buffer).
+    * **Proactive variant** (`session_deadline`): when a session expiry is known,
+      the transport swaps `config.TALK_RENEGOTIATE_MARGIN_S` early instead of
+      waiting for a failed PUT. `talk.py` derives this from the `<cli>` `cstet`
+      timestamp, but ONLY when that value is far enough in the future to be
+      meaningful as an expiry -- its semantics are unconfirmed (in one capture it
+      sat within seconds of the fetch, which would make it a creation time). If it
+      isn't plausible the value is ignored and the reactive path stands. So today
+      this is expected to be dormant; it activates by itself if `cstet` turns out
+      to be a real expiry, with no code change.
+    * Renegotiation is **opt-in**: without a callback, a mid-stream failure stays
+      fatal exactly as before.
+    * Covered by `camera-bridge/tests/test_talkdown_renegotiation.py` (run in CI):
+      a local fake doorbell enforcing real Digest auth dies mid-clip, and the test
+      asserts the bytes both sessions received, concatenated, are byte-identical
+      to a clean single-pass encode -- plus the bound and the opt-in behaviour.
 - **E2 Cancel / stop an in-progress talk.** There is no way to stop a playing
   clip early -- a long (e.g. 10-min music) talk only ends when the audio finishes
   or the safety deadline fires. Add a cancel path (control endpoint + a
@@ -362,7 +386,8 @@ VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
   real webrtc/srtp-capable ADC camera; validate when such a device exists.
 
 ### Testing / observability
-- **E14 Repo unit tests** for the transport (`_Digest` header correctness,
+- **E14 (PARTIAL) Repo unit tests** -- `camera-bridge/tests/` now exists and runs
+  in CI, covering talkdown session renegotiation. Still wanted: for the transport (`_Digest` header correctness,
   schedule-based pacing, prebuffer) and for `parse_doorbell_camera_list` (the
   parser was verified ad hoc against a capture but no test is committed).
 - **E15 Metrics** -- emit talk success/failure counts + durations for observability.

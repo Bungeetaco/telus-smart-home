@@ -285,6 +285,19 @@ TALK_CODEC_FALLBACK = "mulaw"
 # compress the dynamics, and hard-limit below full scale (no clipping).
 # Tuned by ear on the live doorbell. Set to "" to disable (pass audio
 # through untouched, e.g. for already-conditioned sources).
+# Session renegotiation for a talk that outlives its stream session.
+# The doorbell's PutAudioStream URL, port and password are PER-SESSION. A long
+# clip (or a network blip) can outlive one, and the failure is mid-stream: the
+# PUTs start erroring with the audio half-played. Rather than abort, the
+# transport asks its caller for a FRESH session and resumes from the exact byte
+# offset it reached, so no audio is lost or repeated. Bounded so a persistently
+# broken session fails the request instead of looping.
+TALK_MAX_RENEGOTIATIONS = 2
+# When the caller can determine a session expiry, renegotiate this many seconds
+# BEFORE it rather than waiting for the first failed PUT -- a proactive swap
+# costs one silent gap of a few hundred ms instead of a failed chunk plus a
+# teardown/setup round trip.
+TALK_RENEGOTIATE_MARGIN_S = 20
 TALK_AUDIO_FILTER = ("highpass=f=250,lowpass=f=2800,"
                      "acompressor=threshold=-18dB:ratio=3:attack=5:release=150:makeup=2,"
                      "alimiter=level_out=0.5:limit=0.6")
