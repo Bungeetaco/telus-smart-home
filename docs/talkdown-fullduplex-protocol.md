@@ -367,6 +367,30 @@ VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
   parser was verified ad hoc against a capture but no test is committed).
 - **E15 Metrics** -- emit talk success/failure counts + durations for observability.
 
+### Dependency-driven (from the 2026-08 aiortc 1.15 / aiohttp 3.14 upgrade)
+- **E21 Replace the hand-rolled HTTP Digest with aiohttp's `DigestAuthMiddleware`.**
+  `talk_fullduplex.py` implements RFC 2617 Digest (MD5, `qop=auth`, `nc` counter)
+  by hand because aiohttp had no client-side Digest support when it was written.
+  aiohttp **3.12** added `DigestAuthMiddleware`, and **3.14** fixed it to sign the
+  *encoded* request-target (which matters for the relay `uae` endpoint, whose URL
+  carries a `?camera_id=` token). The bridge now runs aiohttp 3.14.x, so this is
+  actionable: swapping to the middleware deletes bespoke auth code (`_Digest`,
+  `_parse_challenge`, `_h`) and inherits upstream fixes. Verify the doorbell still
+  accepts the middleware's header ordering/format before committing to it.
+- **E22 Bump PyAV to 17.x for the per-frame memory-leak fix.** aiortc 1.15.0
+  relaxed its PyAV pin to allow 17.x specifically because it *"fixes a per-frame
+  memory leak"*. This bridge is the worst case for that leak: every frame of every
+  camera crosses into Python (`janus_client` `track.recv()` -> `ffmpeg_sink`
+  `frame.to_ndarray()`), 24/7, in a container capped at 768 MB. `requirements.txt`
+  still pins `av==16.1.0`, so the fix is NOT yet in effect. Bump and watch RSS over
+  a few days (baseline after the 1.15/3.14 upgrade: ~316 MiB with 2 cameras).
+- **E23 `aiortc.sdp.candidate_from_sdp` is a private-API dependency.**
+  `janus_client.py` and `talk_webrtc.py` import it from `aiortc.sdp`, an internal
+  module with no stability guarantee, and it sits in the live video path. It still
+  exists unchanged in 1.15.0 (verified), but every aiortc bump must re-check it.
+  Options: keep it and rely on the CI/dep-review gate, or vendor a small local SDP
+  candidate parser so the video path stops depending on library internals.
+
 ### Minor
 - **E16 Cache `GetDoorbellCameraList`** within the `cstet` window to save a round
   trip on rapid repeat talks.
