@@ -12,6 +12,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
+          # Testing on a different interpreter than the container runs is worse than
+          # not testing. Renovate is configured not to bump this independently; change
+          # it only together with the Dockerfile base image.
           python-version: "3.12"
       - name: Install integration requirements (as declared in manifest.json)
         run: |
@@ -29,6 +33,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
+          # Testing on a different interpreter than the container runs is worse than
+          # not testing. Renovate is configured not to bump this independently; change
+          # it only together with the Dockerfile base image.
           python-version: "3.12"
       - name: Install bridge requirements (--only-binary catches aiortc/av bumps with no manylinux wheel)
         run: |
@@ -42,6 +50,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
+          # Testing on a different interpreter than the container runs is worse than
+          # not testing. Renovate is configured not to bump this independently; change
+          # it only together with the Dockerfile base image.
           python-version: "3.12"
       - name: Install bridge requirements
         run: |
