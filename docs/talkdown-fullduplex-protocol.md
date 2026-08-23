@@ -357,20 +357,35 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   standalone rule).
 
 ### Audio quality / transport
-- **E4 L16 codec -- TESTED, unsupported on THIS doorbell's PUT path (device-
-  specific).** L16 (16-bit linear, `skyL16pay`/pt97) was implemented and fired at
-  the live ADC-VDB750 (fw 02091) over `/api/PutAudioStream` in BOTH endiannesses
-  (`s16be` and `s16le`, Content-Type `audio/L16;rate=8000;channels=1`): both came
-  out as **noise** -- this doorbell decodes the PUT body as mu-law regardless of
-  Content-Type. So mu-law is the only working codec on this device's PUT path.
-  **This is a per-model/firmware limit, NOT alarm.com-wide** -- other alarm.com
-  camera/doorbell models may support L16 (newer ADC cameras carry L16 via the
-  webrtc/srtp path, see `talk_srtp.py`). Remaining avenues for L16 on the VDB750:
-  the OSP/RTSP backchannel (`skyL16pay` lives there, a bigger RE effort), or an
-  undiscovered codec selector (query param / StartFullDuplex field). The `CODECS`
-  table + per-request `codec` plumbing + primary/fallback are kept in place so a
-  working codec can be dropped in per device. Quality on the VDB750 is instead
-  handled by E-COND below.
+- **E4 (CLOSED 2026-08-23 -- not achievable on this device) L16 codec.**
+  Investigated to a conclusion rather than left open. L16 (16-bit linear,
+  `skyL16pay`/pt97) was first implemented and fired at the live ADC-VDB750 over
+  `/api/PutAudioStream` in **both endiannesses** -- both came out as noise. The
+  follow-up question was whether some *other* path on the device could carry it
+  (the vendor's native `libvideo-streamer.so` contains an OSP backchannel:
+  `OspBackchannelConnector`, `WebSocketOspConnectClient`, `StartBackchannelRequest`,
+  `/ws/ospserver`). Probed directly with
+  [`camera-bridge/tools/probe_device_audio.py`](../camera-bridge/tools/probe_device_audio.py):
+
+  | Question | Result |
+  | --- | --- |
+  | Is there an OSP backchannel? | **No.** `/ws/ospserver` and `/osp` → `404`; `/api/StartBackchannel`, `/api/GetAudioStream`, `/api/PutAudioStreamL16`, `/api/capabilities`, `/api/GetDeviceInfo` all → `{"errorCode":-1,"msg":"Unknown request"}` |
+  | Does the audio endpoint negotiate a codec? | **No.** `?codec=L16`, `?format=`, `?encoding=`, `?payloadType=97`, `X-Audio-Codec`, `Content-Type: audio/L16` — every variant answers exactly like the baseline. It consumes bytes as mu-law regardless. |
+  | Could RTSP `ANNOUNCE`+`RECORD` carry RTP/L16? | **No -- there is no RTSP server.** The media port answers RTSP with `HTTP/1.0 400 Bad Request` from `lighttpd/1.4.61`. The `rtsp://` URLs in `<cli>` are consumed over HTTP; the device has no RTSP method set at all. |
+
+  So this doorbell exposes exactly **one** inbound audio path, and that path is
+  **mu-law only**. That also explains the app's own behaviour: the reference
+  implementation selects `mulawenc` for this device, not `skyL16pay`, because
+  `skyL16pay` targets the other device family (the OpenEye/SRTP cameras behind the
+  webrtc/srtp transports — see E13). Nothing short of new device firmware changes
+  this, so E4 is closed rather than deferred.
+
+  **Consequence:** 8 kHz mu-law is the quality ceiling on this hardware, which is
+  what makes the conditioning chain (E-COND) the real lever for how talkdown
+  sounds — not the codec. If this project is ever pointed at a different model,
+  run the probe tool first: a device that answers "Unknown request" for everything
+  it does not implement, ignores codec selectors, and speaks HTTP on its media
+  port has one path and one codec, exactly like this one.
 - **E5 Streaming encode** -- pipe `ffmpeg` stdout straight into the PUT loop
   instead of buffering the whole mu-law clip in RAM and spooling a temp file.
   Lowers memory + latency-to-first-audio for long/large files and removes the
