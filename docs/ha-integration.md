@@ -761,6 +761,7 @@ requires.
 | **Status LED** | `switch` | The camera reports `led.supports_enabled` | The indicator light on the device, on/off via `/settings/led`, entity category *config*. **Not** the infrared illuminator — that is `ir_led_enabled` on the image route |
 | **Status LED brightness** | `number` | The camera reports `led.supports_brightness` | Both cameras on the reference account report this **false**, so neither gets one; the entity exists for models that can dim and has never run against real hardware |
 | **TELUS motion / button press / smart chime notifications** | `switch` | Each gated on its own `notifications.supports_*` | What TELUS pushes to its **own app** — nothing to do with Home Assistant's notifications. Via `/settings/notifications`, entity category *config*. A camera that is not a doorbell reports every flag false and gets none |
+| **TELUS app notification format** | `select` | The camera reports `notifications.supports_format` | Whether TELUS's push carries just text or a thumbnail. Two options only — the upstream enum has four members and the other two are a null state and a legacy value alarm.com rewrites away |
 | **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
 | **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
 | **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
@@ -786,10 +787,12 @@ bridge has already collapsed into three booleans — see
 is not a doorbell gets none of these switches, which is correct rather than
 missing.
 
-The notification **format** (text-only versus with a thumbnail) is deliberately
-read-only and has no entity: nothing available defines that enum's numeric
-values, so setting it would mean writing a guess to a live device. See E40 in the
-backlog for the one capture that would close it.
+The notification **format** — text-only versus with a thumbnail — is a select.
+Its two options are the only two alarm.com offers: the upstream enum has four
+members, but one is a null state and one is a legacy value the portal rewrites
+away when it reads it. The numbers behind them were read out of the portal's own
+JavaScript, which is a public static asset, rather than guessed — see
+[control-api.md](control-api.md).
 
 ### The chime entities, and why the indoor switch can go unavailable
 

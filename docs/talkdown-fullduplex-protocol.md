@@ -691,21 +691,28 @@ that look worth having.
   unsupported). Only meaningful on a battery + solar camera; noted so the field
   is not mistaken for something missing.
 
-- **E40 `notificationFormat` is readable but not settable, and cannot be until
-  someone finds the enum.**
-  It chooses between a text-only notification and one with a thumbnail attached.
-  The web portal's bundle names the members (`Unknown`, `TextOnly`,
-  `AttachThumbnail`) in the dropdown it builds, but the module assigning them
-  NUMBERS was not in the HAR, and the Android app does not implement the feature
-  at all -- a full decompile finds no `VideoNotificationFormat`, no
-  `NotificationFormat` and no `TextOnly`. So it is web-only.
+- **E40 (DONE 2026-08-23) The notification format is resolved and settable.**
+  The entry said a capture of the portal changing the setting would be needed.
+  It was not, and the method generalises: **the portal's JavaScript is a public
+  static asset.** The enum lives in webpack module `288086`, which the captured
+  session never loaded, so it was fetched straight from
+  `/web/system/assets/chunk.<hash>.js` with no account, no session and no logged-in
+  page involved. The chunk list came from the webpack runtime already in the HAR.
 
-  Observed values: `0` on the doorbell, `-1` on a camera with no doorbell
-  notification support. That hints `-1` is `Unknown` and therefore that `0` is
-  `TextOnly`, but hinting is not knowing, and this would be a guessed enum value
-  written to live hardware. The bridge reports it and refuses to set it.
+      VideoNotificationFormat: Unknown = -1, TextOnly = 0,
+                               AttachVideoClip = 1, AttachThumbnail = 2
 
-  To close this: capture the portal's General Settings page while changing the
-  notification format, and read the `notificationFormat` value out of the
-  resulting `PUT`. One capture settles it.
+  That confirms the earlier guess about `-1` being `Unknown`, and contradicts the
+  other half of it: `0` is `TextOnly`, but `AttachThumbnail` is **2**, not 1 --
+  which is exactly the value a plausible-looking inference would have written.
 
+  Only `0` and `2` are offered. The portal builds its own dropdown from those two
+  alone, and elsewhere in the same bundle it rewrites `AttachVideoClip` to
+  `AttachThumbnail` whenever it reads one, so `1` is a value alarm.com itself
+  treats as stale. The device publishes no option list, so the bridge enforces
+  the set or nothing does.
+
+  Worth remembering for the next enum: a HAR shows what the browser *loaded*, not
+  what the app *contains*, and one of these chunks was even stored truncated in
+  the capture. Re-fetching the assets is cheap and answers questions the capture
+  cannot.

@@ -520,19 +520,43 @@ async def test_notification_write_preserves_the_led_in_the_same_document():
             "doorbellNotificationSetting.isButtonPressNotificationsOn"}, changed
 
 
-async def test_notification_format_is_reported_but_never_written():
-    """`format` is an enum whose numeric values nothing available defines --
-    neither the captured web bundle nor the decompiled app. It is reported so a
-    caller can see it and refused as a write, rather than guessed at against live
-    hardware."""
+async def test_notification_format_offers_only_the_two_live_members():
+    """VideoNotificationFormat is Unknown -1, TextOnly 0, AttachVideoClip 1,
+    AttachThumbnail 2 -- read out of the portal's own webpack module, not guessed.
+
+    Only 0 and 2 may be written. The portal builds its dropdown from those two
+    alone, and elsewhere in the same bundle it rewrites AttachVideoClip to
+    AttachThumbnail whenever it reads one, so 1 is a value alarm.com itself treats
+    as stale. -1 is a null state -- a camera with no doorbell notifications
+    reports it -- not a choice. The device publishes no option list of its own, so
+    if this set is not enforced here nothing enforces it.
+    """
     async with portal_at(8494) as (portal, telus):
         parsed = cs._parse_notifications(cs._flatten(portal.docs["general_settings"]))
         assert parsed["format"] == 0, parsed
+        assert parsed["supports_format"] is True, parsed
+        assert parsed["format_choices"] == [
+            {"value": 0, "label": "Text Only"},
+            {"value": 2, "label": "Attach a Thumbnail"}], parsed
 
-        await expect_error("format",
-                           lambda: cs.set_notification_settings(telus, CAM, format=1),
+        # The two offered values write.
+        result = await cs.set_notification_settings(telus, CAM, format=2)
+        assert portal.last("generalSettings")[
+            "doorbellNotificationSetting"]["notificationFormat"] == 2
+        assert result["format"] == 2, result
+
+        # The legacy member and the null state do not.
+        for bad in (1, -1, 3):
+            await expect_error(f"format={bad}",
+                               lambda b=bad: cs.set_notification_settings(
+                                   telus, CAM, format=b),
+                               unsupported=False)
+        await expect_error("format=True",
+                           lambda: cs.set_notification_settings(telus, CAM,
+                                                                format=True),
                            unsupported=False)
-        assert portal.writes == []
+        assert len(portal.writes) == 1, (
+            f"only the legal write should have reached the camera: {portal.writes}")
 
 
 async def test_general_settings_reads_both_sections_in_one_request():

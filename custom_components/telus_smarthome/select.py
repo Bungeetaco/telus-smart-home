@@ -34,7 +34,12 @@ from .camera_settings_coordinator import (
     async_bridge_post,
     async_get_camera_settings_coordinator,
 )
-from .const import CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE, DATA_CONTROLLER, DOMAIN
+from .const import (
+    CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE,
+    CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE,
+    DATA_CONTROLLER,
+    DOMAIN,
+)
 from .controller import AlarmIntegrationController
 
 LOGGER = logging.getLogger(__name__)
@@ -87,6 +92,18 @@ async def async_setup_entry(
         return [CameraChimeTypeSelect(settings_coordinator, camera_id)]
 
     async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_chime_type)
+
+    @core.callback
+    def _build_notification_format(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """One selector per camera that reports a settable notification format."""
+        notifications = (camera_data.get("settings") or {}).get("notifications") or {}
+        if not notifications.get("supports_format"):
+            return []
+        return [CameraNotificationFormatSelect(settings_coordinator, camera_id)]
+
+    async_add_camera_entities(
+        config_entry, settings_coordinator, async_add_entities, _build_notification_format
+    )
 
 
 class CameraChimeTypeSelect(CameraSettingsEntity, SelectEntity):
@@ -183,6 +200,99 @@ class CameraChimeTypeSelect(CameraSettingsEntity, SelectEntity):
         # number.py's volume write.
         if audio:
             self.coordinator.async_apply_settings_section(self._camera_id, "audio", audio)
+        else:
+            await self.coordinator.async_request_refresh()
+
+
+class CameraNotificationFormatSelect(CameraSettingsEntity, SelectEntity):
+    """How much TELUS puts in the push notifications it sends to its OWN app.
+
+    Text only, or a thumbnail of what triggered it. This changes what the TELUS
+    app shows on a phone; it has no effect on anything Home Assistant sends, and
+    it is not a Home Assistant notification setting -- see the switches in
+    switch.py that share this section.
+
+    The choices are a fixed pair rather than something the camera publishes: the
+    upstream field is an enum whose values the bridge resolves from alarm.com's
+    own web bundle, and only the two members alarm.com still offers are exposed.
+    See the bridge's notification settings docs for why the other two members
+    exist and are withheld.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:message-image-outline"
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the notification format selector for one camera."""
+        super().__init__(coordinator, camera_id, "telus_app_notification_format")
+
+    @property
+    def _notifications(self) -> dict[str, Any]:
+        """The camera's notifications settings section."""
+        return self._settings.get("notifications") or {}
+
+    @property
+    def available(self) -> bool:
+        """Also unavailable if the camera stops reporting the format as settable."""
+        return super().available and bool(self._notifications.get("supports_format"))
+
+    @property
+    def _values_by_label(self) -> dict[str, int]:
+        """The offered formats as {label shown: value written}.
+
+        No fallback to bare numbers, unlike the chime type selector: these
+        choices are a constant the bridge always sends alongside the flag, not a
+        secondary upstream read that can fail. If they are missing, the honest
+        result is an empty list rather than a selector of unexplained integers --
+        a raw notification-format number means nothing to anyone.
+        """
+        labelled: dict[str, int] = {}
+        for choice in self._notifications.get("format_choices") or []:
+            value, label = choice.get("value"), choice.get("label")
+            if value is None or not label:
+                continue
+            labelled[str(label)] = int(value)
+        return labelled
+
+    @property
+    def options(self) -> list[str]:
+        """The formats this camera offers."""
+        return list(self._values_by_label)
+
+    @property
+    def current_option(self) -> str | None:
+        """The label matching the reported format, or None if none does.
+
+        None is expected rather than exceptional here: the upstream enum has a
+        member meaning "unknown" that a camera reports when it has no doorbell
+        notifications at all, and two more the bridge deliberately does not
+        offer. Any of those lands here, and unknown is the truthful rendering.
+        """
+        current = self._notifications.get("format")
+        if current is None:
+            return None
+        return next(
+            (label for label, value in self._values_by_label.items() if value == current),
+            None,
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        """Write the chosen format and adopt the section that comes back."""
+        values = self._values_by_label
+        if option not in values:
+            raise HomeAssistantError(
+                f"This camera no longer offers the notification format {option}."
+            )
+
+        notifications = await async_bridge_post(
+            self.hass,
+            CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE.format(camera_id=self._camera_id),
+            {"format": values[option]},
+        )
+        if notifications:
+            self.coordinator.async_apply_settings_section(
+                self._camera_id, "notifications", notifications
+            )
         else:
             await self.coordinator.async_request_refresh()
 
