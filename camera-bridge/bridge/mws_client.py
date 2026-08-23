@@ -252,10 +252,10 @@ def parse_live_video_stream(xml: str) -> dict:
     if lvsr is None:
         raise ValueError("no <lvsr> element in MWS GetLiveVideoStream response")
 
-    token_status = _int(lvsr, "TokenStatus", 0)
+    token_status = _int(lvsr, "ts", _int(lvsr, "TokenStatus", 3))
     # ErrorMessage is the BaseMwsResponse field; 'e' is the video-response
     # error string. Prefer the former, fall back to the latter.
-    error = (_attr(lvsr, "ErrorMessage") or _attr(lvsr, "e") or "") or None
+    error = (_attr(lvsr, "em") or _attr(lvsr, "e") or _attr(lvsr, "ErrorMessage") or "") or None
 
     out = {
         "token_status": token_status,
