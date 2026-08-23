@@ -271,6 +271,18 @@ CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE = (
 # the caller folds back in rather than re-polling.
 CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE = (
     "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/led")
+# POST, body {"motion": bool?, "button_press": bool?, "smart_chime": bool?} --
+# any subset. These are the push notifications TELUS sends to its OWN mobile
+# app, nothing to do with Home Assistant's notifications; the reason to touch
+# them from here is to stop being told twice about one doorbell press. Answers
+# with the whole refreshed `notifications` section, which the caller folds back
+# in rather than re-polling.
+# The section also reports a read-only `format` enum (Unknown/TextOnly/
+# AttachThumbnail). Neither the web bundle nor the decompiled app defines its
+# numeric values, so the 0 the reference doorbell reports cannot be told apart
+# from "unknown" -- no entity writes it, and this route accepts no field for it.
+CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/notifications")
 # POST, body {"action": "start"|"stop"}. This makes a real siren sound in
 # someone's home -- only ever fired from a button press.
 CAMERA_BRIDGE_CAMERA_SIREN_URL_TEMPLATE = (

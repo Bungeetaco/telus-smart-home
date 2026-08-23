@@ -664,20 +664,48 @@ that look worth having.
   the point of selection appears; Home Assistant's select has no confirmation
   affordance today.
 
-- **E38 `generalSettings` also carries the doorbell's notification toggles.**
-  Found while implementing E32; the same document holds a
-  `doorbellNotificationSetting` object with
-  `panelNotificationEnableDisableFeatureSupport` (2 on the reference doorbell),
-  `isMotionNotificationsOn`, `isButtonPressNotificationsOn`,
-  `isSmartChimeNotificationsOn` and `notificationFormat`. These are the TELUS-side
-  push notifications, which is a different thing from Home Assistant's own
-  notifications -- worth exposing mainly so the two can be kept from duplicating
-  each other. `camera_settings.get_led_settings` already reads this document, so
-  the additional cost is a field table, not another endpoint.
+- **E38 (DONE 2026-08-23) The TELUS-side notification toggles are now switches.**
+  Motion and button-press, over the same `generalSettings` document as the status
+  LED -- the settings bundle now reads that document once and splits it into two
+  sections rather than fetching it twice per camera per poll.
+
+  These are the notifications alarm.com pushes to its OWN app; they do not touch
+  anything Home Assistant sends. The realistic use is stopping a doorbell press
+  from notifying twice, once per system.
+
+  The gating was the interesting part and is not one flag per toggle: motion and
+  button-press share `panelNotificationEnableDisableFeatureSupport`, the smart
+  chime has its own, and motion is additionally gated by
+  `isMotionNotificationEnabled` -- an availability flag, not a toggle, which the
+  portal uses to decide whether to render the row at all. `_Field.requires` was
+  added for that second condition. Read off the portal's own bundle rather than
+  guessed from the payload; the obvious reading would have offered a smart-chime
+  switch this doorbell does not have.
+
+  Confirms the gating works end to end: the doorbell gets two switches and the
+  indoor camera, which is not a doorbell and reports every flag false, gets none.
 
 - **E39 `generalSettings` reports solar-panel status.**
   `solarPanelSetting` with `isConnectedToSolarPanel` and
   `connectedToSolarPanelFeatureSupport` (0 on the reference doorbell, i.e.
   unsupported). Only meaningful on a battery + solar camera; noted so the field
   is not mistaken for something missing.
+
+- **E40 `notificationFormat` is readable but not settable, and cannot be until
+  someone finds the enum.**
+  It chooses between a text-only notification and one with a thumbnail attached.
+  The web portal's bundle names the members (`Unknown`, `TextOnly`,
+  `AttachThumbnail`) in the dropdown it builds, but the module assigning them
+  NUMBERS was not in the HAR, and the Android app does not implement the feature
+  at all -- a full decompile finds no `VideoNotificationFormat`, no
+  `NotificationFormat` and no `TextOnly`. So it is web-only.
+
+  Observed values: `0` on the doorbell, `-1` on a camera with no doorbell
+  notification support. That hints `-1` is `Unknown` and therefore that `0` is
+  `TextOnly`, but hinting is not knowing, and this would be a guessed enum value
+  written to live hardware. The bridge reports it and refuses to set it.
+
+  To close this: capture the portal's General Settings page while changing the
+  notification format, and read the `notificationFormat` value out of the
+  resulting `PUT`. One capture settles it.
 

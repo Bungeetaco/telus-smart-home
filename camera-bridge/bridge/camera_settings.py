@@ -105,6 +105,11 @@ class _Field(NamedTuple):
     names: tuple[str, ...]      # candidate API key names for the value itself
     support: tuple[str, ...]    # candidate names for its *FeatureSupport companion
     kind: str                   # "int", "bool" or "str"
+    # Extra flags that must ALL be truthy on top of `support`, for the fields
+    # whose availability this API splits across two keys -- the doorbell's motion
+    # notification is gated both by the shared panel-notification enum AND by its
+    # own isMotionNotificationEnabled. Absent counts as false, like `support`.
+    requires: tuple[str, ...] = ()
 
 
 # imageSettings. Key names, capability flags and bounds below are taken from
@@ -170,6 +175,37 @@ _LED_FIELDS: dict[str, _Field] = {
                       ("canTurnOnOffLedLight",), "bool"),
     "brightness": _Field("ledLightSetting", ("ledBrightness",),
                          ("canChangeLedBrightness",), "int"),
+}
+
+# generalSettings -> doorbellNotificationSetting. These are the notifications
+# TELUS/alarm.com sends to its OWN app -- a different thing from anything Home
+# Assistant does, and worth exposing mainly so the two can be kept from
+# duplicating each other.
+#
+# The gating is not one flag per toggle, which is the trap here. Motion and
+# button-press share `panelNotificationEnableDisableFeatureSupport` (the portal
+# calls them "panel notification toggles" and shows both from that one enum),
+# while the smart chime has its own. Motion carries a SECOND condition on top:
+# the portal renders its row only when `isMotionNotificationEnabled` is true, so
+# that is a per-device availability flag rather than a toggle, and it is checked
+# through _Field.requires. Names and rules read off the portal's own bundle.
+#
+# `notificationFormat` is deliberately NOT here. It is an enum whose members
+# include Unknown, TextOnly and AttachThumbnail, and the module defining their
+# numeric values was not in the capture -- this device reports 0, which could be
+# Unknown just as easily as TextOnly. Writing a guessed enum value to a live
+# device is not worth the convenience; the raw value is still readable through
+# `raw`.
+_NOTIFICATION_FIELDS: dict[str, _Field] = {
+    "motion": _Field("doorbellNotificationSetting", ("isMotionNotificationsOn",),
+                     ("panelNotificationEnableDisableFeatureSupport",), "bool",
+                     ("isMotionNotificationEnabled",)),
+    "button_press": _Field("doorbellNotificationSetting",
+                           ("isButtonPressNotificationsOn",),
+                           ("panelNotificationEnableDisableFeatureSupport",), "bool"),
+    "smart_chime": _Field("doorbellNotificationSetting",
+                          ("isSmartChimeNotificationsOn",),
+                          ("smartChimeNotificationEnableDisableFeatureSupport",), "bool"),
 }
 
 # --- low-level HTTP ---------------------------------------------------------
@@ -399,7 +435,8 @@ def _options(obj: dict, base: str) -> list | None:
     return None
 
 
-def _supported(obj: dict, support: tuple[str, ...]) -> bool:
+def _supported(obj: dict, support: tuple[str, ...],
+               requires: tuple[str, ...] = ()) -> bool:
     """Whether the device advertises this field as editable.
 
     This API uses TWO capability spellings, and which one applies is decided by
@@ -415,7 +452,13 @@ def _supported(obj: dict, support: tuple[str, ...]) -> bool:
 
     False when no companion flag is present at all: absence is unknown, and
     unknown must not be offered or written (see the module docstring).
+
+    `requires` names extra flags that must all be truthy as well -- see _Field.
+    An absent one is false for the same reason.
     """
+    for name in requires:
+        if not obj.get(name):
+            return False
     for name in support:
         if name not in obj:
             continue
@@ -510,7 +553,8 @@ def _parse_table(attrs: dict, table: dict[str, _Field]) -> dict[str, Any]:
     for name, field in table.items():
         obj = _obj(attrs, field.container)
         read = _read_field(obj, field)
-        parsed[f"supports_{name}"] = bool(read) and _supported(obj, field.support)
+        parsed[f"supports_{name}"] = bool(read) and _supported(
+            obj, field.support, field.requires)
         if not read:
             parsed[name] = None
             continue
@@ -547,7 +591,7 @@ async def _apply_table(telus: TelusSession, url: str, table: dict[str, _Field],
         field = table[name]
         obj = _obj(attrs, field.container)
         key = _resolve(obj, field.names)
-        if key is None or not _supported(obj, field.support):
+        if key is None or not _supported(obj, field.support, field.requires):
             raise CameraSettingsError(f"this camera does not support {name}",
                                       unsupported=True, field=name)
         pending.append((obj, key, _coerce(name, field, obj, key, value)))
@@ -848,6 +892,74 @@ async def set_led_settings(telus: TelusSession, camera_id: str, **fields) -> dic
     url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
     flat = await _apply_table(telus, url, _LED_FIELDS, fields, "LED")
     return _parse_table(flat, _LED_FIELDS)
+
+
+# --- TELUS-side notifications ------------------------------------------------
+def _parse_notifications(flat: dict) -> dict:
+    """The notification section, plus the read-only format the bridge won't set."""
+    parsed = _parse_table(flat, _NOTIFICATION_FIELDS)
+    obj = _obj(flat, "doorbellNotificationSetting")
+    # Reported so a caller can SEE what the device is set to, with no setter and
+    # no claim about what the number means (see _NOTIFICATION_FIELDS).
+    parsed["format"] = _as_int(obj.get("notificationFormat"), None)
+    return parsed
+
+
+async def get_notification_settings(telus: TelusSession, camera_id: str) -> dict:
+    """Which events TELUS pushes to its own app for this camera.
+
+    Returns ``supports_motion``/``motion``, ``supports_button_press``/
+    ``button_press``, ``supports_smart_chime``/``smart_chime``, a read-only
+    ``format``, and ``raw``.
+
+    These are alarm.com's push notifications, NOT Home Assistant's. Turning one
+    off here stops the TELUS app notifying; it does not affect any automation on
+    this side. That is the point of exposing them -- a doorbell that notifies
+    twice, once per system, is the usual reason to want this.
+
+    Read from the same generalSettings document as the status LED, so a caller
+    that wants both pays for one request if it reads them together.
+    """
+    url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
+    return _parse_notifications(_flatten(await _get_doc(telus, url)))
+
+
+async def set_notification_settings(telus: TelusSession, camera_id: str,
+                                    **fields) -> dict:
+    """Turn TELUS-side notifications on/off; returns the read shape.
+
+    Accepted keys: ``motion``, ``button_press``, ``smart_chime`` (all bools).
+
+    Raises CameraSettingsError with ``unsupported=True`` for a toggle this camera
+    does not offer -- the reference doorbell reports
+    ``smartChimeNotificationEnableDisableFeatureSupport`` 0, so ``smart_chime``
+    raises there while the other two work. Checked for every requested field
+    before anything is written.
+
+    Read-modify-write like the rest: the PUT replaces the whole generalSettings
+    document, so the status LED and solar-panel objects beside these are resent
+    exactly as read.
+    """
+    url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
+    flat = await _apply_table(telus, url, _NOTIFICATION_FIELDS, fields, "notification")
+    return _parse_notifications(flat)
+
+
+async def get_general_settings(telus: TelusSession, camera_id: str) -> dict:
+    """Both generalSettings-backed sections in ONE request.
+
+    Returns ``{"led": {...}, "notifications": {...}}`` -- the same shapes
+    get_led_settings and get_notification_settings return individually.
+
+    They live in the same upstream document, so a caller that wants both (the
+    settings bundle does, on every poll, for every camera) should not fetch it
+    twice against an API with undocumented rate limits. The single-section
+    getters remain for the write routes, which need their own fresh read anyway.
+    """
+    url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
+    flat = _flatten(await _get_doc(telus, url))
+    return {"led": _parse_table(flat, _LED_FIELDS),
+            "notifications": _parse_notifications(flat)}
 
 
 # --- diagnostics ------------------------------------------------------------

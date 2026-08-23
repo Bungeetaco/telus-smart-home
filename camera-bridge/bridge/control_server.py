@@ -275,6 +275,15 @@ Contract (as implemented -- this is what callers must match):
       but not dim it, so brightness is a 422 there.
       Response: 200 <the same object GET .../settings returns under "led">
 
+    POST .../settings/notifications
+    Body: at least one of {"motion": <bool>, "button_press": <bool>,
+                            "smart_chime": <bool>}
+      What TELUS pushes to its OWN app for this camera -- unrelated to anything
+      Home Assistant notifies about. Motion and button-press share one support
+      enum and the smart chime has another, so a camera can offer some and not
+      others. Response: 200 <the same object GET .../settings returns under
+      "notifications">
+
     POST .../settings/image
     Body: at least one of brightness / contrast / saturation / sharpness /
       ir_sensitivity (ints), is_flipped / hdr_enabled / ir_led_enabled /
@@ -285,7 +294,7 @@ Contract (as implemented -- this is what callers must match):
       (int or str), pretrigger_enabled (bool), keep_clips_days (int),
       alarm_clip_duration (int). Response: the video config object.
 
-      All five writes read the current settings first, purely to honour the
+      All six writes read the current settings first, purely to honour the
       FeatureSupport gate above (422 rather than a write TELUS would refuse);
       the read-modify-write a website settings PUT requires -- it sends the
       WHOLE object back, and a partial body risks resetting unrelated fields --
@@ -407,6 +416,13 @@ _VIDEO_FIELDS: dict[str, type | tuple[type, ...]] = {
 _LED_FIELDS: dict[str, type | tuple[type, ...]] = {
     "enabled": bool,
     "brightness": int,
+}
+# generalSettings -> doorbellNotificationSetting: what TELUS pushes to its OWN
+# app, which is a different thing from anything Home Assistant sends.
+_NOTIFICATION_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "motion": bool,
+    "button_press": bool,
+    "smart_chime": bool,
 }
 _CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
     "indoor_on": bool,
@@ -1343,8 +1359,11 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
                 telus_session, login_lock, camera_settings.get_image_settings, camera_id)
             video = await _fetch_with_relogin(
                 telus_session, login_lock, camera_settings.get_video_config, camera_id)
-            led = await _fetch_with_relogin(
-                telus_session, login_lock, camera_settings.get_led_settings, camera_id)
+            # One request, two sections: the LED and the notification toggles are
+            # the same upstream document, and this runs per camera per poll.
+            general = await _fetch_with_relogin(
+                telus_session, login_lock, camera_settings.get_general_settings,
+                camera_id)
         except Exception:
             log.exception("Control endpoint: camera settings fetch failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1359,7 +1378,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             "audio": audio,
             "image": image,
             "video": video,
-            "led": led,
+            "led": general.get("led"),
+            "notifications": general.get("notifications"),
             "siren": await _mws_camera_record(get_siren_devices, camera_id,
                                               _MWS_SIREN_READ, _normalize_siren),
             "privacy": await _mws_camera_record(get_privacy_mode_info, camera_id,
@@ -1482,6 +1502,13 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         return await _settings_write(
             request, camera_settings.get_led_settings, camera_settings.set_led_settings,
             _LED_FIELDS, lambda name: f"supports_{name}")
+
+    async def handle_set_notifications(request: web.Request) -> web.Response:
+        """Turn TELUS-side push notifications on/off for one camera."""
+        return await _settings_write(
+            request, camera_settings.get_notification_settings,
+            camera_settings.set_notification_settings,
+            _NOTIFICATION_FIELDS, lambda name: f"supports_{name}")
 
     async def handle_set_image(request: web.Request) -> web.Response:
         """Set picture/IR fields on one camera (see _IMAGE_FIELDS for the set)."""
@@ -1676,6 +1703,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_post("/control/cameras/{camera_id}/settings/volume", handle_set_volume)
     app.router.add_post("/control/cameras/{camera_id}/settings/chime", handle_set_chime)
     app.router.add_post("/control/cameras/{camera_id}/settings/led", handle_set_led)
+    app.router.add_post("/control/cameras/{camera_id}/settings/notifications",
+                        handle_set_notifications)
     app.router.add_post("/control/cameras/{camera_id}/settings/image", handle_set_image)
     app.router.add_post("/control/cameras/{camera_id}/settings/video", handle_set_video)
     app.router.add_post("/control/cameras/{camera_id}/siren", handle_siren)

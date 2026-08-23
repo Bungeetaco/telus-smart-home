@@ -140,6 +140,15 @@
       },
       "camera_status_led": {
         "name": "Status LED"
+      },
+      "camera_telus_app_motion_notifications": {
+        "name": "TELUS app motion notifications"
+      },
+      "camera_telus_app_button_press_notifications": {
+        "name": "TELUS app button press notifications"
+      },
+      "camera_telus_app_smart_chime_notifications": {
+        "name": "TELUS app smart chime notifications"
       }
     },
     "select": {

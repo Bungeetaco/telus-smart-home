@@ -758,6 +758,9 @@ requires.
 | **Indoor chime** | `switch` | The camera reports `supports_indoor_chime` | On/off via `/settings/chime` (`indoor_on`), entity category *config*. Also reports **unavailable** while the selected wired chime type is one the bridge flags `disables_indoor_chime` — see below |
 | **Outdoor tone** | `switch` | The camera reports `supports_outdoor_tone` | The tone the doorbell itself plays, on/off via `/settings/chime` (`outdoor_on`), entity category *config*. Its **volume** is a separate capability and has no entity — `supports_outdoor_tone_volume` is false on the reference doorbell |
 | **Wired chime type** | `select` | The camera reports `supports_chime_type` | Which kind of physical chime the doorbell is wired to — *not* a ringtone. Options come from the bridge's `chime_type_choices` (e.g. None / Mechanical / Digital); selecting one POSTs `/settings/chime` with `chime_type` |
+| **Status LED** | `switch` | The camera reports `led.supports_enabled` | The indicator light on the device, on/off via `/settings/led`, entity category *config*. **Not** the infrared illuminator — that is `ir_led_enabled` on the image route |
+| **Status LED brightness** | `number` | The camera reports `led.supports_brightness` | Both cameras on the reference account report this **false**, so neither gets one; the entity exists for models that can dim and has never run against real hardware |
+| **TELUS motion / button press / smart chime notifications** | `switch` | Each gated on its own `notifications.supports_*` | What TELUS pushes to its **own app** — nothing to do with Home Assistant's notifications. Via `/settings/notifications`, entity category *config*. A camera that is not a doorbell reports every flag false and gets none |
 | **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
 | **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
 | **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
@@ -767,6 +770,26 @@ requires.
 The volume Number and the diagnostic Sensors gate on fields the settings and
 diagnostics responses document directly (`supports_call_volume`; a non-null
 `signal_strength` / `battery` / `device_status`).
+
+### The notification switches are TELUS's notifications, not yours
+
+The three notification switches control what **alarm.com pushes to its own mobile
+app**. Turning one off does not affect any automation, event or notification on
+the Home Assistant side, and turning one on does not create one. The reason to
+want them is the opposite of subtle: a doorbell press that notifies you twice,
+once from the TELUS app and once from your own automation, and only one of those
+is under your control from here.
+
+They are gated independently and by three different upstream rules, which the
+bridge has already collapsed into three booleans — see
+[control-api.md](control-api.md). The visible consequence is that a camera which
+is not a doorbell gets none of these switches, which is correct rather than
+missing.
+
+The notification **format** (text-only versus with a thumbnail) is deliberately
+read-only and has no entity: nothing available defines that enum's numeric
+values, so setting it would mean writing a guess to a live device. See E40 in the
+backlog for the one capture that would close it.
 
 ### The chime entities, and why the indoor switch can go unavailable
 

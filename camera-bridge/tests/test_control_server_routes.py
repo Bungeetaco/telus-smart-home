@@ -250,7 +250,7 @@ class FakeTelusSession:
 
 
 async def _settings_led(_telus, _camera_id, **_fields):
-    """The generalSettings-backed LED section the settings bundle now reads too.
+    """The generalSettings-backed LED section.
 
     Separate from _settings because the bundle asks for it on every GET: a shim
     missing it raises AttributeError inside the route, which surfaces as a 502
@@ -258,6 +258,19 @@ async def _settings_led(_telus, _camera_id, **_fields):
     for a reason that has nothing to do with what it was testing."""
     return {"supports_enabled": True, "enabled": True,
             "supports_brightness": False, "brightness": 0}
+
+
+async def _settings_notifications(_telus, _camera_id, **_fields):
+    """The other generalSettings-backed section, read in the same request."""
+    return {"supports_motion": True, "motion": False,
+            "supports_button_press": True, "button_press": False,
+            "supports_smart_chime": False, "smart_chime": False, "format": 0}
+
+
+async def _settings_general(_telus, camera_id):
+    """Both generalSettings sections at once -- what the settings bundle calls."""
+    return {"led": await _settings_led(None, camera_id),
+            "notifications": await _settings_notifications(None, camera_id)}
 
 
 async def _settings(_telus, _camera_id):
@@ -312,8 +325,10 @@ async def _app(siren=None, privacy=None, settings_module=None, mint=None,
     shim = settings_module or types.SimpleNamespace(
         CameraSettingsError=cs.camera_settings.CameraSettingsError,
         get_audio_settings=_settings, get_image_settings=_settings,
-        get_led_settings=_settings_led,
-        set_led_settings=_settings_led,
+        get_general_settings=_settings_general,
+        get_led_settings=_settings_led, set_led_settings=_settings_led,
+        get_notification_settings=_settings_notifications,
+        set_notification_settings=_settings_notifications,
         get_video_config=_settings, get_diagnostics=_settings,
         set_call_volume=cs.camera_settings.set_call_volume)
 
@@ -416,8 +431,10 @@ async def test_every_audio_response_carries_the_labelled_chime_choices():
     shim = types.SimpleNamespace(
         CameraSettingsError=cs.camera_settings.CameraSettingsError,
         get_audio_settings=getter, get_image_settings=getter,
-        get_led_settings=_settings_led,
-        set_led_settings=_settings_led,
+        get_general_settings=_settings_general,
+        get_led_settings=_settings_led, set_led_settings=_settings_led,
+        get_notification_settings=_settings_notifications,
+        set_notification_settings=_settings_notifications,
         get_video_config=getter, get_diagnostics=getter,
         set_call_volume=set_chime, set_chime=set_chime)
 
@@ -469,8 +486,10 @@ async def test_chime_choices_degrade_to_absent_without_breaking_the_section():
     shim = types.SimpleNamespace(
         CameraSettingsError=cs.camera_settings.CameraSettingsError,
         get_audio_settings=getter, get_image_settings=getter,
-        get_led_settings=_settings_led,
-        set_led_settings=_settings_led,
+        get_general_settings=_settings_general,
+        get_led_settings=_settings_led, set_led_settings=_settings_led,
+        get_notification_settings=_settings_notifications,
+        set_notification_settings=_settings_notifications,
         get_video_config=getter, get_diagnostics=getter,
         set_call_volume=getter, set_chime=getter)
 
@@ -623,8 +642,10 @@ async def test_settings_errors_map_to_their_documented_status():
             raise exc
         return types.SimpleNamespace(
             CameraSettingsError=err, get_audio_settings=getter,
-            get_image_settings=getter, get_led_settings=_settings_led,
-        set_led_settings=_settings_led,
+            get_image_settings=getter, get_general_settings=_settings_general,
+        get_led_settings=_settings_led, set_led_settings=_settings_led,
+        get_notification_settings=_settings_notifications,
+        set_notification_settings=_settings_notifications,
         get_video_config=getter,
             get_diagnostics=getter, set_call_volume=cs.camera_settings.set_call_volume)
 
@@ -652,8 +673,10 @@ async def test_settings_errors_map_to_their_documented_status():
     setter.__name__ = "set_call_volume"
     module = types.SimpleNamespace(
         CameraSettingsError=err, get_audio_settings=_settings,
-        get_image_settings=_settings, get_led_settings=_settings_led,
-        set_led_settings=_settings_led,
+        get_image_settings=_settings, get_general_settings=_settings_general,
+        get_led_settings=_settings_led, set_led_settings=_settings_led,
+        get_notification_settings=_settings_notifications,
+        set_notification_settings=_settings_notifications,
         get_video_config=_settings,
         get_diagnostics=_settings, set_call_volume=setter)
     async with _app(settings_module=module) as (client, headers, _):

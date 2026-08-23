@@ -315,6 +315,8 @@ they define how the integration reaches the camera bridge on loopback:
 | `CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/diagnostics` |
 | `CAMERA_BRIDGE_CAMERA_VOLUME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/volume` |
 | `CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/chime` |
+| `CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/led` |
+| `CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/notifications` |
 | `CAMERA_BRIDGE_CAMERA_IMAGE_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/image` |
 | `CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/video` |
 | `CAMERA_BRIDGE_CAMERA_SIREN_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/siren` |
@@ -330,7 +332,7 @@ patch these).
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the privacy switch, the siren buttons and the camera diagnostic sensors. |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the status-LED and TELUS-notification switches, the privacy switch, the siren buttons and the camera diagnostic sensors. |
 
 Deliberately slow, and the one knob here worth understanding before changing.
 Unlike the camera-list poll — a local read of an in-memory dict on the bridge —
