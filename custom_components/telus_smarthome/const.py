@@ -166,6 +166,17 @@ CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE = (
 SERVICE_SPEAK = "speak"
 SERVICE_STOP_SPEAKING = "stop_speaking"
 
+# Talkdown counters (attempts/outcomes/failure reasons/durations) -- see
+# camera-bridge/bridge/metrics.py. Surfaced as the two diagnostic sensors in
+# sensor.py so a failing talkdown is visible in Home Assistant (and can drive a
+# notification) instead of needing a curl against the bridge.
+CAMERA_BRIDGE_METRICS_URL = "http://127.0.0.1:8199/control/metrics"
+
+# How often sensor.py polls those counters. They only change when someone
+# triggers a talk, which is rare, so this is deliberately slow -- it exists to
+# notice failures, not to watch a clip play.
+TALK_METRICS_POLL_INTERVAL_SECONDS = 120
+
 # Recent video clip events across all cameras -- see
 # camera-bridge/bridge/control_server.py for the response shape.
 CAMERA_BRIDGE_EVENTS_URL = "http://127.0.0.1:8199/control/events"
