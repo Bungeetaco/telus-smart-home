@@ -12,10 +12,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
-          # Testing on a different interpreter than the container runs is worse than
-          # not testing. Renovate is configured not to bump this independently; change
-          # it only together with the Dockerfile base image.
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile's FROM
+          # python:<ver>-slim). Testing on a different interpreter than the container
+          # runs is worse than not testing. Renovate reports both under the dep name
+          # "python" and is configured to group them into a single reviewed PR, so
+          # they move together -- never change one of them alone.
           python-version: "3.14"
       - name: Install integration requirements (as declared in manifest.json)
         run: |
@@ -33,10 +34,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
-          # Testing on a different interpreter than the container runs is worse than
-          # not testing. Renovate is configured not to bump this independently; change
-          # it only together with the Dockerfile base image.
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile's FROM
+          # python:<ver>-slim). Testing on a different interpreter than the container
+          # runs is worse than not testing. Renovate reports both under the dep name
+          # "python" and is configured to group them into a single reviewed PR, so
+          # they move together -- never change one of them alone.
           python-version: "3.14"
       - name: Install bridge requirements (--only-binary catches aiortc/av bumps with no manylinux wheel)
         run: |
@@ -50,10 +52,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
-          # Testing on a different interpreter than the container runs is worse than
-          # not testing. Renovate is configured not to bump this independently; change
-          # it only together with the Dockerfile base image.
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile's FROM
+          # python:<ver>-slim). Testing on a different interpreter than the container
+          # runs is worse than not testing. Renovate reports both under the dep name
+          # "python" and is configured to group them into a single reviewed PR, so
+          # they move together -- never change one of them alone.
           python-version: "3.14"
       - name: Install bridge requirements
         run: |
