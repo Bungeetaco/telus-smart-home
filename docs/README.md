@@ -42,6 +42,7 @@ own deployment.
 | --- | --- |
 | [setup.md](setup.md) | Installation and deployment from nothing to working entities, including host-networking requirements. |
 | [troubleshooting.md](troubleshooting.md) | Known issues and gotchas as symptom → cause → fix, across both components. |
+| [development.md](development.md) | Contributor notes: repo layout, versioning & the release process, and building locally. |
 
 ## Talkdown (doorbell two-way audio)
 
