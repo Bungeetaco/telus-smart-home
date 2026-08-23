@@ -51,12 +51,14 @@ integration **monkeypatches `pyalarmdotcomajax` internals**, so a blind bump can
 break login. The setup:
 
 - **[Renovate](https://docs.renovatebot.com/)** (`renovate.json`) opens update
-  PRs for everything pinned: `pyalarmdotcomajax` + `beautifulsoup4` (custom
-  manager over `manifest.json`), the bridge's `requirements.txt`, the Dockerfile
-  base image, and the `MEDIAMTX_VERSION` Dockerfile `ARG` (GitHub releases).
-  *Enable it by installing the Renovate GitHub App on the repo* -- the config
-  alone does nothing without it. (Dependabot is a zero-install fallback but can't
-  cover the `manifest.json` pin or the MediaMTX `ARG`.)
+  PRs for everything pinned: `pyalarmdotcomajax` + `beautifulsoup4` (via
+  Renovate's built-in `homeassistant-manifest` manager, which reads the
+  `requirements[]` array in `manifest.json`), the bridge's `requirements.txt`,
+  the Dockerfile base image, and the `MEDIAMTX_VERSION` Dockerfile `ARG` (a
+  custom regex manager against GitHub releases -- the only pin with no built-in
+  equivalent). *Enable it by installing the Renovate GitHub App on the repo* --
+  the config alone does nothing without it. (Dependabot is a zero-install
+  fallback but can't cover the MediaMTX `ARG`.)
 - **Auto-merge policy** (in `renovate.json`): low-risk updates (`python` base
   image, `beautifulsoup4`) auto-merge once CI is green; **high-risk ones
   (`pyalarmdotcomajax`, `aiortc`, `av`, `mediamtx`) never auto-merge** -- they get
