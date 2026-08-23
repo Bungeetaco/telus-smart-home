@@ -72,6 +72,7 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/cameras/{camera_id}/diagnostics` | bearer | Camera signal strength, battery, device status |
 | POST | `/control/cameras/{camera_id}/settings/volume` | bearer | Set the camera speaker (call) volume |
 | POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime, wired chime type, outdoor tone and its volume |
+| POST | `/control/cameras/{camera_id}/settings/notifications` | bearer | Turn TELUS-side push notifications on/off |
 | POST | `/control/cameras/{camera_id}/settings/led` | bearer | Turn the device's status LED on/off, or set its brightness |
 | POST | `/control/cameras/{camera_id}/settings/image` | bearer | Set picture settings (brightness, HDR, IR, night vision, …) |
 | POST | `/control/cameras/{camera_id}/settings/video` | bearer | Set clip settings (resolution, quality, retention, pre-trigger) |
@@ -604,6 +605,16 @@ which makes it the heaviest read here; the Home Assistant side polls it every
     "brightness": 0,
     "raw": {}
   },
+  "notifications": {
+    "supports_motion": true,
+    "motion": true,
+    "supports_button_press": true,
+    "button_press": true,
+    "supports_smart_chime": false,
+    "smart_chime": false,
+    "format": 0,
+    "raw": {}
+  },
   "siren": {
     "can_manually_trigger": true,
     "active": false,
@@ -712,6 +723,52 @@ but both are in `raw`, and both are resent untouched by a write.
 **This is the status indicator light, not the infrared illuminator.** The IR LEDs
 are `ir_led_enabled` in the `image` object, a different field on a different
 endpoint. alarm.com's own interface calls this one "Camera Status LED".
+
+### The `notifications` object — TELUS's own push notifications
+
+**These are the notifications alarm.com sends to its own mobile app, not
+anything Home Assistant does.** Turning one off stops the TELUS app notifying;
+it has no effect on automations, events or notifications on this side. The usual
+reason to want them is to stop being told twice about the same doorbell press.
+
+Read from the same `generalSettings` document as the `led` object — the settings
+bundle fetches it once and splits it into the two sections.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `supports_motion` | bool | Whether a motion-notification toggle should be offered |
+| `motion` | bool | Notify on motion |
+| `supports_button_press` | bool | Whether a button-press toggle should be offered |
+| `button_press` | bool | Notify when the doorbell button is pressed |
+| `supports_smart_chime` | bool | `false` on the reference doorbell |
+| `smart_chime` | bool | Notify an alarm.com Smart Chime |
+| `format` | int \| null | **Read-only** — see below |
+| `raw` | object | The untouched `doorbellNotificationSetting` document |
+
+**The three `supports_*` booleans are not one upstream flag each**, which is the
+trap if you go to the raw document. Motion and button-press share
+`panelNotificationEnableDisableFeatureSupport` (the portal calls them "panel
+notification toggles" and shows both off that one enum), the smart chime has its
+own `smartChimeNotificationEnableDisableFeatureSupport`, and motion carries a
+*second* condition: the portal renders its row only when
+`isMotionNotificationEnabled` is true, so that is a per-device availability flag
+rather than a toggle. The bridge collapses all of it into the three booleans —
+use them and don't re-derive the rules.
+
+A camera that is not a doorbell reports every flag false and gets no controls at
+all. That is the expected answer, not a failure.
+
+#### Why `format` has no write
+
+`notificationFormat` selects between a text-only notification and one with a
+thumbnail attached. It is reported here and **cannot be set**, because nothing
+available defines its numeric values: the enum's members (`Unknown`, `TextOnly`,
+`AttachThumbnail`) appear in the web portal's bundle but the module assigning
+them numbers was not in the capture, and the Android app does not implement the
+feature at all. The reference doorbell reports `0` and a non-doorbell camera
+reports `-1`, which *suggests* `-1` is `Unknown` — suggestive is not good enough
+to write a guessed enum value to someone's device. Send `format` to the write
+route and it is a `400`, like any unknown field.
 
 ### The `siren` and `privacy` sections — a fixed contract
 
@@ -930,6 +987,40 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
   -d '{"indoor_on": true, "outdoor_volume": 1}' \
   $BASE/control/cameras/<camera_id>/settings/chime
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/settings/notifications`
+
+Turns TELUS's own push notifications on or off for one camera. All fields are
+optional and independent — send only what you want changed.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `motion` | bool | no | Gated on `supports_motion` |
+| `button_press` | bool | no | Gated on `supports_button_press` |
+| `smart_chime` | bool | no | Gated on `supports_smart_chime`, `false` on the reference doorbell — a `422` there |
+
+`format` is **not** accepted; sending it is a `400 malformed`. An empty body is
+also a `400`.
+
+**Success response:** the refreshed `notifications` object.
+
+**Errors:** the shared table. Every requested field is support-checked **before
+anything is written**.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"button_press": false}' \
+  $BASE/control/cameras/<camera_id>/settings/notifications
 ```
 
 ---

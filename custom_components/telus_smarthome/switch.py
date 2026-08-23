@@ -46,6 +46,7 @@ from .const import (
     CAMERA_BRIDGE_AUTOMATIONS_URL,
     CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE,
     CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE,
+    CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE,
     CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE,
     DATA_CONTROLLER,
     DOMAIN,
@@ -150,6 +151,30 @@ async def async_setup_entry(
         return [CameraStatusLedSwitch(settings_coordinator, camera_id)]
 
     async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_led)
+
+    @core.callback
+    def _build_app_notifications(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """The TELUS-app push notification toggles this camera reports it can set."""
+        notifications = (camera_data.get("settings") or {}).get("notifications") or {}
+        # Gated individually, like the chime toggles: upstream, motion and button
+        # press share one support enum while smart chime has its own, and motion
+        # carries a further per-device availability flag on top. The bridge has
+        # already collapsed all of that into these three booleans, so this trusts
+        # them rather than re-deriving the rules. The reference doorbell reports
+        # the first two and not the third and so gets exactly two switches; a
+        # bridge older than this section sends no section at all, which reads the
+        # same way and correctly yields nothing.
+        entities: list[Entity] = []
+        if notifications.get("supports_motion"):
+            entities.append(CameraMotionAppNotificationSwitch(settings_coordinator, camera_id))
+        if notifications.get("supports_button_press"):
+            entities.append(CameraButtonPressAppNotificationSwitch(settings_coordinator, camera_id))
+        if notifications.get("supports_smart_chime"):
+            entities.append(CameraSmartChimeAppNotificationSwitch(settings_coordinator, camera_id))
+        return entities
+
+    async_add_camera_entities(
+        config_entry, settings_coordinator, async_add_entities, _build_app_notifications)
 
 
 class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -332,12 +357,22 @@ class CameraPrivacyModeSwitch(CameraSettingsEntity, SwitchEntity):
         await self._async_set_privacy(False)
 
 
-class _CameraChimeToggle(CameraSettingsEntity, SwitchEntity):
-    """Shared half of the doorbell's two chime on/off toggles.
+class _CameraSettingToggle(CameraSettingsEntity, SwitchEntity):
+    """One boolean field of one bridge-served camera settings section.
 
-    Both read one boolean out of the camera's audio settings section, are gated
-    on their own support flag, and write one field of the same chime route, so
-    the subclasses below carry nothing but those three names.
+    Every camera-settings switch below is the same three moving parts: it exists
+    only while the camera reports a supports_* flag, it reads one boolean out of
+    one section of the /settings body, and a user toggling it writes that one
+    field to the POST route that owns the section, adopting the refreshed
+    section the route answers with. Only the section, the route and the three
+    field names differ, so they live here once and each subclass carries little
+    more than those names.
+
+    `_state_key` and `_write_key` are separate from each other and from
+    `_support_key` on purpose: the bridge's read and write vocabularies are not
+    the same everywhere (the chime route takes `indoor_on` for what it reports
+    as `indoor_chime_on`). Where a section does name all three alike, the
+    subclass says so rather than the base assuming it.
     """
 
     _attr_device_class = SwitchDeviceClass.SWITCH
@@ -346,61 +381,73 @@ class _CameraChimeToggle(CameraSettingsEntity, SwitchEntity):
     # should lead with.
     _attr_entity_category = EntityCategory.CONFIG
 
-    # Set by each subclass: the capability flag that decides whether the control
-    # exists at all, the field the current state is read from, and the field the
-    # write route expects it back under (the three are deliberately not the same
-    # name -- the bridge's read and write vocabularies differ).
-    _support_key: str
-    _state_key: str
-    _write_key: str
+    # Set by each subclass.
+    _section: str  # /settings section the state is read out of
+    _url_template: str  # POST route owning that section, {camera_id} unformatted
+    _support_key: str  # flag deciding whether the control exists at all
+    _state_key: str  # field the current state is read from
+    _write_key: str  # field the write route expects it back under
 
     @property
-    def _audio(self) -> dict[str, Any]:
-        """The camera's audio settings section."""
-        return self._settings.get("audio") or {}
+    def _section_data(self) -> dict[str, Any]:
+        """This toggle's settings section, or {} if the camera didn't report it."""
+        return self._settings.get(self._section) or {}
 
     @property
     def available(self) -> bool:
         """Also unavailable if the camera stops reporting this toggle as settable."""
-        return super().available and bool(self._audio.get(self._support_key))
+        return super().available and bool(self._section_data.get(self._support_key))
 
     @property
     def is_on(self) -> bool | None:
-        """True while the chime is enabled; None if the camera hasn't said."""
-        # `is not None`, not truthiness: False is a real answer ("chime off") and
+        """True while the setting is enabled; None if the camera hasn't said."""
+        # `is not None`, not truthiness: False is a real answer ("it's off") and
         # must not read as "unknown" the way a missing field does.
-        value = self._audio.get(self._state_key)
+        value = self._section_data.get(self._state_key)
         return bool(value) if value is not None else None
 
-    async def _async_set_chime(self, enabled: bool) -> None:
-        """Write this one field and adopt the audio section that comes back.
+    async def _async_set(self, enabled: bool) -> None:
+        """Write this one field and adopt the section that comes back.
 
-        Only ever reached from a user toggling the entity: this makes (or stops
-        making) a real chime sound in someone's home.
+        Only ever reached from a user toggling the entity: every one of these
+        changes a real setting on a real device or account.
         """
-        audio = await async_bridge_post(
+        section = await async_bridge_post(
             self.hass,
-            CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE.format(camera_id=self._camera_id),
+            self._url_template.format(camera_id=self._camera_id),
             {self._write_key: enabled},
         )
-        # The route answers with the whole audio section re-read from the camera
-        # after the write, so adopting it beats an immediate poll -- which would
-        # cost two live TELUS round trips to learn what is already in hand. It
-        # also matters here beyond this one field: the write is a
-        # read-modify-write of the camera's whole chime config, and the chime
-        # type the select entity shows rides in the same section.
-        if audio:
-            self.coordinator.async_apply_settings_section(self._camera_id, "audio", audio)
+        # These routes answer with the whole section re-read after the write, so
+        # adopting it beats an immediate poll -- which would cost live TELUS
+        # round trips to learn what is already in hand. It also matters beyond
+        # this one field: each write is a read-modify-write of the whole
+        # section, and sibling entities read the rest of it (the chime type the
+        # select shows, the LED brightness the number shows).
+        if section:
+            self.coordinator.async_apply_settings_section(self._camera_id, self._section, section)
         else:
             await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable the chime."""
-        await self._async_set_chime(True)
+        """Turn this setting on."""
+        await self._async_set(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Silence the chime."""
-        await self._async_set_chime(False)
+        """Turn this setting off."""
+        await self._async_set(False)
+
+
+class _CameraChimeToggle(_CameraSettingToggle):
+    """Shared half of the doorbell's two chime on/off toggles.
+
+    Both read one boolean out of the camera's audio settings section, are gated
+    on their own support flag, and write one field of the same chime route, so
+    the subclasses below carry nothing but those three names. Toggling either
+    makes (or stops making) a real sound in someone's home.
+    """
+
+    _section = "audio"
+    _url_template = CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE
 
 
 class CameraIndoorChimeSwitch(_CameraChimeToggle):
@@ -434,7 +481,7 @@ class CameraIndoorChimeSwitch(_CameraChimeToggle):
         if not super().available:
             return False
 
-        audio = self._audio
+        audio = self._section_data
         chime_type = audio.get("chime_type")
         selected = next(
             (
@@ -469,82 +516,102 @@ class CameraOutdoorToneSwitch(_CameraChimeToggle):
         super().__init__(coordinator, camera_id, "outdoor_tone")
 
 
-class CameraStatusLedSwitch(CameraSettingsEntity, SwitchEntity):
+class CameraStatusLedSwitch(_CameraSettingToggle):
     """The status indicator light on one bridge-served TELUS camera.
 
     Alarm.com's portal calls this the "Camera Status LED": the small light on
     the device's face that shows it is powered and recording. Turning it off
     changes nothing about what the camera does, only whether it advertises
-    itself -- which is the usual reason to want it off.
+    itself -- which is the usual reason to want it off. The camera keeps
+    working; it just stops showing that it is.
 
     It is emphatically NOT the infrared illuminator (that is `ir_led_enabled` in
     the `image` section, a separate field behind a separate flag) and not a
     floodlight -- the reference doorbell has none.
 
-    Shaped like _CameraChimeToggle above but deliberately not sharing it: that
-    base exists because its TWO subclasses read and write the same `audio`
-    section through the same chime route and differ only in field names. This
-    reads a different section through a different route, so sharing would mean
-    parameterizing the section and the URL onto a base with no second user for
-    either, and blurring comments that are specific to the chime read-modify-write.
+    This deliberately did NOT share the chime base when it was added: that base
+    existed for two subclasses of one section and one route, and parameterizing
+    the section and the URL onto it would have bought a single caller nothing.
+    The TELUS-app notification toggles below are the second caller that changes
+    the arithmetic, so the generic half moved up into _CameraSettingToggle and
+    this reads and writes the `led` section through it. Behaviour, unique id and
+    translation key are unchanged. The echoed section it adopts also carries the
+    brightness the number entity in number.py reads, which this write's
+    read-modify-write may have refreshed.
     """
 
-    _attr_device_class = SwitchDeviceClass.SWITCH
-    # Same tier as the chime toggles and the speaker volume: how the device
-    # presents itself, not a control a dashboard should lead with.
-    _attr_entity_category = EntityCategory.CONFIG
+    _section = "led"
+    _url_template = CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE
+    _support_key = "supports_enabled"
+    _state_key = "enabled"
+    _write_key = "enabled"
     _attr_icon = "mdi:led-on"
 
     def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
         """Initialize the status LED switch for one camera."""
         super().__init__(coordinator, camera_id, "status_led")
 
-    @property
-    def _led(self) -> dict[str, Any]:
-        """The camera's status-LED settings section."""
-        return self._settings.get("led") or {}
 
-    @property
-    def available(self) -> bool:
-        """Also unavailable if the camera stops reporting the LED as switchable."""
-        return super().available and bool(self._led.get("supports_enabled"))
+class _CameraNotificationToggle(_CameraSettingToggle):
+    """Shared half of the doorbell's TELUS-app push notification toggles.
 
-    @property
-    def is_on(self) -> bool | None:
-        """True while the status LED is lit; None if the camera hasn't said."""
-        # `is not None`, not truthiness: False is a real answer ("LED off") and
-        # must not read as "unknown" the way a missing field does.
-        value = self._led.get("enabled")
-        return bool(value) if value is not None else None
+    These control what TELUS/Alarm.com pushes to ITS OWN mobile app. They are
+    not Home Assistant notifications, automations or events, and turning one off
+    changes nothing about what this integration reports -- the realistic reason
+    to want one off is to stop being told twice about the same doorbell press,
+    once by the TELUS app and once by an HA automation. That is why every entity
+    name here says "TELUS app" instead of a bare "Motion notifications", which
+    on a device called Doorbell would read like a Home Assistant switch.
 
-    async def _async_set_enabled(self, enabled: bool) -> None:
-        """Write the on/off field and adopt the `led` section that comes back.
+    Unlike the chime route, this section names the support flag, the state and
+    the write field after one thing, so a subclass varies only `_field`.
 
-        Only ever reached from a user toggling the entity: this turns a light on
-        a real device in someone's home on or off.
-        """
-        led = await async_bridge_post(
-            self.hass,
-            CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE.format(camera_id=self._camera_id),
-            {"enabled": enabled},
-        )
-        # The route answers with the whole `led` section re-read from the device
-        # after the write, so adopting it beats an immediate poll -- which would
-        # cost live TELUS round trips to learn what is already in hand. It also
-        # carries the brightness the number entity reads, which the write's
-        # read-modify-write may have refreshed.
-        if led:
-            self.coordinator.async_apply_settings_section(self._camera_id, "led", led)
-        else:
-            await self.coordinator.async_request_refresh()
+    The section also reports a read-only `format` enum, which deliberately gets
+    no entity: see CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE in const.py.
+    """
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Light the status LED."""
-        await self._async_set_enabled(True)
+    _section = "notifications"
+    _url_template = CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE
 
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn the status LED off; the camera keeps working, it just stops showing it."""
-        await self._async_set_enabled(False)
+    _field: str  # the notifications field, under the same name for read and write
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize one TELUS-app notification toggle for one camera."""
+        super().__init__(coordinator, camera_id, f"telus_app_{self._field}_notifications")
+
+        self._support_key = f"supports_{self._field}"
+        self._state_key = self._field
+        self._write_key = self._field
+
+
+class CameraMotionAppNotificationSwitch(_CameraNotificationToggle):
+    """Whether TELUS pushes this camera's motion alerts to the TELUS app."""
+
+    _field = "motion"
+    _attr_icon = "mdi:motion-sensor"
+
+
+class CameraButtonPressAppNotificationSwitch(_CameraNotificationToggle):
+    """Whether TELUS pushes a doorbell-button press to the TELUS app.
+
+    The one most likely to be turned off: a press already reaches Home Assistant
+    as an event, so leaving both on means two phone notifications for one visitor.
+    """
+
+    _field = "button_press"
+    _attr_icon = "mdi:doorbell"
+
+
+class CameraSmartChimeAppNotificationSwitch(_CameraNotificationToggle):
+    """Whether TELUS pushes an alert when the doorbell plays its smart chime.
+
+    Behind its own support flag rather than the one the two above share, and the
+    reference doorbell reports it unsupported -- so no entity is created there.
+    That is the expected outcome, not a fault.
+    """
+
+    _field = "smart_chime"
+    _attr_icon = "mdi:bell-alert-outline"
 
 
 class ConfigOptionSwitch(ConfigBaseDevice, SwitchEntity):  # type: ignore

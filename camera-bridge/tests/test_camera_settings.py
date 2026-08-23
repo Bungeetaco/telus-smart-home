@@ -219,6 +219,7 @@ class FakePortal:
     def __init__(self):
         self.docs = {stem: fixture(f"{stem}_get") for stem in KINDS}
         self.writes: list[tuple[str, dict]] = []
+        self.reads = 0
 
     def _stem(self, kind):
         for stem, segment in KINDS.items():
@@ -227,6 +228,7 @@ class FakePortal:
         return None
 
     async def get(self, request):
+        self.reads += 1
         stem = self._stem(request.match_info["kind"])
         if stem is None:
             return web.json_response({"data": {"id": CAM, "type": "x", "attributes": {}}})
@@ -450,6 +452,100 @@ async def test_led_brightness_is_refused_on_a_camera_that_cannot_dim():
                                                        enabled=True, brightness=5),
                            unsupported=True)
         assert portal.writes == []
+
+
+async def test_notification_gating_is_not_one_flag_per_toggle():
+    """Three toggles, TWO upstream enums, and one extra per-device flag.
+
+    Motion and button-press share `panelNotificationEnableDisableFeatureSupport`;
+    the smart chime has its own; and motion is additionally gated by
+    `isMotionNotificationEnabled`, which the portal treats as "does this device do
+    motion notifications at all" rather than as a toggle. Collapsing that into
+    one flag per toggle -- the obvious reading of the payload -- would offer a
+    smart-chime switch this doorbell does not have.
+    """
+    async with portal_at(8491) as (portal, telus):
+        parsed = cs._parse_notifications(cs._flatten(portal.docs["general_settings"]))
+        assert parsed["supports_motion"] is True, parsed
+        assert parsed["supports_button_press"] is True, parsed
+        assert parsed["supports_smart_chime"] is False, parsed
+
+        await expect_error("smart_chime",
+                           lambda: cs.set_notification_settings(telus, CAM,
+                                                                smart_chime=True),
+                           unsupported=True)
+        assert portal.writes == []
+
+
+async def test_motion_needs_its_second_flag_too():
+    """With the shared enum supported but isMotionNotificationEnabled false, the
+    motion toggle is unsupported while button-press stays available -- the whole
+    reason _Field carries `requires`."""
+    async with portal_at(8492) as (portal, telus):
+        for res in portal.docs["general_settings"]["included"]:
+            attrs = res.get("attributes") or {}
+            if "isMotionNotificationEnabled" in attrs:
+                attrs["isMotionNotificationEnabled"] = False
+
+        parsed = cs._parse_notifications(cs._flatten(portal.docs["general_settings"]))
+        assert parsed["supports_motion"] is False, parsed
+        assert parsed["supports_button_press"] is True, parsed
+
+        await expect_error("motion",
+                           lambda: cs.set_notification_settings(telus, CAM, motion=True),
+                           unsupported=True)
+        assert portal.writes == []
+
+        # ...and the sibling toggle still writes.
+        await cs.set_notification_settings(telus, CAM, button_press=True)
+        sent = portal.last("generalSettings")
+        assert sent["doorbellNotificationSetting"]["isButtonPressNotificationsOn"] is True
+
+
+async def test_notification_write_preserves_the_led_in_the_same_document():
+    """The notification toggles and the status LED share one generalSettings
+    document, so a notification write must resend the LED untouched -- otherwise
+    silencing a doorbell would turn its light back on."""
+    async with portal_at(8493) as (portal, telus):
+        before = cs._flatten(portal.docs["general_settings"])
+        # True, not False: the fixture already has it off, and a write that
+        # changes nothing would pass this assertion for the wrong reason.
+        await cs.set_notification_settings(telus, CAM, button_press=True)
+
+        sent = portal.last("generalSettings")
+        assert sent["ledLightSetting"] == before["ledLightSetting"]
+        assert sent["solarPanelSetting"] == before["solarPanelSetting"]
+        changed = {k: v for k, v in paths(sent).items() if paths(before).get(k) != v}
+        assert set(changed) == {
+            "doorbellNotificationSetting.isButtonPressNotificationsOn"}, changed
+
+
+async def test_notification_format_is_reported_but_never_written():
+    """`format` is an enum whose numeric values nothing available defines --
+    neither the captured web bundle nor the decompiled app. It is reported so a
+    caller can see it and refused as a write, rather than guessed at against live
+    hardware."""
+    async with portal_at(8494) as (portal, telus):
+        parsed = cs._parse_notifications(cs._flatten(portal.docs["general_settings"]))
+        assert parsed["format"] == 0, parsed
+
+        await expect_error("format",
+                           lambda: cs.set_notification_settings(telus, CAM, format=1),
+                           unsupported=False)
+        assert portal.writes == []
+
+
+async def test_general_settings_reads_both_sections_in_one_request():
+    """The bundle asks for the LED and the notifications on every poll for every
+    camera; they are one upstream document and must cost one request."""
+    async with portal_at(8495) as (portal, telus):
+        portal.reads = 0
+        both = await cs.get_general_settings(telus, CAM)
+        assert set(both) == {"led", "notifications"}, both
+        assert both["led"]["supports_enabled"] is True, both
+        assert both["notifications"]["supports_button_press"] is True, both
+        assert portal.reads == 1, (
+            f"expected one generalSettings GET, made {portal.reads}")
 
 
 async def test_led_rejects_a_wrong_typed_value():
