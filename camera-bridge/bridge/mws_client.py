@@ -16,8 +16,13 @@ IMPORTANT -- this needs a legacy MWS ``SessionToken``, which is NOT the website
 session telus_auth.py holds today. Acquiring that token is a separate, still
 unbuilt concern; until it exists this call returns TokenStatus==1 (logged out).
 Pass the token in; this module does not mint it.
+
+Most MWS actions reply in XML, but the newer camera siren / privacy-mode
+ones reply in JSON with an equivalent envelope; they get their own
+_post_mws_json/_parse_json_ack pair at the bottom of this module.
 """
 import base64
+import json
 import logging
 from xml.etree import ElementTree as ET
 
@@ -586,3 +591,361 @@ async def end_full_duplex(session, session_token, device_id=DOORBELL_DEVICE_ID, 
         DeviceId=str(device_id))
     log.debug("EndFullDuplex DeviceId=%s (SessionToken/slt/Haiku redacted)", device_id)
     return _parse_action_ack(await _post_mws(session, form), "efdr")
+
+
+# ---------------------------------------------------------------------------
+# Camera siren + privacy mode (JSON-envelope MWS actions)
+# ---------------------------------------------------------------------------
+# Same form-urlencoded BaseTokenRequest POST as everything above -- only the
+# RESPONSE differs: these actions reply in JSON (the app parses them with Moshi)
+# with an envelope that means what the XML ts/s pair means: isSuccess,
+# ErrorMessage, DidSeamlesslyLogin. Hence the separate _post_mws_json/
+# _parse_json_ack pair rather than bending the XML parser at them.
+#
+# Provenance and caveats: docs/mobile-api-findings.md. The app issues
+# GetAllSirenDevices/GetAllCameraPrivacyModeInfo on every camera screen, but the
+# account this project was built against exposes no UI for either feature, so the
+# commands were recovered from the decompiled APK and NO live invocation has ever
+# been observed. Treat every first call here as an experiment.
+#
+# ValidateSession is the odd one out in this group: the only capture of it is XML
+# (<vsr ... siv="true">), so validate_session sniffs the body and parses either.
+
+# Envelope fields (lowercased for a case-insensitive match) that belong to
+# BaseMwsResponse rather than to the action, and so are stripped out of "data".
+_JSON_ENVELOPE_KEYS = ("issuccess", "errormessage", "didseamlesslylogin",
+                       "tokenstatus")
+
+
+def _jget(payload: dict, name: str, default=None):
+    """Case-insensitively read ``name`` from a decoded MWS JSON object.
+
+    alarm.com mixes casing inside one object (``isSuccess`` next to
+    ``ErrorMessage``), and the field names here come from decompiled Moshi
+    adapters rather than from a live capture, so an exact-case lookup is a
+    single-character away from silently reading None. Returns ``default`` when
+    absent."""
+    if not isinstance(payload, dict):
+        return default
+    if name in payload:
+        return payload[name]
+    lower = name.lower()
+    for k, v in payload.items():
+        if isinstance(k, str) and k.lower() == lower:
+            return v
+    return default
+
+
+def _json_bool(value, default: bool = False) -> bool:
+    """Coerce an MWS JSON scalar to a bool, accepting real booleans, 0/1 and the
+    "true"/"false" strings.
+
+    The request side of this API is all strings ("true"/"false"), and the
+    response side has not been seen live, so a plain ``bool(value)`` would turn
+    the string "false" -- truthy in Python -- into True. Unrecognised values
+    yield ``default``."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return default
+
+
+def _json_token_status(payload: dict) -> int | None:
+    """The envelope's token status, or None when it does not report one.
+
+    The XML actions carry this as the ``ts`` attribute (falling back to
+    ``TokenStatus``); no live capture of a JSON action's envelope exists, so the
+    JSON spelling is read the same two ways and None is returned when neither is
+    present or neither is an integer. None means "the server said nothing about
+    the token" -- callers must NOT read that as TOKEN_STATUS_OK, because a
+    logged-out session that simply does not report it would then look healthy.
+
+    ``ts`` is only accepted when it parses as an int: unlike the XML attribute
+    namespace, an action's JSON body could plausibly carry a ``ts`` of its own.
+    """
+    for name in ("TokenStatus", "ts"):
+        value = _jget(payload, name)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _parse_json_ack(payload: dict) -> dict:
+    """Read the JSON MWS envelope and return
+    ``{"ok", "error", "data", "token_status"}``.
+
+    Pure function -- no I/O, safe to unit-test with a literal dict. ``ok`` is
+    isSuccess; ``error`` is ErrorMessage or None; ``data`` is the payload with
+    the envelope keys removed, i.e. the action's own body with the UPSTREAM key
+    names untouched (``{"AllCameraSirenInfo": [...]}``,
+    ``{"CameraPrivacyModeInfo": {...}}``) so a caller can match it directly
+    against docs/mobile-api-findings.md.
+
+    ``token_status`` is the envelope's token state (see _json_token_status) or
+    None, which is what lets a caller re-mint an expired SessionToken once
+    instead of surfacing a spurious failure.
+
+    Traps: it fails CLOSED -- a payload with no isSuccess reports ok False, on
+    the principle that an unrecognised shape is not a success. And for the write
+    actions, ok False does NOT prove the command failed to reach the camera;
+    re-firing ManualSirenStart on a False could sound a siren twice. Re-read
+    get_siren_devices instead of retrying blind."""
+    if not isinstance(payload, dict):
+        return {"ok": False, "data": {}, "token_status": None,
+                "error": f"unexpected MWS JSON payload type {type(payload).__name__}"}
+    err = _jget(payload, "ErrorMessage")
+    if _json_bool(_jget(payload, "DidSeamlesslyLogin")):
+        # Not an error: the server transparently re-logged the session in, which
+        # means the SeamlessLoginToken the caller holds has rolled.
+        log.debug("MWS JSON action reports DidSeamlesslyLogin")
+    return {
+        "ok": _json_bool(_jget(payload, "isSuccess")),
+        "error": (str(err) or None) if err else None,
+        "token_status": _json_token_status(payload),
+        "data": {k: v for k, v in payload.items()
+                 if not (isinstance(k, str) and k.lower() in _JSON_ENVELOPE_KEYS)},
+    }
+
+
+async def _post_mws_json(session: aiohttp.ClientSession, form: dict) -> dict:
+    """POST a form-urlencoded MWS action whose response is JSON and return the
+    decoded object.
+
+    Identical transport to _post_mws (the gzip-without-Content-Encoding fix and
+    the 429 -> telus_auth.RateLimited funnel); only the decode differs.
+
+    Raises ValueError when the body is not JSON, so an HTML error page or an XML
+    fault from the Cloudflare edge cannot be mistaken for a well-formed "not ok"
+    ack. The message quotes only a short prefix of the RESPONSE -- never the
+    form, which carries SessionToken/slt/Haiku; the actions routed through here
+    return no tokens of their own (the login actions that do are posted through
+    mobile_auth, not this helper)."""
+    body = await _post_mws(session, form)
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise ValueError(
+            f"MWS action returned a non-JSON body ({exc}): {body[:120]!r}") from exc
+
+
+def _mws_device_id(device_id) -> str:
+    """Normalise a camera id to the numeric MWS DeviceId these actions expect.
+
+    Accepts either the bare MWS id (``2048``) or the website/bridge
+    globalDeviceId form ``"<unit>-<did>"``, and returns the part after the last
+    '-', matching how parse_doorbell_camera_list BUILDS that id
+    (``f"{unit}-{did}"``) and how talk.py matches one. Note this is the opposite
+    end from the split inside get_live_video_stream, whose device-id handling has
+    never been confirmed against a live capture -- do not "make them agree" by
+    copying that one."""
+    return str(device_id).rsplit("-", 1)[-1]
+
+
+async def get_siren_devices(session: aiohttp.ClientSession, session_token: str, *,
+                            customer_id: str | int | None = None,
+                            mobile_device_uid: str | None = None,
+                            seamless_login_token: str | None = None) -> dict:
+    """POST GetAllSirenDevices and return the _parse_json_ack dict.
+
+    Read-only. On success ``data["AllCameraSirenInfo"]`` is a list of
+    ``{"DeviceId", "isActive", "timestampEnd", "canManuallyTriggerSiren"}``.
+
+    Traps for the caller:
+
+    * ``canManuallyTriggerSiren`` is a PER-CAMERA PERMISSION, not a capability
+      flag -- the app has a dedicated ManualCameraSirenPermissionChecker for it.
+      A camera advertising a siren is not the same as this account being allowed
+      to fire it, so this read is the mandatory precondition for offering or
+      calling start_siren, and a false value must be honoured rather than
+      probed.
+    * The siren is TIME-BOUNDED: ``timestampEnd`` is the server-chosen end. An
+      ``isActive`` true with an empty ``timestampEnd`` is an error case in the
+      app, so treat it as "state unknown", not as "runs forever".
+    * No live invocation of the siren actions has ever been observed on this
+      project's account (the feature has no UI there; the wire format comes from
+      the decompiled app), so this read is also the cheapest way to sanity-check
+      the shape before anything is fired."""
+    form = _base_token_form(
+        "GetAllSirenDevices", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token)
+    log.debug("GetAllSirenDevices (SessionToken/slt/Haiku redacted)")
+    return _parse_json_ack(await _post_mws_json(session, form))
+
+
+async def start_siren(session: aiohttp.ClientSession, session_token: str,
+                      device_id: str | int, *,
+                      customer_id: str | int | None = None,
+                      mobile_device_uid: str | None = None,
+                      seamless_login_token: str | None = None) -> dict:
+    """POST ManualSirenStart&DeviceId=<id>. Returns the _parse_json_ack dict.
+
+    ``device_id`` may be the MWS numeric id or a ``"<unit>-<did>"``
+    globalDeviceId (see _mws_device_id).
+
+    THIS SOUNDS A REAL SIREN IN SOMEONE'S HOME. Only ever call it because a
+    caller explicitly asked for it -- never as part of a read, a refresh or a
+    retry loop.
+
+    Traps:
+
+    * Call get_siren_devices first and honour ``canManuallyTriggerSiren`` for
+      this camera; it is a per-account permission the server enforces separately
+      from the device having a siren at all.
+    * The siren is time-bounded by the server (``timestampEnd`` in
+      get_siren_devices); stop_siren is how you end it EARLY, and is the only
+      way to -- there is no duration parameter to shorten.
+    * No live invocation has ever been observed on this project's account, so a
+      first call is an EXPERIMENT: run it on a device where an unexpected siren
+      is acceptable, with someone present who can stop it.
+    * ok False does not prove nothing happened (see _parse_json_ack); confirm
+      with get_siren_devices rather than firing again."""
+    did = _mws_device_id(device_id)
+    form = _base_token_form(
+        "ManualSirenStart", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        DeviceId=did)
+    log.info("ManualSirenStart DeviceId=%s (SessionToken/slt/Haiku redacted)", did)
+    return _parse_json_ack(await _post_mws_json(session, form))
+
+
+async def stop_siren(session: aiohttp.ClientSession, session_token: str,
+                     device_id: str | int, *,
+                     customer_id: str | int | None = None,
+                     mobile_device_uid: str | None = None,
+                     seamless_login_token: str | None = None) -> dict:
+    """POST ManualSirenStop&DeviceId=<id>. Returns the _parse_json_ack dict.
+
+    This is the way to end a running siren before the server's ``timestampEnd``;
+    the siren is time-bounded, so a stop that never lands means the siren keeps
+    sounding until that timestamp rather than forever.
+
+    Same experimental status as start_siren -- no live invocation has ever been
+    observed on this project's account -- but this is the SAFE half of the pair:
+    if a start is ever attempted, have the stop call ready first. Stopping a
+    siren that is not sounding is expected to be a no-op, so a caller may retry
+    it (unlike start_siren) when the result is not ok."""
+    did = _mws_device_id(device_id)
+    form = _base_token_form(
+        "ManualSirenStop", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        DeviceId=did)
+    log.info("ManualSirenStop DeviceId=%s (SessionToken/slt/Haiku redacted)", did)
+    return _parse_json_ack(await _post_mws_json(session, form))
+
+
+async def get_privacy_mode_info(session: aiohttp.ClientSession, session_token: str, *,
+                                customer_id: str | int | None = None,
+                                mobile_device_uid: str | None = None,
+                                seamless_login_token: str | None = None) -> dict:
+    """POST GetAllCameraPrivacyModeInfo and return the _parse_json_ack dict.
+
+    Read-only. On success ``data["CameraPrivacyModeInfo"]`` carries
+    ``{"DeviceId", "State"}``.
+
+    Traps: despite the "All" in the action name, the recovered shape is a SINGLE
+    object, not a list -- code defensively for both rather than assuming either.
+    And privacy mode is separately gated by ``SupportsPrivacyMode``, which is
+    false for the cameras on the account tested, so a device appearing here is
+    not proof set_privacy_mode will be accepted for it."""
+    form = _base_token_form(
+        "GetAllCameraPrivacyModeInfo", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token)
+    log.debug("GetAllCameraPrivacyModeInfo (SessionToken/slt/Haiku redacted)")
+    return _parse_json_ack(await _post_mws_json(session, form))
+
+
+async def set_privacy_mode(session: aiohttp.ClientSession, session_token: str,
+                           device_id: str | int, active: bool, *,
+                           customer_id: str | int | None = None,
+                           mobile_device_uid: str | None = None,
+                           seamless_login_token: str | None = None) -> dict:
+    """POST SetCameraPrivacyModeState&DeviceId=<id>&IsActive=<true|false> and
+    return the _parse_json_ack dict, whose ``data["CameraPrivacyModeInfo"]``
+    echoes ``{"DeviceId", "State"}``.
+
+    A WRITE with a lasting effect: privacy mode on stops the camera recording
+    and it STAYS on until something turns it back off -- so it is only ever
+    called because a caller asked for that exact state, never as a side effect.
+
+    Traps: ``IsActive`` goes on the wire as the string "true"/"false" (the whole
+    request is form-urlencoded; a Python bool would be sent as "True" and read as
+    neither). Cameras on the account tested report ``SupportsPrivacyMode`` false,
+    so expect a refusal even though the action exists -- check support before
+    offering the control, and report an unsupported device upward instead of
+    retrying. Like the siren actions, this has never been invoked live."""
+    did = _mws_device_id(device_id)
+    form = _base_token_form(
+        "SetCameraPrivacyModeState", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        DeviceId=did, IsActive=("true" if active else "false"))
+    log.info("SetCameraPrivacyModeState DeviceId=%s IsActive=%s "
+             "(SessionToken/slt/Haiku redacted)", did, bool(active))
+    return _parse_json_ack(await _post_mws_json(session, form))
+
+
+def _parse_validate_session(body: str) -> dict:
+    """Parse a ValidateSession response into the _parse_json_ack shape.
+
+    Pure function -- no I/O. Returns ``{"ok", "error", "data"}`` with
+    ``data == {"session_is_valid": bool, "token_status": int|None}``.
+
+    ValidateSession sits with the JSON actions in the app's newer code but the
+    one captured response is XML (``<vsr ts="0" siv="true"/>``), so the body is
+    sniffed: a JSON object goes through _parse_json_ack (with ``siv`` surfaced as
+    session_is_valid if present), anything else is parsed as XML. A missing
+    <vsr> is reported as not-ok rather than raised -- a liveness probe that
+    throws is worse than one that answers "no"."""
+    stripped = body.lstrip()
+    if stripped.startswith("{"):
+        ack = _parse_json_ack(json.loads(stripped))
+        siv = _jget(ack["data"], "siv", _jget(ack["data"], "SessionIsValid"))
+        ack["data"]["session_is_valid"] = _json_bool(siv, ack["ok"])
+        return ack
+
+    root = _parse_xml(body)
+    el = root if _local(root.tag) == "vsr" else None
+    if el is None:
+        for x in root.iter():
+            if _local(x.tag) == "vsr":
+                el = x
+                break
+    if el is None:
+        return {"ok": False, "error": "no <vsr> in ValidateSession response",
+                "data": {"session_is_valid": False, "token_status": None}}
+    ts = _int(el, "ts", _int(el, "TokenStatus", 3))
+    siv = _attr(el, "siv", "false") == "true"
+    return {
+        "ok": ts == TOKEN_STATUS_OK and siv,
+        "error": (_attr(el, "em") or _attr(el, "e") or None),
+        "data": {"session_is_valid": siv, "token_status": ts},
+    }
+
+
+async def validate_session(session: aiohttp.ClientSession, session_token: str, *,
+                           customer_id: str | int | None = None,
+                           mobile_device_uid: str | None = None,
+                           seamless_login_token: str | None = None) -> dict:
+    """POST ValidateSession and return ``{"ok", "error", "data"}`` where
+    ``data`` is ``{"session_is_valid": bool, "token_status": int|None}``.
+
+    A read-only liveness check for an MWS SessionToken -- cheaper and more
+    direct than inferring auth health from a failed action.
+
+    Traps: the app calls this constantly and this bridge must not. The account's
+    rate limits are undocumented and a stampede can lock it, so call it on
+    demand (before a talk, after a suspected expiry), never on a poll. It also
+    does not refresh anything: an ok False means re-mint via mobile_auth, and the
+    same body-sniffing caveat as _parse_validate_session applies (the captured
+    response is XML even though its siblings here are JSON)."""
+    form = _base_token_form(
+        "ValidateSession", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token)
+    log.debug("ValidateSession (SessionToken/slt/Haiku redacted)")
+    return _parse_validate_session(await _post_mws(session, form))

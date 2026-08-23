@@ -72,7 +72,7 @@ feeds into WebRTC (`bridge/telus_rest.py`), **snapshots**, and the **clip /
 event / activity / automation** data. Both SSO reimplementations were built from
 HAR captures; see [telus-auth.md](alarm-com-api.md).
 
-### 2. The legacy mobile "MWS" XML API — two-way audio only
+### 2. The legacy mobile "MWS" API — two-way audio, siren and privacy
 
 There is one thing the website backend does **not** unlock: upstream (talkdown)
 audio to a doorbell speaker. That capability is gated behind the **MWS (Mobile
@@ -82,13 +82,20 @@ action is the only call that returns the `<webrtc>` / `<srtp>` upstream-audio
 endpoints, and it requires an **MWS `SessionToken`**, which no website endpoint
 mints.
 
+The same session later turned out to be the only way to reach two more things —
+the camera **siren** (`ManualSirenStart` / `ManualSirenStop`) and **privacy mode**
+(`SetCameraPrivacyModeState`), which have no website equivalent. Those actions are
+ordinary MWS form POSTs but answer **JSON** rather than XML, with the same
+`isSuccess` / `ErrorMessage` envelope fields.
+
 So the bridge mints one on demand, off the *website* session it already holds:
 `bridge/mobile_auth.py` drives the mobile SSO servlet against the same IdP
 session (a `SeamlessLoginNew` form POST in steady state, or an
 `SSORedirectHandler.ashx?AppType=66` → `LoginAsLogin` bootstrap the first time),
 parses the returned XML for the `SessionToken`, then `bridge/mws_client.py`
-POSTs `GetLiveVideoStream` to resolve the talk endpoints. This path exists
-**only** for talkdown; everything else uses backend #1. It is reverse-engineered
+POSTs `GetLiveVideoStream` to resolve the talk endpoints. Apart from the siren
+and privacy commands above, everything else uses backend #1 — including all the
+camera settings and diagnostics. It is reverse-engineered
 from the decompiled Android app and is documented in
 [talkdown.md](talkdown-fullduplex-protocol.md).
 
@@ -96,10 +103,10 @@ from the decompiled Android app and is documented in
 | --- | --- | --- |
 | Host | `smarthome-security.telus.com` | `mobile.alarm.com` |
 | Auth | TELUS SSO → cookie session | MWS `SessionToken` minted off the website session |
-| Wire format | JSON (REST) + push websocket | form POST → XML |
+| Wire format | JSON (REST) + push websocket | form POST → XML (the siren/privacy actions answer JSON) |
 | Used by | integration **and** bridge | bridge only |
-| Provides | state, live-video source, snapshots, clips, events, activity, automations | doorbell two-way audio endpoints |
-| Why | primary backend for everything | only backend that exposes upstream audio |
+| Provides | state, live-video source, snapshots, clips, events, activity, automations, camera settings + diagnostics | doorbell two-way audio endpoints, camera siren, privacy mode |
+| Why | primary backend for everything | only backend that exposes upstream audio, the siren, and privacy mode |
 
 ## How the two components communicate
 
@@ -125,6 +132,9 @@ the box. The integration is a pure **client** of this API. Key endpoints:
 | `/control/clip/{video_event_id}` | GET | Re-mint a fresh signed download URL for one clip |
 | `/control/history` | GET | System-wide activity feed |
 | `/control/automations` | GET | Video automation rules (+ `/pause`, `/resume`) |
+| `/control/cameras/{id}/settings` | GET, POST | Camera audio/image/video settings (writes are read-modify-write) |
+| `/control/cameras/{id}/diagnostics` | GET | Camera signal strength, battery, device status |
+| `/control/cameras/{id}/siren`, `/privacy` | POST | Camera siren and privacy mode (mobile MWS backend) |
 
 The integration's matching URLs are defined in `const.py`
 (`CAMERA_BRIDGE_*_URL`). See [control-api.md](control-api.md) for full

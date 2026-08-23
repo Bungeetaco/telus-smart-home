@@ -1,0 +1,77 @@
+{
+ "data": {
+  "id": "100000000-2048",
+  "type": "video/settings/image-setting",
+  "attributes": {
+   "canFlipImage": true,
+   "canSetHdr": 1,
+   "canSetMaxExposure": false,
+   "shouldDisableMaxExposure": false,
+   "canSetBrightness": true,
+   "canSetSaturation": true,
+   "canSetSharpness": false,
+   "canSetContrast": true,
+   "canSetWebOsd": false,
+   "isFlipped": false,
+   "isHdrEnabled": true,
+   "supportsAutomaticExposure": true,
+   "maxExposure": 1,
+   "automaticMaxExposure": 1,
+   "maxExposureOptions": [
+    1,
+    8,
+    11,
+    16,
+    32,
+    63,
+    125,
+    250,
+    500,
+    1000,
+    2000,
+    4000,
+    8000
+   ],
+   "brightness": 2,
+   "contrast": 0,
+   "sharpness": 0,
+   "saturation": 2,
+   "isWebOsdEnabled": false,
+   "minBrightness": -5,
+   "maxBrightness": 5,
+   "minContrast": -5,
+   "maxContrast": 5,
+   "minSharpness": -3,
+   "maxSharpness": 3,
+   "minSaturation": -5,
+   "maxSaturation": 5,
+   "shouldShowImageQualityTooltip": false,
+   "canUserEditVideoSettings": true
+  },
+  "relationships": {
+   "infraredSetting": {
+    "data": {
+     "id": "100000000-2048",
+     "type": "video/settings/infrared-setting"
+    }
+   }
+  }
+ },
+ "included": [
+  {
+   "id": "100000000-2048",
+   "type": "video/settings/infrared-setting",
+   "attributes": {
+    "canControlInfraredLeds": true,
+    "canControlNightVision": false,
+    "canControlInfraredSensitivity": true,
+    "isInfraredLedEnabled": true,
+    "isNightVisionEnabled": false,
+    "infraredSensitivity": 1
+   }
+  }
+ ],
+ "meta": {
+  "transformer_version": "1.1"
+ }
+}

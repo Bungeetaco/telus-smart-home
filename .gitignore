@@ -7,3 +7,4 @@ credentials.json
 *.har
 *.log
 .DS_Store
+.pytest_cache/

@@ -68,6 +68,14 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/metrics` | bearer | Talkdown counters: outcomes, failure reasons, durations |
 | POST | `/control/cameras/{camera_id}/talk` | bearer | Play audio through the camera speaker (talkdown) |
 | POST | `/control/cameras/{camera_id}/talk/stop` | bearer | Stop the talk currently playing on that camera |
+| GET | `/control/cameras/{camera_id}/settings` | bearer | All audio / image / video settings for one camera |
+| GET | `/control/cameras/{camera_id}/diagnostics` | bearer | Camera signal strength, battery, device status |
+| POST | `/control/cameras/{camera_id}/settings/volume` | bearer | Set the camera speaker (call) volume |
+| POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime / outdoor tone and its volume |
+| POST | `/control/cameras/{camera_id}/settings/image` | bearer | Set picture settings (brightness, HDR, IR, night vision, …) |
+| POST | `/control/cameras/{camera_id}/settings/video` | bearer | Set clip settings (resolution, quality, retention, pre-trigger) |
+| POST | `/control/cameras/{camera_id}/siren` | bearer | Start or stop the camera siren |
+| POST | `/control/cameras/{camera_id}/privacy` | bearer | Turn camera privacy mode on or off |
 | GET | `/control/events` | bearer | Recent camera video-clip events |
 | GET | `/control/history` | bearer | System-wide activity feed |
 | GET | `/control/clip/{video_event_id}` | bearer | Re-mint a fresh signed clip download URL |
@@ -380,6 +388,685 @@ unconditionally (e.g. on a door-open event) without first checking whether a cli
 is playing. The Home Assistant service `telus_smarthome.stop_speaking` wraps this
 and treats that case as a no-op.
 
+
+---
+
+## Camera settings, diagnostics, siren and privacy
+
+Eight routes cover the per-camera **settings** surface (speaker volume, the
+doorbell's own chime, image, video/clip), read-only **diagnostics** (signal,
+battery, device status), the camera **siren**, and **privacy mode**.
+
+They are independent of talkdown: `TALKDOWN_ENABLED` does not gate them and they
+never open an audio session. Settings and diagnostics come from the **website
+API** (the cookie + `ajaxrequestuniquekey` session the bridge already holds);
+siren and privacy come from the **mobile MWS API** (form POST in, JSON envelope
+back — same `isSuccess` / `ErrorMessage` fields as the XML actions). See
+[alarm-com-api.md](alarm-com-api.md) for the two backends.
+
+> **These write to real hardware.** A `GET` here never changes anything, but a
+> `POST` takes effect on a camera in someone's home immediately — and the siren
+> is audible. Call the write routes only when a user asked for that write; never
+> as a side effect of a read or a poll.
+
+Two properties of the upstream API shape every route in this group:
+
+- **Read-modify-write, always.** A website settings `PUT` carries the **whole**
+  settings object, not a patch, so a partial body risks resetting fields the
+  caller never mentioned. Each `POST` below therefore re-reads the current
+  object, changes only the named field(s), and sends it all back. That is two
+  upstream round trips per write, which is one reason these routes are slow-poll
+  only and are never called from the video path.
+- **Feature-support enums.** Every settings field is paired with a
+  `<name>FeatureSupport` enum (`0` = unsupported, `2` = supported/editable), and
+  the *same payload shape* comes back for a device that cannot do the thing — so
+  the presence of a field proves nothing. Support is reported upward as a
+  `supports_*` boolean on the read routes, and writing an unsupported field is a
+  **`422 unsupported`**, not a silently-dropped write.
+
+Errors shared by all eight (individual routes note anything extra):
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| `400` | `{"error": "malformed"}` | Body is not valid JSON, carries an unknown key, a value of the wrong type, a number outside the range the device publishes, or a value that is not on the option list the device offers |
+| `401` | `{"error": "bad_secret"}` | Missing/wrong `Authorization` header |
+| `404` | `{"error": "unknown_camera"}` | `camera_id` not in the camera registry |
+| `422` | `{"error": "unsupported"}` | The device reports no support for that field or capability |
+| `502` | `{"error": "telus_error"}` | The upstream TELUS/alarm.com call failed |
+| `503` | `{"error": "mws_unavailable"}` | Siren and privacy only — no mobile MWS session exists to act through |
+
+**Out-of-range values are refused, never clamped.** Every numeric field on every
+write route is checked against the `*_min` / `*_max` the device itself published
+on the read, and every string field against the `*_options` list it published;
+anything outside is a **`400 malformed`** and nothing is sent to the camera.
+
+This is a deliberate choice, not an accident of validation. Clamping would mean
+writing a *different* value to a camera in someone's home than the caller asked
+for and still answering `200` — the caller believes the volume it named is the
+volume that landed, and nothing tells it otherwise. Refusing puts the
+disagreement in front of whoever caused it. A device that publishes no usable
+bounds or no option list is not second-guessed: the value is passed through and
+TELUS is the judge.
+
+Note which status this is. **Out of range is a `400`, not a `422`** — the caller
+sent a wrong value, which is a caller mistake and worth fixing at the call site.
+`422 unsupported` means something else entirely: the device reports it cannot do
+that field *at all* (its `*FeatureSupport` enum is not `2`), which no retry with
+a different value will fix. Both leave the camera untouched.
+
+---
+
+## `GET /control/cameras/{camera_id}/settings`
+
+Reads one camera's audio, image and video/clip settings, plus its siren and
+privacy records — five keys. Uncached: a settings value a UI renders as a slider
+must not be stale. Each call is **three website GETs and two mobile MWS POSTs**,
+which makes it the heaviest read here; the Home Assistant side polls it every
+120 s, and you should not poll it tighter.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Response**
+
+```json
+200 {
+  "audio": {
+    "supports_call_volume": true,
+    "call_volume": 10,
+    "call_volume_min": 0,
+    "call_volume_max": 10,
+    "mic_and_speaker_on": true,
+    "supports_indoor_chime": true,
+    "indoor_chime_on": true,
+    "supports_chime_type": true,
+    "chime_type": 0,
+    "chime_type_options": [
+      -1,
+      0,
+      1
+    ],
+    "supports_outdoor_tone": true,
+    "outdoor_tone_on": true,
+    "supports_outdoor_tone_volume": false,
+    "outdoor_tone_volume": 0,
+    "outdoor_tone_volume_min": 0,
+    "outdoor_tone_volume_max": 3,
+    "raw": {}
+  },
+  "image": {
+    "supports_brightness": true,
+    "brightness": 2,
+    "brightness_min": -5,
+    "brightness_max": 5,
+    "supports_contrast": true,
+    "contrast": 0,
+    "contrast_min": -5,
+    "contrast_max": 5,
+    "supports_saturation": true,
+    "saturation": 2,
+    "saturation_min": -5,
+    "saturation_max": 5,
+    "supports_sharpness": false,
+    "sharpness": 0,
+    "sharpness_min": -3,
+    "sharpness_max": 3,
+    "supports_is_flipped": true,
+    "is_flipped": false,
+    "supports_hdr_enabled": true,
+    "hdr_enabled": true,
+    "supports_max_exposure": false,
+    "max_exposure": 1,
+    "max_exposure_options": [
+      1,
+      8,
+      11,
+      16,
+      32,
+      63,
+      125,
+      250,
+      500,
+      1000,
+      2000,
+      4000,
+      8000
+    ],
+    "supports_ir_led_enabled": true,
+    "ir_led_enabled": true,
+    "supports_ir_sensitivity": true,
+    "ir_sensitivity": 1,
+    "supports_night_vision_enabled": false,
+    "night_vision_enabled": false,
+    "raw": {}
+  },
+  "video": {
+    "supports_clip_resolution": true,
+    "clip_resolution": "1440x1440",
+    "clip_resolution_options": [
+      "1",
+      "4",
+      "7",
+      "480x480",
+      "960x960",
+      "1440x1440"
+    ],
+    "supports_clip_quality": false,
+    "clip_quality": "3",
+    "clip_quality_options": [
+      "5",
+      "3",
+      "2",
+      "1"
+    ],
+    "supports_keep_clips_days": true,
+    "keep_clips_days": -1,
+    "keep_clips_days_options": [
+      3,
+      5,
+      7,
+      10,
+      15,
+      30,
+      60,
+      120,
+      180,
+      -1
+    ],
+    "supports_alarm_clip_duration": true,
+    "alarm_clip_duration": 2,
+    "alarm_clip_duration_options": [
+      1,
+      2,
+      5,
+      10,
+      15
+    ],
+    "supports_camera_triggered_clip_duration": true,
+    "camera_triggered_clip_duration": 30,
+    "camera_triggered_clip_duration_options": [
+      "30",
+      "30 seconds"
+    ],
+    "supports_pretrigger_enabled": true,
+    "pretrigger_enabled": true,
+    "raw": {}
+  },
+  "siren": {
+    "can_manually_trigger": true,
+    "active": false,
+    "timestamp_end": null
+  },
+  "privacy": {
+    "supported": false,
+    "active": false
+  }
+}
+```
+
+**The `audio` object** (the shape `camera_settings.get_audio_settings()` returns,
+and what the volume and chime writes return too):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `supports_call_volume` | bool | Derived from `callVolumeFeatureSupport` (`2` → true) |
+| `call_volume` | int | Current speaker/call volume — **this is the volume talkdown plays at** |
+| `call_volume_min` / `call_volume_max` | int | Device-reported range; `0`–`10` on the doorbell this was built against |
+| `mic_and_speaker_on` | bool | The device's mic + speaker master toggle |
+| `supports_indoor_chime` | bool | Whether the indoor chime can be turned on/off |
+| `indoor_chime_on` | bool | Indoor chime state |
+| `supports_chime_type` | bool | Whether the indoor chime's *tone* is selectable |
+| `chime_type` | int \| null | Selected chime tone |
+| `chime_type_options` | list | The tones this device offers. Read-only here — no write route accepts `chime_type` yet |
+| `supports_outdoor_tone` | bool | Whether the doorbell's own outdoor tone can be turned on/off |
+| `outdoor_tone_on` | bool | Outdoor tone state |
+| `supports_outdoor_tone_volume` | bool | Whether that tone's **volume** is settable — a **separate** flag, and `false` on the reference doorbell even though the tone itself toggles fine |
+| `outdoor_tone_volume` | int | `outdoor_tone_volume_min`–`outdoor_tone_volume_max` (0–3 on the doorbell tested) |
+| `outdoor_tone_volume_min` / `outdoor_tone_volume_max` | int | Device-reported range |
+| `raw` | object | The untouched upstream settings object, so a caller can read a field the bridge does not model yet |
+
+Two traps in this object. The upstream enum names are
+`<thing>EnableDisableFeatureSupport`, not the `is<Thing>OnFeatureSupport` spelling
+you would guess — reading the raw document with the guessed name silently finds
+nothing and looks like "unsupported". And the outdoor tone's on/off support and
+its **volume** support are genuinely different flags: on the reference doorbell
+the tone can be switched but its volume cannot, so a `chime` write carrying
+`outdoor_volume` is a `422 unsupported` there while `outdoor_on` succeeds.
+
+The talk/call volume and the outdoor tone volume are also different things.
+**Only `call_volume` affects talkdown.**
+
+`image` and `video` follow the same convention: one key per field the write
+routes accept, each paired with a `supports_<field>` boolean off the matching
+`*FeatureSupport` enum, plus `*_min`/`*_max`/`*_options` where the device reports
+a range or a list, plus `raw`. **Which fields appear is device-dependent** — the
+example above is a doorbell; a camera without IR will still return the IR keys,
+with `supports_*` false. Always branch on `supports_*`, never on key presence.
+
+### The `siren` and `privacy` sections — a fixed contract
+
+`audio`, `image` and `video` come from the website API and vary by device model.
+`siren` and `privacy` do not: they come from the **mobile MWS** actions
+`GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo`, whose raw records use
+inconsistent, capture-derived key spellings (`canManuallyTriggerSiren` vs
+`can_manually_trigger_siren`, `SupportsPrivacyMode` vs `supports_privacy_mode`).
+The bridge **normalizes** each record into a fixed, small shape before returning
+it, and that shape is a contract other code depends on — the Home Assistant
+entities read exactly these key names and nothing else.
+
+**`settings["siren"]`** — an object, or `null`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `can_manually_trigger` | bool | Whether **this account** may sound this camera's siren. A per-account permission, not a hardware capability — a camera with a siren this account may not fire reports `false`. Gate the control on this |
+| `active` | bool | Whether the siren is sounding right now |
+| `timestamp_end` | value \| `null` | The server-chosen end of the current sounding, as the upstream reports it. `null` when nothing is running (or when upstream sent none). The duration is not the caller's to choose |
+
+**`settings["privacy"]`** — an object, or `null`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `supported` | bool | Whether the camera reports privacy-mode support. `false` for every camera on the account this was built against |
+| `active` | bool | Whether privacy mode is on (camera blinded) |
+
+Every field is a real JSON `bool`, always present, whatever the upstream sent —
+the MWS side spells booleans as the strings `"true"`/`"false"` and privacy state
+as `0`/`1`, and normalizing that here is the point of the contract (a truthiness
+test on the string `"false"` is `True`).
+
+The two capability flags default in **opposite** directions, on purpose:
+
+- `can_manually_trigger` fails **closed** — absent, null or unrecognised becomes
+  `false`. It is the permission that sounds a real siren in someone's home, so a
+  record the bridge cannot read is never taken as consent.
+- `supported` fails **open** — only an explicit `false` reports unsupported. That
+  action returns a privacy *state* object rather than an enumeration of capable
+  devices, so a missing flag is a gap in a shape recovered from the decompiled
+  app, not the device saying no; failing closed would leave the privacy control
+  permanently unavailable on every camera.
+
+`active` fails closed on both: an unreadable value reports "not sounding" /
+"not blinded", because claiming a camera is blinded while it is still recording
+is the dangerous direction to be wrong in.
+
+**`null` is not "unsupported".** Either section is `null` when the mobile session
+was unavailable — no talk manager (`TALKDOWN_ENABLED=false`), a failed MWS read,
+a token that would not mint — or when the MWS response carried no record
+matching this camera. All of those mean *nothing was reported*, and none of them
+means the camera cannot do the thing.
+
+Both sections are best effort by design: an MWS outage degrades them to `null`
+and still returns a `200` with the website settings intact, rather than failing
+the whole read with a `502`. A caller must therefore distinguish three states —
+`null` (unknown), `{"can_manually_trigger": false}` / `{"supported": false}`
+(reported unsupported), and a positive flag — and must not collapse the first
+two. Treating `null` as `false` turns a transient MWS blip into "this camera has
+no siren"; treating it as `true` offers a control that will fail.
+
+Because these are two extra MWS POSTs on top of three website GETs, this route
+is the most expensive read in the API. Poll it slowly.
+
+**Errors:** `401 bad_secret`, `404 unknown_camera`, `502 telus_error`. Note there
+is **no `503` here** — unlike the siren and privacy *write* routes, a missing
+mobile session degrades this read to `null` sections instead of failing it.
+
+**Example**
+
+```bash
+curl -s -H "Authorization: Bearer $SECRET" \
+  $BASE/control/cameras/<camera_id>/settings
+```
+
+---
+
+## `GET /control/cameras/{camera_id}/diagnostics`
+
+Read-only health for one camera: signal strength, battery, and the device status
+the settings screen shows. A camera degrading to poor Wi-Fi is otherwise a silent
+failure — the picture just gets worse — so this exists to make it a number
+something can alert on.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Response**
+
+```json
+200 {
+  "signal_strength": 78,
+  "battery": null,
+  "device_status": "Online",
+  "raw": {}
+}
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `signal_strength` | number \| null | alarm.com's `normalizedSignalStrength` — a **0–100 score, not dBm** (see below). `null` when the device reports none, typically a wired camera |
+| `battery` | number \| null | Battery percentage, `null` on a camera with no battery |
+| `device_status` | string \| null | Upstream status string |
+| `raw` | object | The three upstream responses as received, under `signal_strength` / `battery` / `device_status` keys, for anything not modelled above |
+
+**`signal_strength` is not dBm.** The signal document reports
+`normalizedSignalStrength` (0–100, the bars the portal draws) and a coarse
+`signalStrengthEnum`; it does **not** report `signalStrength` or `rssi`. Anything
+consuming this must not label it dBm — a real Wi-Fi dBm figure is negative, so a
+`58` presented as dBm is nonsense, and in Home Assistant a wrong unit is recorded
+into long-term statistics rather than just shown. The bridge does fall back to
+`signalStrength` / `signalStrengthValue` for camera models that report those
+instead, and their unit is **unverified** — which is why the Home Assistant
+sensor asserts no unit at all.
+
+**`battery` is `null` for "no battery", not `0`.** `batteryLevel` is present and
+`0` on mains-powered devices, so the value alone cannot tell a missing battery
+from a flat one. The bridge honours alarm.com's own `shouldDisplayBatteryLevel`
+flag and reports `null` when it is false — build no entity for a `null`, or you
+get a permanent 0%.
+
+**`raw` carries the camera's Wi-Fi SSID and encryption type.** That is diagnostic
+detail about someone's home network. Do not log it or surface it as an entity
+attribute without deciding to do so on purpose.
+
+Every field is nullable on purpose: three separate upstream reads back this
+response, and a camera that reports none of them is normal, not an error. A
+caller must not create a sensor for a `null` field — an "unknown" battery sensor
+on a wired camera is noise, not diagnostics.
+
+**Errors:** `401 bad_secret`, `404 unknown_camera`, `502 telus_error`.
+
+**Example**
+
+```bash
+curl -s -H "Authorization: Bearer $SECRET" \
+  $BASE/control/cameras/<camera_id>/diagnostics
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/settings/volume`
+
+Sets the camera's speaker/call volume — the level talkdown is heard at. The
+mobile API's `<duav>` element claims `SupportsVolumeAdjustment="false"` for this
+doorbell; the website API exposes it as supported with a live 0–10 sweep
+observed, so this route trusts the website's `callVolumeFeatureSupport` and
+ignores the mobile claim.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `volume` | int | yes | Must be within the device's own `call_volume_min`–`call_volume_max` (0–10 on the doorbell tested). Anything outside that range is **refused with a `400 malformed`** — never clamped, so the camera is never quietly set to a volume the caller did not ask for. A non-integer (including `true`) is also a `400` |
+
+The range comes from the device on every write: the route re-reads the audio
+settings before applying and bounds the request against the `call_volume_min` /
+`call_volume_max` it just read, not against anything hardcoded. A device that
+reports no usable bounds is passed through unbounded.
+
+**Success response:** the refreshed `audio` object, identical in shape to the
+`audio` key of `GET .../settings` above, read back after the write rather than
+echoed from the request. Since an out-of-range value never gets written, the
+returned `call_volume` is the value that was asked for; the read-back is there
+for the *other* fields in the section.
+
+**Errors:** the shared table. `422 unsupported` means
+`supports_call_volume` is false for this camera.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"volume": 8}' \
+  $BASE/control/cameras/<camera_id>/settings/volume
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/settings/chime`
+
+Sets the doorbell's chime: the indoor chime, the tone the doorbell itself plays,
+and that tone's volume. All three fields are optional and independent — send only
+what you want changed.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `indoor_on` | bool | no | Indoor chime on/off |
+| `outdoor_on` | bool | no | The doorbell's own outdoor tone, on/off |
+| `outdoor_volume` | int | no | Must be within `outdoor_tone_volume_min`–`outdoor_tone_volume_max` (0–3 on the doorbell tested). Outside that range is a **`400 malformed`**, not a clamp — same rule as `volume` above. Gated on `supports_outdoor_tone_volume`, which is a *different* flag from `supports_outdoor_tone` and is `false` on the reference doorbell: `outdoor_on` works there, `outdoor_volume` is a `422` |
+
+An empty body — no recognised field at all — is a `400 malformed` rather than a
+no-op write, so a caller with a typo'd key hears about it instead of believing a
+setting was applied.
+
+**Success response:** the refreshed `audio` object (same shape as `GET
+.../settings`'s `audio`).
+
+**Errors:** the shared table. `422 unsupported` names the requested field the
+device does not support (`supports_indoor_chime` / `supports_outdoor_tone`). All
+requested fields are support-checked **before anything is written**, so a
+partly-unsupported request leaves the camera untouched rather than half-applied.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"indoor_on": true, "outdoor_volume": 1}' \
+  $BASE/control/cameras/<camera_id>/settings/chime
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/settings/image`
+
+Sets picture settings. Every field is optional; only the ones sent are changed
+(the rest are carried over from the read half of the read-modify-write).
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)** — accepted keys:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `brightness` | int | Must be within the device-reported min/max, else `400` |
+| `contrast` | int | Must be within the device-reported min/max, else `400` |
+| `saturation` | int | Must be within the device-reported min/max, else `400` |
+| `sharpness` | int | Must be within the device-reported min/max, else `400` |
+| `is_flipped` | bool | Image flip (a ceiling-mounted camera) |
+| `hdr_enabled` | bool | HDR |
+| `ir_led_enabled` | bool | Infrared illuminator |
+| `ir_sensitivity` | int | IR sensitivity; must be within the device-reported range, else `400` |
+| `night_vision_enabled` | bool | Night vision |
+
+Any other key is a `400 malformed`, as is a value of the wrong type or a number
+outside the range the device published. A recognised key the device reports no
+support for is a `422 unsupported`. Nothing is written unless every requested
+field passes, so a partly-invalid request leaves the camera untouched.
+
+**Success response:** the refreshed `image` object (same shape as `GET
+.../settings`'s `image`).
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"brightness": 60, "hdr_enabled": true}' \
+  $BASE/control/cameras/<camera_id>/settings/image
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/settings/video`
+
+Sets recording/clip settings. Same optional-field, read-modify-write behaviour as
+the image route.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)** — accepted keys:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `clip_resolution` | string | Must be one of the device's `clip_resolution_options` (`480x480` / `960x960` / `1440x1440` on the cameras seen). This is the **recorded clip** resolution and has no effect on the live RTSP stream, which the bridge encodes itself |
+| `clip_quality` | string | Encode quality; must be one of the device's `clip_quality_options` |
+| `pretrigger_enabled` | bool | Pre-trigger recording (the seconds before the event) |
+| `keep_clips_days` | int | Cloud retention in days, checked against whichever the device publishes — its `keep_clips_days_options` list and/or a min/max. **`-1` is a legitimate option meaning "keep forever"**, so do not filter negatives out on the assumption that a retention must be positive |
+| `alarm_clip_duration` | int | Alarm-clip length in seconds; must be within the device-reported range, else `400` |
+
+Any other key, or a value of the wrong type, is a `400 malformed`. A recognised
+key the device reports no support for is a `422 unsupported` — that gate runs on
+the pre-read, before anything is sent.
+
+A value **off the option list** the device published is a `400 malformed`, not a
+`422`: the field itself is supported, the value is simply not one this camera
+offers. Read `clip_resolution_options` / `clip_quality_options` from
+`GET .../settings` and pick from them rather than guessing.
+
+**Success response:** the refreshed `video` object (same shape as `GET
+.../settings`'s `video`).
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"clip_resolution": "960x960", "keep_clips_days": 30}' \
+  $BASE/control/cameras/<camera_id>/settings/video
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/siren`
+
+Starts or stops the camera's built-in siren, via the mobile MWS actions
+`ManualSirenStart` / `ManualSirenStop`.
+
+> **This is loud, on purpose, in someone's home.** Nothing in the bridge fires it
+> on its own — it happens only when a caller explicitly posts `start`. Treat the
+> first invocation on a new device as an experiment and pick your moment: no live
+> siren command was ever captured from the app on the account this was built
+> against (the UI is absent there), so the request shape comes from the decompiled
+> app rather than from an observed round trip.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `action` | string | yes | `"start"` or `"stop"`. Any other value is a `400 malformed` |
+
+**Success response**
+
+```json
+200 {"status": "applied"}
+```
+
+That is the **whole** body — exactly two keys' worth, and nothing from the
+upstream MWS envelope is merged into it. The route checks the envelope's `ok`
+flag (a not-ok envelope becomes a `502 telus_error`) and then discards it, so a
+`200` means "the upstream accepted the command", not "here is the siren's new
+state". There is no read-back of siren state on this route; the only read is the
+`siren` section of `GET .../settings`.
+
+**Two things a caller must honour:**
+
+- **Triggering is a per-account permission, not just a device capability.**
+  `GetAllSirenDevices` reports `canManuallyTriggerSiren` per camera, and a device
+  advertising a siren is not the same as this account being allowed to sound it.
+  The bridge reads that flag (from `GetAllSirenDevices`) before firing and
+  returns `422 unsupported` when it is false. A caller that mirrors the bridge's
+  reported capabilities should decline to offer the control at all rather than
+  discover the refusal on a failed press.
+- **The siren is time-bounded by the server, not by you.** The upstream carries a
+  `timestampEnd` chosen server-side. Do not assume a duration and do not assume
+  it stops on its own on any particular schedule — post `{"action": "stop"}` to
+  end it early.
+
+**Errors:** the shared table, plus `422 unsupported` for
+`canManuallyTriggerSiren` false, and:
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| `503` | `{"error": "mws_unavailable"}` | There is no mobile MWS session to act through |
+
+The `503` is the one that surprises people. Siren and privacy are the only two
+routes in this group that speak the **mobile** API, and the bridge does not own
+an MWS session of its own — it borrows the one the talk manager mints. With
+`TALKDOWN_ENABLED=false` no talk manager is constructed, so these two routes
+return `503 mws_unavailable` even though the rest of the settings surface works
+normally. It is a bridge-configuration state, not a device or account state, and
+it does not clear on retry.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "start"}' \
+  $BASE/control/cameras/<camera_id>/siren
+
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "stop"}' \
+  $BASE/control/cameras/<camera_id>/siren
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/privacy`
+
+Turns camera privacy mode on or off (MWS `SetCameraPrivacyModeState`). Privacy
+mode blinds the camera at the device, so **the live RTSP stream and snapshots go
+dark while it is active** — this is the one route here that changes what the
+video half of the bridge can deliver.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `active` | bool | yes | `true` = privacy on (camera blinded), `false` = off. A JSON boolean; the string form the wire protocol wants is built by the bridge |
+
+**Success response**
+
+```json
+200 {"status": "applied"}
+```
+
+The body does **not** echo `active` back, and carries nothing from the upstream
+MWS envelope. As with the siren, a `200` means the upstream accepted the write;
+to read the resulting state, poll the `privacy` section of `GET .../settings`.
+
+**Support caveat.** `SupportsPrivacyMode` is **false** for the cameras on the
+account this was built against, so expect `422 unsupported` there even though the
+action exists upstream. Like the siren, the capability is read upstream
+(`GetAllCameraPrivacyModeInfo`) rather than assumed from the device model. Note
+the asymmetry with the siren: privacy refuses only on an **explicit** `false`,
+because this action returns a state object rather than an enumeration of capable
+devices, so failing to find a matching record is a response-shape mismatch and
+not evidence the camera lacks the feature.
+
+**Errors:** the shared table, plus `422 unsupported` when the camera reports no
+privacy support, and `503 mws_unavailable` on the same terms as the siren route
+above (no talk manager, i.e. `TALKDOWN_ENABLED=false`).
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"active": true}' \
+  $BASE/control/cameras/<camera_id>/privacy
+```
+
+---
 
 ## `GET /control/events`
 

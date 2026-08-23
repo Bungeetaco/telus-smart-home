@@ -20,6 +20,7 @@ the component READMEs.
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
 - [Talkdown audio sounds bad on the doorbell speaker](#talkdown-audio-sounds-bad-on-the-doorbell-speaker)
+- [A camera control is missing, or a settings write returns 422](#a-camera-control-is-missing-or-a-settings-write-returns-422)
 
 ---
 
@@ -368,6 +369,57 @@ certainly sending non-mu-law audio, or raw audio the device is misinterpreting �
 switch to mu-law. If you hear *intelligible but harsh/clipping* audio, adjust or
 re-enable conditioning. If it's simply *lo-fi*, that's the 8 kHz mono speaker
 ceiling.
+
+## A camera control is missing, or a settings write returns 422
+
+**Symptom.** A camera has no speaker-volume slider, no siren buttons, or no
+battery sensor. Or a write to one of the camera-settings routes comes back
+`422 {"error": "unsupported"}` while the same call succeeds on a different
+camera.
+
+**Cause.** Usually not a fault: **capability is per device and per account**, and
+both halves of the project refuse to pretend otherwise.
+
+- Every website settings field is paired with a `<name>FeatureSupport` enum
+  (`0` unsupported, `2` supported/editable), and **the same payload shape comes
+  back for a device that cannot do the thing** — so a field being present proves
+  nothing. The bridge resolves that enum into a `supports_*` boolean and answers
+  `422` rather than sending a `PUT` the camera will ignore.
+- The **siren** additionally depends on `canManuallyTriggerSiren`, which is an
+  *account permission*, not a device property. A camera with a siren is not
+  necessarily one your account may sound.
+- **Privacy mode** depends on `SupportsPrivacyMode`, which is `false` on the
+  cameras this project was built against.
+- Home Assistant deliberately creates **no entity** for a capability the camera
+  does not report, so a permanently-broken control never reaches the dashboard.
+  Privacy mode is the one exception: its switch is created and reads
+  *unavailable*, so it keeps its history and any automation that references it.
+
+**Fix — check what the camera actually reports:**
+
+```bash
+curl -s -H "Authorization: Bearer $SECRET" \
+  $BASE/control/cameras/<camera_id>/settings | jq '.audio, .image, .video'
+```
+
+- A `supports_*` of `false` is the answer: the device does not offer it, and
+  there is nothing to fix.
+- `supports_*` `true` but no entity in HA → the integration has not been
+  restarted since this version was installed (a config-entry reload is not
+  enough; see [development.md](development.md)).
+- The route itself **404s** → the bridge container predates these routes. Code is
+  baked into the image, so rebuild rather than restart:
+  `cd camera-bridge && docker compose up -d --build`.
+- The entities exist but are **unavailable** → the settings poll is failing, not
+  the capability. Check `curl -s $BASE/control/health` and the bridge log; a
+  `502 telus_error` in that log points upstream (and a `429` there is
+  [rate-limiting](#alarmcom-rate-limiting-http-429), not a broken camera).
+
+**One caution rather than a fix:** a `POST` to these routes changes real
+hardware, and `{"action": "start"}` on the siren is audible in someone's home.
+Nothing polls a write route — if a setting changed, something asked it to.
+
+---
 
 ## Checking whether talkdown has been failing
 
