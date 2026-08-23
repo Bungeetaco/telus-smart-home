@@ -15,7 +15,7 @@ TELUS doesn't publish an API, and their portal logs in through TELUS's own SSO/O
 
 - **The whole security panel as HA entities** — arm and disarm, lock and unlock, and read every door, motion, and glass-break sensor natively.
 - **Live camera video** — cameras show up as ordinary HA camera entities. Behind the scenes a bridge translates Alarm.com's proprietary WebRTC into plain RTSP that HA (and its bundled go2rtc) can play. There's nothing to wire up by hand; the integration reads the stream URLs, password included, from the bridge.
-- **Two-way audio ("talkdown")** — speak through the doorbell's speaker from HA: a text-to-speech phrase, or any audio clip you point it at, via a `telus_smarthome.speak` service. It's off by default and you turn it on explicitly. See [Two-way audio](#two-way-audio-talkdown) below.
+- **Two-way audio ("talkdown")** — speak through the doorbell's speaker from HA: a text-to-speech phrase, or any audio clip you point it at, via a `telus_smarthome.speak` service, and stop it early with `telus_smarthome.stop_speaking`. See [Two-way audio](#two-way-audio-talkdown) below.
 - **Credentials that stay in sync** — change your TELUS password once, in HA's Reconfigure flow, and both the integration and the separate bridge process pick it up. No more silently-stale bridge login after a password change.
 - **Cameras that heal themselves** — Alarm.com force-closes a video session about every three minutes. The bridge rotates ahead of that so viewers see at most a brief freeze, notices dead sessions on its own, and restarts cleanly if one truly wedges — with a guard that keeps an *upstream* outage from turning into a restart loop.
 - **An Auth Health sensor** so you can see login/session state in HA instead of digging through logs.
@@ -55,7 +55,9 @@ data:
   # entity_id: camera.front_door
 ```
 
-It's **off until you enable it** (`TALKDOWN_ENABLED` on the bridge), since it opens a real audio session to the device. Long clips are safe: the doorbell's audio session is short-lived and per-session, so if one expires mid-clip the bridge transparently opens a fresh one and picks up exactly where it left off. The audio is band-limited and level-managed for a small doorbell speaker, so music and speech come through cleanly rather than clipping. The mechanism was reverse-engineered against an ADC-VDB750 doorbell; the full protocol and how to turn it on are in [docs/talkdown-fullduplex-protocol.md](docs/talkdown-fullduplex-protocol.md) and [docs/talkdown-DEPLOY.md](docs/talkdown-DEPLOY.md).
+To cut a clip short (a long piece of music, say), call `telus_smarthome.stop_speaking` — it stops within a few tens of milliseconds, and doing it when nothing is playing is harmless.
+
+It's **on by default** — nothing ever speaks on its own, it only plays what you ask it to; set `TALKDOWN_ENABLED=false` on the bridge to disable the endpoint entirely. Long clips are safe: the doorbell's audio session is short-lived and per-session, so if one expires mid-clip the bridge transparently opens a fresh one and picks up exactly where it left off. The audio is band-limited and level-managed for a small doorbell speaker, so music and speech come through cleanly rather than clipping. The mechanism was reverse-engineered against an ADC-VDB750 doorbell; the full protocol and how to turn it on are in [docs/talkdown-fullduplex-protocol.md](docs/talkdown-fullduplex-protocol.md) and [docs/talkdown-DEPLOY.md](docs/talkdown-DEPLOY.md).
 
 ## Documentation
 

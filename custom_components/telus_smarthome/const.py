@@ -152,12 +152,19 @@ CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{ca
 # camera's speaker via the bridge's two-way-audio endpoint -- {camera_id} is
 # str.format()'d in. POST; body is JSON {"audio_url": ...} (HA renders TTS to a
 # loopback media-source URL and hands it to the bridge to fetch). Off by default
-# on the bridge side (config.TALKDOWN_ENABLED) -- returns 403 until enabled. See
+# on the bridge side (config.TALKDOWN_ENABLED, on by default) -- 403 if disabled. See
 # camera-bridge/bridge/control_server.py for the response shape and speak_service.py.
 CAMERA_BRIDGE_TALK_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{camera_id}/talk"
 
-# telus_smarthome.speak service name (registered in __init__.py via speak_service.py).
+# Stops the talk currently playing on one camera -- {camera_id} is str.format()'d
+# in. POST, empty body. The in-flight talk ends at the next chunk boundary and
+# its own call returns partial stats. 404 when nothing is playing.
+CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/talk/stop")
+
+# telus_smarthome service names (registered in __init__.py via speak_service.py).
 SERVICE_SPEAK = "speak"
+SERVICE_STOP_SPEAKING = "stop_speaking"
 
 # Recent video clip events across all cameras -- see
 # camera-bridge/bridge/control_server.py for the response shape.

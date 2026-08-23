@@ -91,6 +91,10 @@ class TalkManager:
         # session, every concurrent trigger is rejected (TalkInProgress) rather
         # than queued, so we never build a backlog of stale talk sessions.
         self._camera_locks: dict[str, asyncio.Lock] = {}
+        # Stop signal for the talk currently in flight on a camera, if any.
+        # Present only while a talk is running (see speak/stop), so membership
+        # doubles as "is a talk in flight for this camera".
+        self._stop_events: dict[str, asyncio.Event] = {}
 
     def _lock_for(self, camera_id: str) -> asyncio.Lock:
         return self._camera_locks.setdefault(camera_id, asyncio.Lock())
@@ -114,29 +118,56 @@ class TalkManager:
             raise TalkInProgress(camera_id)
 
         async with cam_lock:
-            audio_bytes = await self._resolve_audio(audio_url, audio_path)
-            # Full-duplex (chunked Digest mu-law PUT to the doorbell's own
-            # /api/PutAudioStream) is the ONLY working talk path for the
-            # ADC-VDB750, which exposes no <webrtc>/<srtp> upstream endpoint.
-            # Try it first when the device advertises upstream audio; fall
-            # back to the webrtc/srtp endpoint path for other ADC cameras.
-            if c.TALK_PREFER_FULL_DUPLEX:
-                doorbell = await self._resolve_doorbell(camera_id)
-                if doorbell is not None:
-                    # No fixed session cap for the full-duplex path: the
-                    # transport bounds itself by the AUDIO length (see
-                    # talk_fullduplex), so a 10-min clip plays in full. The MWS
-                    # auth/start/end steps are each bounded inside
-                    # _run_full_duplex; the doorbell imposes no session limit
-                    # we've observed.
-                    return await self._run_full_duplex(
-                        camera_id, doorbell, audio_bytes, codec=codec,
-                        audio_filter=audio_filter)
-            endpoint = await self._resolve_endpoint(camera_id)
-            return await asyncio.wait_for(
-                self._run_talk(endpoint, audio_bytes),
-                timeout=c.TALK_SESSION_TIMEOUT_S,
-            )
+            stop_event = asyncio.Event()
+            self._stop_events[camera_id] = stop_event
+            try:
+                return await self._speak_locked(
+                    camera_id, stop_event, audio_url=audio_url,
+                    audio_path=audio_path, codec=codec, audio_filter=audio_filter)
+            finally:
+                self._stop_events.pop(camera_id, None)
+
+    def stop(self, camera_id: str) -> bool:
+        """Ask the talk in flight on this camera to stop.
+
+        Returns True if one was running (the stream ends at the next chunk
+        boundary, <=40ms, and its POST returns partial stats), False if there was
+        nothing to stop. Signalling rather than cancelling keeps the MWS teardown
+        (EndLiveStream) on its normal path."""
+        event = self._stop_events.get(camera_id)
+        if event is None:
+            return False
+        log.info("talkdown: stop requested for %s", camera_id)
+        event.set()
+        return True
+
+    async def _speak_locked(self, camera_id: str, stop_event: asyncio.Event, *,
+                            audio_url: str | None, audio_path: str | None,
+                            codec: str | None, audio_filter: str | None) -> dict:
+        """The body of speak(), with the per-camera lock already held."""
+        audio_bytes = await self._resolve_audio(audio_url, audio_path)
+        # Full-duplex (chunked Digest mu-law PUT to the doorbell's own
+        # /api/PutAudioStream) is the ONLY working talk path for the
+        # ADC-VDB750, which exposes no <webrtc>/<srtp> upstream endpoint.
+        # Try it first when the device advertises upstream audio; fall
+        # back to the webrtc/srtp endpoint path for other ADC cameras.
+        if c.TALK_PREFER_FULL_DUPLEX:
+            doorbell = await self._resolve_doorbell(camera_id)
+            if doorbell is not None:
+                # No fixed session cap for the full-duplex path: the
+                # transport bounds itself by the AUDIO length (see
+                # talk_fullduplex), so a 10-min clip plays in full. The MWS
+                # auth/start/end steps are each bounded inside
+                # _run_full_duplex; the doorbell imposes no session limit
+                # we've observed.
+                return await self._run_full_duplex(
+                    camera_id, doorbell, audio_bytes, codec=codec,
+                    audio_filter=audio_filter, stop_event=stop_event)
+        endpoint = await self._resolve_endpoint(camera_id)
+        return await asyncio.wait_for(
+            self._run_talk(endpoint, audio_bytes),
+            timeout=c.TALK_SESSION_TIMEOUT_S,
+        )
 
     # ---- audio ingest -------------------------------------------------------
     async def _resolve_audio(self, audio_url: str | None,
@@ -339,7 +370,8 @@ class TalkManager:
 
     async def _run_full_duplex(self, camera_id: str, doorbell: dict,
                                audio_bytes: bytes, *, codec: str | None = None,
-                               audio_filter: str | None = None) -> dict:
+                               audio_filter: str | None = None,
+                               stop_event: "asyncio.Event | None" = None) -> dict:
         """StartFullDuplex -> chunked Digest mu-law PUT -> EndLiveStream.
 
         Modular: audio_bytes is any transcodable clip (TTS, music, ...);
@@ -355,6 +387,13 @@ class TalkManager:
             raise NoUpstreamAudio(
                 f"doorbell {doorbell.get('global_device_id')} has no usable "
                 f"PutAudioStream URL / stream password")
+
+        if stop_event is not None and stop_event.is_set():
+            # Stopped during discovery -- don't open a session just to close it.
+            log.info("talkdown: stopped before the session was armed")
+            return {"path": "full_duplex", "codec": codec or c.TALK_CODEC,
+                    "chunks": 0, "bytes": 0, "seconds": 0.0, "played_seconds": 0.0,
+                    "renegotiations": 0, "stopped": True}
 
         ack = await asyncio.wait_for(
             start_full_duplex(
@@ -445,7 +484,7 @@ class TalkManager:
                     return await talk_fullduplex.stream_talkdown(
                         put_url, password, tmp_path, username=username, codec=cc,
                         audio_filter=audio_filter, renegotiate=_renegotiate,
-                        session_deadline=session_deadline)
+                        session_deadline=session_deadline, stop_event=stop_event)
                 except talk_fullduplex.TalkdownError as e:
                     last_err = e
                     more = i + 1 < len(attempts)

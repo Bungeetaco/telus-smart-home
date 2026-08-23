@@ -19,6 +19,8 @@ Scenarios:
                 config.TALK_MAX_RENEGOTIATIONS swaps rather than looping.
   3. opt-in   -- with no renegotiate callback, a mid-stream failure stays fatal,
                 so callers that don't opt in see no behaviour change.
+  4. stop     -- setting the stop event mid-clip ends the stream promptly, at a
+                chunk boundary, reporting partial stats rather than raising.
 """
 import asyncio
 import hashlib
@@ -193,11 +195,45 @@ async def test_bounded_and_opt_in(tmp):
         await runner.cleanup()
 
 
+async def test_stop(tmp):
+    """A stop event ends the stream promptly, with partial stats and no error."""
+    doorbell = FakeDoorbell({"s1": "pw"})          # healthy: only the stop ends it
+    runner = await _serve(doorbell, 8773)
+    src = await _make_clip(f"{tmp}/stop.wav", seconds=20)
+    stop_event = asyncio.Event()
+
+    async def stop_soon():
+        # Let a little audio through, then ask it to stop. Real time, because the
+        # transport paces to real time here (pace=True) exactly as in production.
+        await asyncio.sleep(1.0)
+        stop_event.set()
+
+    try:
+        asyncio.get_running_loop().create_task(stop_soon())
+        started = asyncio.get_running_loop().time()
+        result = await tf.stream_talkdown(
+            "http://127.0.0.1:8773/s1", "pw", src, username=USER, codec="mulaw",
+            audio_filter="", pace=True, stop_event=stop_event)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert result["stopped"] is True, result
+        assert 0 < result["bytes"] < len(await tf._encode(src, "mulaw", "")), (
+            f"expected a partial stream, got {result['bytes']} bytes")
+        # Must react at a chunk boundary, not play out the remaining ~19s.
+        assert elapsed < 5, f"stop took {elapsed:.1f}s -- should be near-immediate"
+        assert result["played_seconds"] < result["seconds"], result
+        print(f"  ok  stop: ended {elapsed:.2f}s in after "
+              f"{result['played_seconds']}s of {result['seconds']}s audio "
+              f"({result['bytes']} bytes), no exception")
+    finally:
+        await runner.cleanup()
+
+
 async def main():
     import tempfile
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
-        for test in (test_resume, test_bounded_and_opt_in):
+        for test in (test_resume, test_bounded_and_opt_in, test_stop):
             try:
                 await test(tmp)
             except AssertionError as exc:

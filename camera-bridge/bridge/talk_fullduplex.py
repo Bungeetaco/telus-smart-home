@@ -99,7 +99,8 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                           username: str = DIGEST_USER, codec: str = DEFAULT_CODEC,
                           audio_filter: str | None = None,
                           pace: bool = True, timeout_s: float | None = None,
-                          renegotiate=None, session_deadline: float | None = None) -> dict:
+                          renegotiate=None, session_deadline: float | None = None,
+                          stop_event: "asyncio.Event | None" = None) -> dict:
     """Play `audio_source` through the doorbell speaker via chunked Digest PUT.
 
     put_url  -- the PutAudioStream endpoint (duae/luae for LAN, puae/uae for WAN)
@@ -111,6 +112,10 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                    connection drops), the transport calls this and RESUMES FROM THE
                    EXACT BYTE OFFSET it reached, so no audio is lost or repeated.
                    Bounded by config.TALK_MAX_RENEGOTIATIONS.
+    stop_event  -- optional asyncio.Event; when set, the stream stops cleanly at
+                   the next chunk boundary (<=40ms) and returns partial stats with
+                   "stopped": True. An event rather than task cancellation, so the
+                   MWS teardown in the caller's finally still runs normally.
     session_deadline -- optional time.monotonic() value at which the current
                    session is known to expire. When given, the transport swaps
                    PROACTIVELY (config.TALK_RENEGOTIATE_MARGIN_S ahead) instead of
@@ -149,6 +154,7 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
     sent = 0
     chunks = 0
     renegotiations = 0
+    stopped = False
     off = 0          # byte offset into the encoded audio -- survives renegotiation
     idx = 0          # chunks sent overall, drives the pacing schedule
     start = time.monotonic()
@@ -190,6 +196,9 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
 
             try:
                 while off < total:
+                    if stop_event is not None and stop_event.is_set():
+                        stopped = True
+                        break
                     if time.monotonic() > deadline:
                         raise _DeadlineExceeded(
                             f"talkdown exceeded safety deadline after {chunks} chunks")
@@ -231,7 +240,7 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                 log.warning("talkdown: session failed at %d/%d chunks (%s); renegotiating",
                             chunks, total_chunks, err)
 
-        if off >= total:
+        if stopped or off >= total:
             break
 
         # ---- renegotiate: a fresh session, then resume at the SAME byte offset ----
@@ -256,9 +265,12 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
         log.info("talkdown: renegotiated in %.1fs (#%d), resuming at %d/%d chunks to %s",
                  swap_s, renegotiations, chunks, total_chunks, urlsplit(put_url).netloc)
 
-    log.info("talkdown: streamed %d chunks / %d bytes %s (audio %.1fs, %d renegotiation(s)) to %s",
-             chunks, sent, spec["label"], expected_s, renegotiations,
-             urlsplit(put_url).netloc)
+    played_s = sent / bytes_per_s
+    log.info("talkdown: %s %d chunks / %d bytes %s (played %.1fs of %.1fs, "
+             "%d renegotiation(s)) to %s",
+             "STOPPED after" if stopped else "streamed", chunks, sent, spec["label"],
+             played_s, expected_s, renegotiations, urlsplit(put_url).netloc)
     return {"path": "full_duplex", "codec": codec, "chunks": chunks,
             "bytes": sent, "seconds": round(expected_s, 1),
-            "renegotiations": renegotiations}
+            "played_seconds": round(played_s, 1),
+            "renegotiations": renegotiations, "stopped": stopped}
