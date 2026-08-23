@@ -247,6 +247,24 @@ TALKDOWN_ENABLED = os.environ.get("TALKDOWN_ENABLED", "false").strip().lower() i
     "1", "true", "yes", "on")
 # Prefer the <webrtc> endpoint (aiortc, clean sendrecv Opus) over <srtp> (ffmpeg).
 TALK_PREFER_WEBRTC = True
+# --- Full-duplex talkdown (ADC-VDB750 doorbell) ----------------------------
+# The VDB750 returns ONLY an <rtsp> (video + listen) endpoint from
+# GetLiveVideoStream -- no <webrtc>/<srtp>. Its upstream ("talkdown") audio
+# path is instead a chunked HTTP PUT of G.711 mu-law / 8 kHz / mono to the
+# doorbell's own /api/PutAudioStream endpoint, HTTP-Digest-authed as user
+# "vieweruser" with the per-session stream password. Discovery
+# (GetDoorbellCameraList) + activation (StartFullDuplex) live in mws_client;
+# the PUT transport is talk_fullduplex.py. This is the ONLY working talk path
+# for THIS doorbell (proven end-to-end against a real capture); webrtc/srtp
+# stay for other/newer ADC cameras. Prefer this path when the device
+# advertises upstream audio (susa=true).
+TALK_PREFER_FULL_DUPLEX = True
+# Order to try the PutAudioStream endpoint variants. The bridge shares the
+# doorbell LAN (VLAN 38), so the DIRECT/LOCAL LAN URL (duae/luae) is fastest
+# and relay-free; public (puae) then cloud relay (uae, which carries a
+# ?camera_id= routing token) are WAN fallbacks. Values are
+# parse_doorbell_camera_list put_urls keys.
+TALK_PUT_ENDPOINT_ORDER = ("direct", "local", "public", "cloud")
 # Bound on GetLiveVideoStream so a wedged MWS call fails the one request instead
 # of pinning the per-camera talk lock.
 TALK_STREAM_LOOKUP_TIMEOUT_S = 20

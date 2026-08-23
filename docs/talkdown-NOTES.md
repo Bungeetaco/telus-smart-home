@@ -1,4 +1,22 @@
-# Talkdown branch — review fixes applied (feature/doorbell-talkdown)
+# Talkdown branch notes (feature/doorbell-talkdown)
+
+> **UPDATE 2026-08-23 — protocol CONFIRMED, feature wired & inert.** The
+> ADC-VDB750 doorbell uses the **full-duplex HTTP-PUT** talk path, not
+> webrtc/srtp (it returns only an `<rtsp>` endpoint). The full mechanism
+> — GetDoorbellCameraList - StartFullDuplex - Digest mu-law PUT -
+> EndLiveStream — is confirmed against a real capture and documented in
+> **`docs/talkdown-fullduplex-protocol.md`** (read that first). New code:
+> `talk_fullduplex.py` (PUT transport) + `mws_client` full-duplex functions
+> (`get_doorbell_endpoints`/`start_full_duplex`/`end_live_stream` +
+> `parse_doorbell_camera_list`, unit-tested against the capture) + `talk.py`
+> orchestration (full-duplex primary, webrtc/srtp fallback for other cams).
+> The endpoint is modular (plays any audio: TTS, WAV, MP3). Still INERT
+> (`TALKDOWN_ENABLED` defaults false); deploy/live-test held for explicit go
+> (see `docs/talkdown-DEPLOY.md`). The `webrtc/srtp` fix log below is retained
+> for history but those modules do not run for this doorbell.
+
+---
+
 
 Status: **library groundwork only**. The four transport/auth modules
 (`mobile_auth.py`, `mws_client.py`, `talk_webrtc.py`, `talk_srtp.py`) still have

@@ -333,3 +333,225 @@ def parse_live_video_stream(xml: str) -> dict:
             })
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# Full-duplex talkdown (ADC-VDB750 doorbell)
+# ---------------------------------------------------------------------------
+# The VDB750 exposes NO <webrtc>/<srtp> upstream-audio endpoint (GetLiveVideoStream
+# returns only <rtsp>, video + listen). Its talkdown path, recovered end-to-end
+# from a real capture (specs/fullduplex_talkdown.md), is:
+#
+#   1. GetDoorbellCameraList -> <gdclr><dcl><cli ...>. The <cli> element already
+#      carries, per doorbell, the ready-to-use per-session upstream-audio PUT URLs
+#      (uae=cloud, duae/luae=direct/LAN, puae=public/WAN), the matching downstream
+#      RTSP URLs (re/dre/lre/pre), and the Digest credentials for them: user attr
+#      `l` ("vieweruser") + password attr `p`. Also did/UnitId, susa (supports
+#      upstream audio), sdsa, sfd (supports full duplex), StreamProtocol, sid, and
+#      cstet (session expiry). The port is ephemeral/per-session.
+#   2. StartFullDuplex&DeviceId=<did> -> <sfdr ts=0 s=true .../> arms the mic-input
+#      path. (ts==0 AND s=="true" == success.)
+#   3. Chunked HTTP-Digest PUT of G.711 mu-law/8k/mono to the chosen PutAudioStream
+#      URL (talk_fullduplex.stream_talkdown) -- NOT in this module.
+#   4. EndLiveStream&DeviceId=<did>&ForDevice=0 -> <elsr ts=0 s=true .../> teardown.
+#
+# These are BaseTokenRequests carrying the same device/token envelope every MWS
+# action uses (see get_live_video_stream). Confirmed attribute names/nesting from
+# the capture -- no more live probing needed for the protocol itself.
+
+# MWS DeviceId of the doorbell for the full-duplex actions. The authoritative did
+# is read from the <cli> element; this is only a fallback default.
+DOORBELL_DEVICE_ID = 2048
+
+
+def _base_token_form(action, session_token, *, customer_id=None,
+                     mobile_device_uid=None, seamless_login_token=None, **extra):
+    """Assemble the BaseTokenRequest envelope shared by every MWS token action.
+
+    Mirrors get_live_video_stream exactly: the full app device envelope
+    (_device_fields, which includes Haiku/ApplicationBuildNumber) when a device
+    uid is threaded through, else the minimal Haiku/build fallback; then Action +
+    SessionToken + ForceServerError, optional CustomerId/SeamlessLoginToken, and
+    any per-action ``extra`` params (None-valued extras are dropped)."""
+    if mobile_device_uid:
+        form = _device_fields(mobile_device_uid)
+    else:
+        form = {"Haiku": HAIKU, "ApplicationBuildNumber": APP_BUILD,
+                "UseNewSessionManager": "true"}
+    form.update({
+        "Action": action,
+        "SessionToken": session_token,
+        "ForceServerError": "false",
+    })
+    if customer_id is not None:
+        form["CustomerId"] = str(customer_id)
+    if seamless_login_token:
+        form["SeamlessLoginToken"] = seamless_login_token
+    for k, v in extra.items():
+        if v is not None:
+            form[k] = v
+    return form
+
+
+async def _post_mws(session, form):
+    """POST a form-urlencoded MWS action and return the (gunzipped) body text.
+    Funnels 429s into telus_auth.RateLimited exactly like get_live_video_stream."""
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    async with session.post(MWS_URL, data=form, headers=headers) as resp:
+        _raise_if_rate_limited(resp)
+        resp.raise_for_status()
+        return _read_body_text(await resp.read())
+
+
+def parse_doorbell_camera_list(xml):
+    """Parse a GetDoorbellCameraList <gdclr> response into a plain dict.
+
+    Pure function -- no I/O. Returns::
+
+        {"token_status": int, "ok": bool, "error": str|None,
+         "doorbells": [ {...}, ... ]}
+
+    Each doorbell dict (one per <cli>) carries::
+
+        did, unit_id, global_device_id ("<unit>-<did>"), model, name (cd),
+        stream_user (l), stream_password (p),      # Digest creds for PutAudioStream
+        put_urls  {"cloud":uae, "direct":duae, "local":luae, "public":puae},
+        rtsp_urls {"cloud":re,  "direct":dre,  "local":lre,  "public":pre},
+        supports_upstream_audio (susa: bool), supports_downstream_audio (sdsa),
+        supports_full_duplex (sfd: bool), stream_protocol (int),
+        session_id (sid), expires (cstet)
+
+    Blank ("") URL/credential attributes normalise to None. Namespace-tolerant.
+    """
+    root = ET.fromstring(xml)
+    gdclr = root if _local(root.tag) == "gdclr" else None
+    if gdclr is None:
+        for el in root.iter():
+            if _local(el.tag) == "gdclr":
+                gdclr = el
+                break
+    if gdclr is None:
+        raise ValueError("no <gdclr> element in GetDoorbellCameraList response")
+
+    ts = _int(gdclr, "ts", _int(gdclr, "TokenStatus", 3))
+    out = {
+        "token_status": ts,
+        "ok": ts == TOKEN_STATUS_OK,
+        "error": (_attr(gdclr, "em") or _attr(gdclr, "e") or None),
+        "doorbells": [],
+    }
+
+    for cli in gdclr.iter():
+        if _local(cli.tag) != "cli":
+            continue
+
+        def a(name):  # non-empty attribute or None
+            v = _attr(cli, name)
+            return v if v else None
+
+        did = a("did")
+        unit = a("UnitId")
+        out["doorbells"].append({
+            "did": did,
+            "unit_id": unit,
+            "global_device_id": (f"{unit}-{did}" if unit and did else did),
+            "model": a("model"),
+            "name": a("cd"),
+            "stream_user": a("l"),
+            "stream_password": a("p"),
+            "put_urls": {
+                "cloud": a("uae"),
+                "direct": a("duae"),
+                "local": a("luae"),
+                "public": a("puae"),
+            },
+            "rtsp_urls": {
+                "cloud": a("re"),
+                "direct": a("dre"),
+                "local": a("lre"),
+                "public": a("pre"),
+            },
+            "supports_upstream_audio": _attr(cli, "susa", "false") == "true",
+            "supports_downstream_audio": _attr(cli, "sdsa", "false") == "true",
+            "supports_full_duplex": _attr(cli, "sfd", "false") == "true",
+            "stream_protocol": _int(cli, "StreamProtocol", -1),
+            "session_id": a("sid"),
+            "expires": a("cstet"),
+        })
+
+    return out
+
+
+def _parse_action_ack(xml, root_name):
+    """Parse a StartFullDuplex/EndLiveStream/EndFullDuplex ack.
+
+    Both <sfdr>/<elsr>/<efdr> carry ``ts`` (TokenStatus) and ``s`` (success
+    "true"/"false"). Returns {"token_status", "ok", "success", "error"}; ok means
+    ts==0 AND s==true. A missing root is reported (ok False) rather than raised so
+    a best-effort teardown never masks the real error with a parse crash."""
+    root = ET.fromstring(xml)
+    el = root if _local(root.tag) == root_name else None
+    if el is None:
+        for x in root.iter():
+            if _local(x.tag) == root_name:
+                el = x
+                break
+    if el is None:
+        return {"token_status": None, "ok": False, "success": False,
+                "error": f"no <{root_name}> in response"}
+    ts = _int(el, "ts", _int(el, "TokenStatus", 3))
+    success = _attr(el, "s", "false") == "true"
+    return {
+        "token_status": ts,
+        "ok": ts == TOKEN_STATUS_OK and success,
+        "success": success,
+        "error": (_attr(el, "em") or _attr(el, "e") or None),
+    }
+
+
+async def get_doorbell_endpoints(session, session_token, *, customer_id=None,
+                                 mobile_device_uid=None, seamless_login_token=None,
+                                 max_height=1440, max_width=1440):
+    """POST GetDoorbellCameraList and return parse_doorbell_camera_list's dict.
+
+    The camera item it returns already carries the per-session PutAudioStream URLs
+    and Digest stream password -- no separate stream-open call is needed before
+    StartFullDuplex. ``session_token`` is the legacy MWS SessionToken."""
+    form = _base_token_form(
+        "GetDoorbellCameraList", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        MaxHeight=str(max_height), MaxWidth=str(max_width))
+    log.debug("GetDoorbellCameraList (SessionToken/slt/Haiku redacted)")
+    return parse_doorbell_camera_list(await _post_mws(session, form))
+
+
+async def start_full_duplex(session, session_token, device_id=DOORBELL_DEVICE_ID, *,
+                            customer_id=None, mobile_device_uid=None,
+                            seamless_login_token=None):
+    """POST StartFullDuplex&DeviceId=<device_id> to arm the doorbell mic-input
+    path. Returns the ack dict (ok == ts 0 and s true).
+
+    Opens a real full-duplex session server-side -- never call against the live
+    account without an explicit decision."""
+    form = _base_token_form(
+        "StartFullDuplex", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        DeviceId=str(device_id))
+    log.debug("StartFullDuplex DeviceId=%s (SessionToken/slt/Haiku redacted)", device_id)
+    return _parse_action_ack(await _post_mws(session, form), "sfdr")
+
+
+async def end_live_stream(session, session_token, device_id=DOORBELL_DEVICE_ID,
+                          for_device=FOR_DEVICE_DOORBELL, *, customer_id=None,
+                          mobile_device_uid=None, seamless_login_token=None):
+    """POST EndLiveStream&DeviceId=<device_id>&ForDevice=<for_device> to tear the
+    full-duplex session down. This is the teardown the app actually issues after a
+    StartFullDuplex talk (an EndFullDuplex action also exists; EndLiveStream is
+    what was captured). Best-effort: the caller runs it in a finally and tolerates
+    a non-ok result."""
+    form = _base_token_form(
+        "EndLiveStream", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        DeviceId=str(device_id), ForDevice=str(for_device))
+    log.debug("EndLiveStream DeviceId=%s (SessionToken/slt/Haiku redacted)", device_id)
+    return _parse_action_ack(await _post_mws(session, form), "elsr")

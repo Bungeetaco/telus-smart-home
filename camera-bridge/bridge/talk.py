@@ -39,12 +39,17 @@ import aiohttp
 
 from . import config as c
 from . import talk_srtp
+from . import talk_fullduplex
 from . import talk_webrtc
 from .mobile_auth import MobileSession, mint_if_stale
 from .mws_client import (
+    DOORBELL_DEVICE_ID,
     FOR_DEVICE_DOORBELL,
     TOKEN_STATUS_LOGGED_OUT,
+    end_live_stream,
+    get_doorbell_endpoints,
     get_live_video_stream,
+    start_full_duplex,
 )
 
 log = logging.getLogger(__name__)
@@ -107,6 +112,18 @@ class TalkManager:
 
         async with cam_lock:
             audio_bytes = await self._resolve_audio(audio_url, audio_path)
+            # Full-duplex (chunked Digest mu-law PUT to the doorbell's own
+            # /api/PutAudioStream) is the ONLY working talk path for the
+            # ADC-VDB750, which exposes no <webrtc>/<srtp> upstream endpoint.
+            # Try it first when the device advertises upstream audio; fall
+            # back to the webrtc/srtp endpoint path for other ADC cameras.
+            if c.TALK_PREFER_FULL_DUPLEX:
+                doorbell = await self._resolve_doorbell(camera_id)
+                if doorbell is not None:
+                    return await asyncio.wait_for(
+                        self._run_full_duplex(doorbell, audio_bytes),
+                        timeout=c.TALK_SESSION_TIMEOUT_S,
+                    )
             endpoint = await self._resolve_endpoint(camera_id)
             return await asyncio.wait_for(
                 self._run_talk(endpoint, audio_bytes),
@@ -223,6 +240,120 @@ class TalkManager:
             ),
             timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
         )
+
+    # ---- full-duplex talkdown (ADC doorbell) --------------------------------
+    async def _resolve_doorbell(self, camera_id: str) -> dict | None:
+        """Return the parsed doorbell <cli> for camera_id if it supports
+        upstream audio (the full-duplex talk path), else None so the caller
+        falls back to the webrtc/srtp endpoint path.
+
+        Mints/reuses the MWS SessionToken through the shared login_lock exactly
+        like _resolve_endpoint, re-minting once on a server-side logout."""
+        if self._mobile.session_token is None:
+            await mint_if_stale(self._mobile, self._login_lock)
+
+        result = await self._get_doorbells()
+        if not result.get("ok") and result.get("token_status") == TOKEN_STATUS_LOGGED_OUT:
+            log.info("talkdown: MWS token rejected (logged out), re-minting once")
+            self._mobile.session_token = None
+            await mint_if_stale(self._mobile, self._login_lock)
+            result = await self._get_doorbells()
+
+        if not result.get("ok"):
+            log.info("talkdown: GetDoorbellCameraList not ok (token_status=%s); "
+                     "falling back to live-stream endpoint path",
+                     result.get("token_status"))
+            return None
+
+        want = str(camera_id)
+        want_did = want.split("-")[-1]
+        for d in result.get("doorbells") or []:
+            if want in (d.get("global_device_id"), d.get("did")) or \
+                    str(d.get("did")) == want_did:
+                if not d.get("supports_upstream_audio"):
+                    log.info("talkdown: doorbell %s does not advertise upstream "
+                             "audio; falling back to live-stream path", camera_id)
+                    return None
+                return d
+        return None
+
+    async def _get_doorbells(self) -> dict:
+        # Bounded like _get_stream so a wedged MWS call fails the one request
+        # instead of pinning the per-camera lock.
+        return await asyncio.wait_for(
+            get_doorbell_endpoints(
+                self._telus.session,
+                self._mobile.session_token,
+                customer_id=self._mobile.customer_id,
+                mobile_device_uid=self._mobile.device_uid,
+                seamless_login_token=self._mobile.seamless_login_token,
+            ),
+            timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+        )
+
+    def _select_put_url(self, doorbell: dict) -> tuple[str | None, str | None]:
+        """Pick a PutAudioStream URL by TALK_PUT_ENDPOINT_ORDER (the bridge is
+        on-LAN with the doorbell, so direct/local win). Returns (kind, url)."""
+        put_urls = doorbell.get("put_urls") or {}
+        for kind in c.TALK_PUT_ENDPOINT_ORDER:
+            url = put_urls.get(kind)
+            if url:
+                return kind, url
+        return None, None
+
+    async def _run_full_duplex(self, doorbell: dict, audio_bytes: bytes) -> dict:
+        """StartFullDuplex -> chunked Digest mu-law PUT -> EndLiveStream.
+
+        Modular: audio_bytes is any transcodable clip (TTS, music, ...);
+        talk_fullduplex re-encodes it to the doorbell's mu-law/8k/mono. Every
+        exit path tears the session down -- EndLiveStream runs best-effort in a
+        finally and the spooled temp clip is always removed. Secrets (stream
+        password, SessionToken) are never logged."""
+        did = doorbell.get("did") or DOORBELL_DEVICE_ID
+        password = doorbell.get("stream_password")
+        username = doorbell.get("stream_user") or "vieweruser"
+        kind, put_url = self._select_put_url(doorbell)
+        if not put_url or not password:
+            raise NoUpstreamAudio(
+                f"doorbell {doorbell.get('global_device_id')} has no usable "
+                f"PutAudioStream URL / stream password")
+
+        ack = await asyncio.wait_for(
+            start_full_duplex(
+                self._telus.session, self._mobile.session_token, did,
+                customer_id=self._mobile.customer_id,
+                mobile_device_uid=self._mobile.device_uid,
+                seamless_login_token=self._mobile.seamless_login_token,
+            ),
+            timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+        )
+        if not ack.get("ok"):
+            raise RuntimeError(
+                f"StartFullDuplex failed: token_status={ack.get('token_status')} "
+                f"success={ack.get('success')} error={ack.get('error')!r}")
+
+        log.info("talkdown: full-duplex armed for %s via %s endpoint",
+                 doorbell.get("global_device_id"), kind)
+        tmp_path = await self._spool_temp(audio_bytes)
+        try:
+            return await talk_fullduplex.stream_talkdown(
+                put_url, password, tmp_path, username=username)
+        finally:
+            try:
+                await asyncio.wait_for(
+                    end_live_stream(
+                        self._telus.session, self._mobile.session_token, did,
+                        customer_id=self._mobile.customer_id,
+                        mobile_device_uid=self._mobile.device_uid,
+                        seamless_login_token=self._mobile.seamless_login_token,
+                    ),
+                    timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+                )
+            except Exception:
+                log.warning("talkdown: EndLiveStream teardown failed (non-fatal)",
+                            exc_info=True)
+            finally:
+                _unlink_quiet(tmp_path)
 
     # ---- transport ----------------------------------------------------------
     async def _run_talk(self, endpoint: dict, audio_bytes: bytes) -> dict:
