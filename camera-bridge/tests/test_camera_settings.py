@@ -321,6 +321,60 @@ async def test_chime_write_preserves_the_sibling_audio_object():
         assert sent["microphoneSpeakerSetting"] == before["microphoneSpeakerSetting"]
 
 
+async def test_chime_type_write_and_its_option_gate():
+    """chime_type is the style of chime the doorbell is WIRED TO, not a ringtone.
+
+    The reference doorbell publishes chimeTypeOptions [-1, 0, 1] with
+    indoorChimeTypeFeatureSupport 2, so the write is allowed and an off-list value
+    is a caller mistake (400), not a missing capability (422).
+    """
+    async with portal_at(8485) as (portal, telus):
+        before = cs._flatten(portal.docs["audio_settings"])
+        await cs.set_chime(telus, CAM, chime_type=1)
+
+        sent = portal.last("audioSettings")
+        assert sent["chimeToneSetting"]["selectedChimeType"] == 1
+        # Changing the wired-chime type must not disturb the talkdown volume.
+        assert sent["microphoneSpeakerSetting"] == before["microphoneSpeakerSetting"]
+
+        await expect_error("chime_type=9",
+                           lambda: cs.set_chime(telus, CAM, chime_type=9),
+                           unsupported=False)
+        await expect_error("chime_type='digital'",
+                           lambda: cs.set_chime(telus, CAM, chime_type="digital"),
+                           unsupported=False)
+
+
+async def test_chime_type_is_refused_when_the_camera_cannot_select_one():
+    """The type has its OWN feature enum (indoorChimeTypeFeatureSupport). A camera
+    that can toggle its chime but not choose a type must refuse the type write and
+    still accept the toggle -- conflating the two flags would offer a control that
+    silently does nothing."""
+    async with portal_at(8486) as (portal, telus):
+        chime = portal.docs["audio_settings"]["included"]
+        for res in chime:
+            attrs = res.get("attributes") or {}
+            if "indoorChimeTypeFeatureSupport" in attrs:
+                attrs["indoorChimeTypeFeatureSupport"] = 0
+
+        await expect_error("type unsupported",
+                           lambda: cs.set_chime(telus, CAM, chime_type=1),
+                           unsupported=True)
+        assert portal.writes == []
+
+        # The on/off toggle is a different feature and still works.
+        await cs.set_chime(telus, CAM, indoor_on=False)
+        assert portal.last("audioSettings")["chimeToneSetting"]["isIndoorChimeOn"] is False
+
+
+async def test_chime_write_needs_at_least_one_field():
+    """Passing nothing is a caller mistake, not a no-op that round-trips to a real
+    camera for no reason."""
+    async with portal_at(8487) as (portal, telus):
+        await expect_error("empty", lambda: cs.set_chime(telus, CAM), unsupported=False)
+        assert portal.writes == []
+
+
 async def test_video_write_reaches_the_nested_relationship():
     """The value the caller set must land inside savedVideoSetting, and the
     other inlined relationships must come back unharmed."""

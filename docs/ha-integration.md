@@ -755,6 +755,9 @@ requires.
 | **Speaker volume** | `number` | The camera reports `supports_call_volume` | Slider over the device's own `call_volume_min`–`call_volume_max` (0–10 on the doorbell), step 1, entity category *config*. Setting it POSTs `/settings/volume` and refreshes the coordinator from the response |
 | **Privacy mode** | `switch` | One per bridge-reported camera | On/off via `/privacy`. Reports **unavailable** when the camera reports no privacy support |
 | **Siren start**, **Siren stop** | `button` | Only when the bridge reports the camera has a siren **this account may manually trigger** | Each press POSTs `/siren` with `start` / `stop` |
+| **Indoor chime** | `switch` | The camera reports `supports_indoor_chime` | On/off via `/settings/chime` (`indoor_on`), entity category *config*. Also reports **unavailable** while the selected wired chime type is one the bridge flags `disables_indoor_chime` — see below |
+| **Outdoor tone** | `switch` | The camera reports `supports_outdoor_tone` | The tone the doorbell itself plays, on/off via `/settings/chime` (`outdoor_on`), entity category *config*. Its **volume** is a separate capability and has no entity — `supports_outdoor_tone_volume` is false on the reference doorbell |
+| **Wired chime type** | `select` | The camera reports `supports_chime_type` | Which kind of physical chime the doorbell is wired to — *not* a ringtone. Options come from the bridge's `chime_type_choices` (e.g. None / Mechanical / Digital); selecting one POSTs `/settings/chime` with `chime_type` |
 | **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
 | **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
 | **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
@@ -764,6 +767,37 @@ requires.
 The volume Number and the diagnostic Sensors gate on fields the settings and
 diagnostics responses document directly (`supports_call_volume`; a non-null
 `signal_strength` / `battery` / `device_status`).
+
+### The chime entities, and why the indoor switch can go unavailable
+
+The three chime entities are gated by **three separate** capability flags, which
+is easy to get wrong because they sound like one feature: `supports_indoor_chime`
+(the wired chime's on/off), `supports_chime_type` (which kind of chime it is), and
+`supports_outdoor_tone` (the speaker the doorbell has of its own). A fourth,
+`supports_outdoor_tone_volume`, is false on the reference doorbell — it can mute
+the outdoor tone but not level it — so no volume control is offered for it.
+
+The **wired chime type** is not a ringtone. It tells the doorbell what kind of
+physical chime is on the other end of its wires, and its option names come from
+the mobile API rather than being hardcoded: the website API publishes only bare
+integers. If that secondary read fails the select still works, showing the
+numbers. See [control-api.md](control-api.md#chime_type_choices--names-for-the-chime-types).
+
+Each option carries a `disables_indoor_chime` flag, and the **Indoor chime switch
+reports unavailable** when the selected type sets it — picking "no wired chime"
+leaves the toggle nothing to ring, and the alarm.com portal greys its own control
+out in the same state. Nothing in the integration hardcodes which number that is;
+the flag exists so clients do not have to know. When the labelled options are
+missing, or the current type is not among them, the switch stays available rather
+than guessing itself into unavailability.
+
+One upstream behaviour to know about, verified live: **picking the "none" chime
+type turns the indoor chime off at TELUS, and picking a real type again does not
+turn it back on.** The Indoor chime switch will therefore read *off* — not merely
+unavailable — after a round trip through "none", and has to be switched on again
+by hand. The integration does not paper over this: silently re-enabling a chime
+the user may have wanted off is a worse failure than leaving it where TELUS put
+it.
 
 The siren and privacy capabilities come from somewhere else entirely: the
 **mobile** API's `GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo`, which

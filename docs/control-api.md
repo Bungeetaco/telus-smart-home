@@ -71,7 +71,7 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/cameras/{camera_id}/settings` | bearer | All audio / image / video settings for one camera |
 | GET | `/control/cameras/{camera_id}/diagnostics` | bearer | Camera signal strength, battery, device status |
 | POST | `/control/cameras/{camera_id}/settings/volume` | bearer | Set the camera speaker (call) volume |
-| POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime / outdoor tone and its volume |
+| POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime, wired chime type, outdoor tone and its volume |
 | POST | `/control/cameras/{camera_id}/settings/image` | bearer | Set picture settings (brightness, HDR, IR, night vision, …) |
 | POST | `/control/cameras/{camera_id}/settings/video` | bearer | Set clip settings (resolution, quality, retention, pre-trigger) |
 | POST | `/control/cameras/{camera_id}/siren` | bearer | Start or stop the camera siren |
@@ -485,6 +485,11 @@ which makes it the heaviest read here; the Home Assistant side polls it every
       0,
       1
     ],
+    "chime_type_choices": [
+      {"value": -1, "label": "None", "disables_indoor_chime": true},
+      {"value": 0, "label": "Mechanical", "disables_indoor_chime": false},
+      {"value": 1, "label": "Digital", "disables_indoor_chime": false}
+    ],
     "supports_outdoor_tone": true,
     "outdoor_tone_on": true,
     "supports_outdoor_tone_volume": false,
@@ -614,9 +619,10 @@ and what the volume and chime writes return too):
 | `mic_and_speaker_on` | bool | The device's mic + speaker master toggle |
 | `supports_indoor_chime` | bool | Whether the indoor chime can be turned on/off |
 | `indoor_chime_on` | bool | Indoor chime state |
-| `supports_chime_type` | bool | Whether the indoor chime's *tone* is selectable |
-| `chime_type` | int \| null | Selected chime tone |
-| `chime_type_options` | list | The tones this device offers. Read-only here — no write route accepts `chime_type` yet |
+| `supports_chime_type` | bool | Whether the **wired chime type** is selectable — its own upstream enum (`indoorChimeTypeFeatureSupport`), not the indoor chime's on/off flag |
+| `chime_type` | int \| null | Selected wired chime type. **Not a ringtone** — it is the kind of physical chime the doorbell is wired to |
+| `chime_type_options` | list | The bare integer values this device offers, e.g. `[-1, 0, 1]` |
+| `chime_type_choices` | list | The same options **with names**: `{"value": int, "label": str, "disables_indoor_chime": bool}`. May be absent or `[]` — see below |
 | `supports_outdoor_tone` | bool | Whether the doorbell's own outdoor tone can be turned on/off |
 | `outdoor_tone_on` | bool | Outdoor tone state |
 | `supports_outdoor_tone_volume` | bool | Whether that tone's **volume** is settable — a **separate** flag, and `false` on the reference doorbell even though the tone itself toggles fine |
@@ -634,6 +640,45 @@ the tone can be switched but its volume cannot, so a `chime` write carrying
 
 The talk/call volume and the outdoor tone volume are also different things.
 **Only `call_volume` affects talkdown.**
+
+### `chime_type_choices` — names for the chime types
+
+`chime_type_options` is bare integers, because that is all the website API
+publishes; the alarm.com web portal names them with a client-side enum. The
+bridge instead asks the **mobile** API (`GetCurrentDoorbellSettings`), which
+returns the names and, more usefully, a per-option `disables_indoor_chime` flag —
+so no client has to know which number means "no wired chime" on a given model.
+On the reference doorbell:
+
+| `value` | `label` | `disables_indoor_chime` |
+| --- | --- | --- |
+| `-1` | None | `true` |
+| `0` | Mechanical | `false` |
+| `1` | Digital | `false` |
+
+Two things a caller must handle:
+
+- **It is best-effort.** It is a second upstream call, over a different API, and
+  is absent or `[]` when there is no mobile session or the read fails. Fall back
+  to `chime_type_options` and show the numbers — losing the labels must not lose
+  the control.
+- **Honour `disables_indoor_chime`.** When the selected type carries it, the
+  indoor chime toggle is meaningless (there is no wired chime to ring) and the
+  alarm.com portal disables it. Do not hardcode `-1` for this; the flag exists so
+  clients do not have to.
+
+> **Selecting the "none" type turns the indoor chime OFF upstream, and switching
+> back does not turn it on again.** Observed live: setting `chime_type` to `-1`
+> left `indoor_chime_on` false, and a later `chime_type: 0` restored the type but
+> not the toggle. TELUS does this, not the bridge — the write carries only the
+> field asked for. It follows from the same coupling `disables_indoor_chime`
+> describes, but it is a lasting state change rather than a display rule, so a
+> caller that offers the "none" option should expect to send `indoor_on: true`
+> afterwards if it wants the chime back.
+
+The option list is a property of the hardware, so the bridge caches it for an
+hour rather than re-reading it every poll. The current *selection* is not cached —
+it comes from the website settings in the same response.
 
 `image` and `video` follow the same convention: one key per field the write
 routes accept, each paired with a `supports_<field>` boolean off the matching
@@ -824,9 +869,9 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 ## `POST /control/cameras/{camera_id}/settings/chime`
 
-Sets the doorbell's chime: the indoor chime, the tone the doorbell itself plays,
-and that tone's volume. All three fields are optional and independent — send only
-what you want changed.
+Sets the doorbell's chime: the indoor chime, the wired chime type, the tone the
+doorbell itself plays, and that tone's volume. Every field is optional and
+independent — send only what you want changed.
 
 **Path parameter:** `camera_id` — must exist in the camera registry.
 
@@ -835,6 +880,7 @@ what you want changed.
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `indoor_on` | bool | no | Indoor chime on/off |
+| `chime_type` | int | no | The **wired chime type** — must be one of `chime_type_options`. Off-list is a **`400 malformed`** (the field is supported, the value just is not offered), while a device that cannot select a type at all is a `422`. Gated on `supports_chime_type`, a *different* flag from `supports_indoor_chime` |
 | `outdoor_on` | bool | no | The doorbell's own outdoor tone, on/off |
 | `outdoor_volume` | int | no | Must be within `outdoor_tone_volume_min`–`outdoor_tone_volume_max` (0–3 on the doorbell tested). Outside that range is a **`400 malformed`**, not a clamp — same rule as `volume` above. Gated on `supports_outdoor_tone_volume`, which is a *different* flag from `supports_outdoor_tone` and is `false` on the reference doorbell: `outdoor_on` works there, `outdoor_volume` is a `422` |
 
@@ -846,7 +892,8 @@ setting was applied.
 .../settings`'s `audio`).
 
 **Errors:** the shared table. `422 unsupported` names the requested field the
-device does not support (`supports_indoor_chime` / `supports_outdoor_tone`). All
+device does not support (`supports_indoor_chime` / `supports_chime_type` /
+`supports_outdoor_tone` / `supports_outdoor_tone_volume` — four separate flags). All
 requested fields are support-checked **before anything is written**, so a
 partly-unsupported request leaves the camera untouched rather than half-applied.
 

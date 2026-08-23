@@ -11,6 +11,7 @@ import aiohttp
 from homeassistant import core
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -43,6 +44,7 @@ from .const import (
     CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE,
     CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE,
     CAMERA_BRIDGE_AUTOMATIONS_URL,
+    CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE,
     CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE,
     DATA_CONTROLLER,
     DOMAIN,
@@ -112,6 +114,25 @@ async def async_setup_entry(
         return [CameraPrivacyModeSwitch(settings_coordinator, camera_id)]
 
     async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_privacy)
+
+    @core.callback
+    def _build_chime(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """The doorbell's two chime toggles, each only if this camera reports it."""
+        audio = (camera_data.get("settings") or {}).get("audio") or {}
+        # Unlike privacy above, these are gated: the two <name>FeatureSupport
+        # enums are the only thing separating a doorbell whose chime can be
+        # toggled from one that sends the identical payload and refuses the
+        # write with a 422. They are also independent of each other -- the
+        # reference doorbell reports both, but an indoor-only unit is exactly
+        # the shape the flags exist to describe.
+        entities: list[Entity] = []
+        if audio.get("supports_indoor_chime"):
+            entities.append(CameraIndoorChimeSwitch(settings_coordinator, camera_id))
+        if audio.get("supports_outdoor_tone"):
+            entities.append(CameraOutdoorToneSwitch(settings_coordinator, camera_id))
+        return entities
+
+    async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_chime)
 
 
 class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -292,6 +313,143 @@ class CameraPrivacyModeSwitch(CameraSettingsEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn privacy mode off (the camera resumes capturing)."""
         await self._async_set_privacy(False)
+
+
+class _CameraChimeToggle(CameraSettingsEntity, SwitchEntity):
+    """Shared half of the doorbell's two chime on/off toggles.
+
+    Both read one boolean out of the camera's audio settings section, are gated
+    on their own support flag, and write one field of the same chime route, so
+    the subclasses below carry nothing but those three names.
+    """
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    # Configuration, not a primary control -- the same tier as the speaker
+    # volume in number.py: how the doorbell behaves, not something a dashboard
+    # should lead with.
+    _attr_entity_category = EntityCategory.CONFIG
+
+    # Set by each subclass: the capability flag that decides whether the control
+    # exists at all, the field the current state is read from, and the field the
+    # write route expects it back under (the three are deliberately not the same
+    # name -- the bridge's read and write vocabularies differ).
+    _support_key: str
+    _state_key: str
+    _write_key: str
+
+    @property
+    def _audio(self) -> dict[str, Any]:
+        """The camera's audio settings section."""
+        return self._settings.get("audio") or {}
+
+    @property
+    def available(self) -> bool:
+        """Also unavailable if the camera stops reporting this toggle as settable."""
+        return super().available and bool(self._audio.get(self._support_key))
+
+    @property
+    def is_on(self) -> bool | None:
+        """True while the chime is enabled; None if the camera hasn't said."""
+        # `is not None`, not truthiness: False is a real answer ("chime off") and
+        # must not read as "unknown" the way a missing field does.
+        value = self._audio.get(self._state_key)
+        return bool(value) if value is not None else None
+
+    async def _async_set_chime(self, enabled: bool) -> None:
+        """Write this one field and adopt the audio section that comes back.
+
+        Only ever reached from a user toggling the entity: this makes (or stops
+        making) a real chime sound in someone's home.
+        """
+        audio = await async_bridge_post(
+            self.hass,
+            CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE.format(camera_id=self._camera_id),
+            {self._write_key: enabled},
+        )
+        # The route answers with the whole audio section re-read from the camera
+        # after the write, so adopting it beats an immediate poll -- which would
+        # cost two live TELUS round trips to learn what is already in hand. It
+        # also matters here beyond this one field: the write is a
+        # read-modify-write of the camera's whole chime config, and the chime
+        # type the select entity shows rides in the same section.
+        if audio:
+            self.coordinator.async_apply_settings_section(self._camera_id, "audio", audio)
+        else:
+            await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable the chime."""
+        await self._async_set_chime(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Silence the chime."""
+        await self._async_set_chime(False)
+
+
+class CameraIndoorChimeSwitch(_CameraChimeToggle):
+    """Whether the doorbell rings the indoor chime it is wired to."""
+
+    _support_key = "supports_indoor_chime"
+    _state_key = "indoor_chime_on"
+    _write_key = "indoor_on"
+    _attr_icon = "mdi:bell-ring"
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the indoor chime switch for one camera."""
+        super().__init__(coordinator, camera_id, "indoor_chime")
+
+    @property
+    def available(self) -> bool:
+        """Also unavailable while the selected chime type is one that disables it.
+
+        Picking the "no wired chime" type leaves nothing for this toggle to ring,
+        and the portal greys its control out; mirroring that beats offering a
+        switch whose position means nothing.
+
+        The rule is read off the chime type the camera currently reports, never
+        off a hardcoded number: the bridge carries `disables_indoor_chime` per
+        option precisely so no client has to know which value means "none" on a
+        given model. If the labelled option list is missing (it comes from a
+        secondary upstream call that can fail) or the current type isn't in it,
+        the honest answer is that we don't know -- so leave the switch usable
+        rather than guessing it into unavailability.
+        """
+        if not super().available:
+            return False
+
+        audio = self._audio
+        chime_type = audio.get("chime_type")
+        selected = next(
+            (
+                choice
+                for choice in (audio.get("chime_type_choices") or [])
+                if choice.get("value") == chime_type
+            ),
+            None,
+        )
+        if selected is None:
+            return True
+        return not selected.get("disables_indoor_chime")
+
+
+class CameraOutdoorToneSwitch(_CameraChimeToggle):
+    """Whether the doorbell plays its own tone out of its speaker.
+
+    Independent of the indoor chime: this is the sound at the door, audible to
+    whoever pressed the button, and a doorbell can be set to one, both or
+    neither. Its *volume* is a separate control behind a separate flag
+    (`supports_outdoor_tone_volume`), which the reference doorbell reports as
+    unsupported -- so no entity offers it (docs backlog E26).
+    """
+
+    _support_key = "supports_outdoor_tone"
+    _state_key = "outdoor_tone_on"
+    _write_key = "outdoor_on"
+    _attr_icon = "mdi:bullhorn-outline"
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the outdoor tone switch for one camera."""
+        super().__init__(coordinator, camera_id, "outdoor_tone")
 
 
 class ConfigOptionSwitch(ConfigBaseDevice, SwitchEntity):  # type: ignore

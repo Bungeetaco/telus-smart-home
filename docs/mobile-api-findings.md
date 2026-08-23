@@ -186,6 +186,66 @@ Constructors in the app are `(customerId, deviceId)` and
   refused there even though the action exists. The privacy switch therefore ships
   reporting *unavailable* on those cameras rather than pretending to work.
 
+## `GetCurrentDoorbellSettings` — the doorbell's own settings document **[implemented, partially]**
+
+Added 2026-08-23 while implementing the chime controls (backlog E26/E27). This one
+action returns a large settings document for a single doorbell. Request shape is
+the standard token envelope plus `DeviceId` (the bare numeric MWS id), from the
+decompiled `GetCurrentDoorbellSettingsRequest`. It answers in **XML** (root
+`<gcdsr>`), like the other reads — see the correction above.
+
+**Why this project calls it: the chime-type NAMES.** The website API publishes
+`chimeTypeOptions` as bare integers (`[-1, 0, 1]`) and leaves naming them to a
+client-side enum in the portal's JavaScript. This action sends the names, and
+better, a per-option flag saying which value means "no wired chime" on this
+model — so no mapping has to be hardcoded and kept true across camera models.
+
+Element shapes, from `SupportedChimeTypeOptionsInfoParser`:
+
+| Element | Meaning |
+| --- | --- |
+| `<scto>` → `<sctoi>` × N | the offered chime types |
+| `<ct>` | the current selection, same shape |
+| `n` | display name |
+| `v` | value (int) |
+| `sdict` | `shouldDisableIndoorChimeToggle` — true for the "none" option |
+
+Live from the reference doorbell: `-1` = **None** (`sdict="true"`), `0` =
+**Mechanical** (current), `1` = **Digital**. There is a fourth attribute `sdcds`
+whose meaning was not resolved; it is not read.
+
+**It also independently corroborates E9.** The same root element carries
+`cancontrolspeakervolume="true" speakervolume="10" speakervolumemin="0"
+speakervolumemax="10" speakervolumestep="1"`, matching the website's
+`callVolumeValue` exactly. That is the *third* mobile-API opinion on this and it
+agrees with the website against `<duav>`'s `SupportsVolumeAdjustment="false"` —
+so treat that one element as the outlier, not the website.
+
+**Root attributes worth knowing, none of them read yet** (candidates for future
+work, all read-only here):
+
+| Attribute | Meaning |
+| --- | --- |
+| `csic` / `ic` | can-set / current indoor chime — the mobile twin of `isIndoorChimeOn` |
+| `supportsoutdoorchime`, `csocl`, `ocl`, `<ocll>` | outdoor chime: supported, can-set-level, current level, and the offered levels |
+| `canturnonoffdeviceled`, `ledi`, `ledo`, `ledmn`/`ledmx` | the doorbell's LED — brightness and on/off, with no website equivalent found |
+| `cancontrolirleds`, `irledenabled` | IR LEDs (the website's `infraredSetting` covers this) |
+| `cswt`, `wt`, `wsn`, `<wtol>` | mounting wedge type, e.g. "Downward Wedge Installed" |
+| `CanSetResolutionAndQuality`, `ResolutionAndQuality`, `<ResolutionAndQualityOptionList>` | live-video resolution/quality |
+| `IsBatteryPowered`, `CanGetBatteryLevel`, `BatteryLevel` | `-1` on this mains-powered doorbell — a cleaner "no battery" signal than the website's present-and-0 `batteryLevel` |
+| `CanSetPIRSensitivity`, `PIRSensitivity`, `Max`/`MinPIRSensitivity` | PIR motion sensitivity (all 0/false here) |
+
+One discrepancy left open: the mobile document reports `ocl="3"` for the outdoor
+chime level while the website reports `outdoorToneVolumeValue: 0` for what should
+be the same thing. Both agree it is **not settable** on this device
+(`csocl="false"`, `outdoorToneVolumeFeatureSupport: 0`), so nothing depends on
+resolving it — but do not assume the two are interchangeable reads.
+
+The corresponding WRITE action (fields `ChimeType`, `IndoorChime`,
+`OutdoorChimeEnabled`, `OutdoorChimeLevel`) exists in the app and is **not** used:
+the chime writes go over the website API, which is the path this project has
+actually verified end to end.
+
 ## Not resolved by this survey
 
 Sections backed by the webview (Users/access codes, account, support) were not

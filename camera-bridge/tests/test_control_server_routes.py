@@ -255,7 +255,7 @@ async def _settings(_telus, _camera_id):
 
 @contextlib.asynccontextmanager
 async def _app(siren=None, privacy=None, settings_module=None, mint=None,
-               talk_manager=...):
+               talk_manager=..., doorbell=None):
     """A live control server with the MWS and website calls stubbed out.
 
     Yields (client, headers, calls). `siren`/`privacy` are coroutine functions
@@ -268,7 +268,7 @@ async def _app(siren=None, privacy=None, settings_module=None, mint=None,
     is never left modified for whatever runs next.
     """
     calls = {"siren": 0, "privacy": 0, "start": 0, "stop": 0, "set_privacy": 0,
-             "mint": 0}
+             "mint": 0, "doorbell": 0}
 
     async def default_siren(_sess, _tok, **_kw):
         calls["siren"] += 1
@@ -290,6 +290,10 @@ async def _app(siren=None, privacy=None, settings_module=None, mint=None,
         calls["set_privacy"] += 1
         return {"ok": True, "error": None, "token_status": None, "data": {}}
 
+    async def default_doorbell(_sess, _tok, _did, **_kw):
+        calls["doorbell"] += 1
+        return _chime_ack()
+
     async def default_mint(mobile, _lock):
         calls["mint"] += 1
         mobile.session_token = "re-minted-placeholder"
@@ -302,7 +306,8 @@ async def _app(siren=None, privacy=None, settings_module=None, mint=None,
 
     saved = {name: getattr(cs, name) for name in
              ("get_siren_devices", "get_privacy_mode_info", "start_siren",
-              "stop_siren", "set_privacy_mode", "camera_settings", "mint_if_stale")}
+              "stop_siren", "set_privacy_mode", "camera_settings", "mint_if_stale",
+              "get_doorbell_settings")}
     cs.get_siren_devices = siren or default_siren
     cs.get_privacy_mode_info = privacy or default_privacy
     cs.start_siren = start_siren
@@ -310,6 +315,7 @@ async def _app(siren=None, privacy=None, settings_module=None, mint=None,
     cs.set_privacy_mode = set_privacy_mode
     cs.camera_settings = shim
     cs.mint_if_stale = mint or default_mint
+    cs.get_doorbell_settings = doorbell or default_doorbell
 
     registry = {CAM_DENIED: {"id": CAM_DENIED}, CAM_ALLOWED: {"id": CAM_ALLOWED}}
     manager = FakeTalkManager() if talk_manager is ... else talk_manager
@@ -359,6 +365,107 @@ async def test_settings_publishes_the_keys_home_assistant_reads():
     assert allowed["audio"]["supports_call_volume"] is True
     print("  ok  /settings: publishes exactly {can_manually_trigger, active, "
           "timestamp_end} and {supported, active}, null when there is no record")
+
+
+def _chime_ack():
+    """A GetCurrentDoorbellSettings ack carrying the reference doorbell's options."""
+    return {"ok": True, "error": None, "token_status": 0,
+            "data": {"ct": {"n": "Mechanical", "v": "0", "sdict": "false"},
+                     "scto": [{"n": "None", "v": "-1", "sdict": "true"},
+                              {"n": "Mechanical", "v": "0", "sdict": "false"},
+                              {"n": "Digital", "v": "1", "sdict": "false"}]}}
+
+
+async def test_every_audio_response_carries_the_labelled_chime_choices():
+    """The read and the WRITE routes must return the same audio shape.
+
+    This is a regression test for a bug caught only in live testing. The chime
+    write echoed an audio section built by camera_settings alone, without
+    chime_type_choices -- which only handle_camera_settings added. Home Assistant
+    renders its chime-type picker from those labels and adopts the echoed section
+    after a write, so one click turned the options from
+    ["None", "Mechanical", "Digital"] into ["-1", "0", "1"] and the NEXT click
+    failed, because the label it had just displayed was no longer a valid option.
+
+    Nothing errored anywhere; the shapes simply disagreed. Asserting the two
+    routes agree is the only thing that catches that.
+    """
+    audio = {"supports_call_volume": True, "call_volume_min": 0,
+             "call_volume_max": 10, "supports_chime_type": True, "chime_type": 0,
+             "chime_type_options": [-1, 0, 1]}
+
+    async def getter(_telus, _camera_id):
+        return dict(audio)
+
+    async def set_chime(_telus, _camera_id, **_fields):
+        return dict(audio)          # exactly what camera_settings returns: no choices
+
+    shim = types.SimpleNamespace(
+        CameraSettingsError=cs.camera_settings.CameraSettingsError,
+        get_audio_settings=getter, get_image_settings=getter,
+        get_video_config=getter, get_diagnostics=getter,
+        set_call_volume=set_chime, set_chime=set_chime)
+
+    async with _app(settings_module=shim) as (client, headers, calls):
+        read = await (await client.get(
+            f"/control/cameras/{CAM_DENIED}/settings", headers=headers)).json()
+        written = await (await client.post(
+            f"/control/cameras/{CAM_DENIED}/settings/chime",
+            headers=headers, json={"chime_type": 1})).json()
+        volume = await (await client.post(
+            f"/control/cameras/{CAM_DENIED}/settings/volume",
+            headers=headers, json={"volume": 4})).json()
+
+        expected = [{"value": -1, "label": "None", "disables_indoor_chime": True},
+                    {"value": 0, "label": "Mechanical", "disables_indoor_chime": False},
+                    {"value": 1, "label": "Digital", "disables_indoor_chime": False}]
+        assert read["audio"]["chime_type_choices"] == expected, read["audio"]
+        assert written["chime_type_choices"] == expected, (
+            "the chime WRITE must echo the same audio shape the read publishes; "
+            f"got {written}")
+        assert volume["chime_type_choices"] == expected, (
+            f"the volume write echoes an audio section too: {volume}")
+
+        # Hardware, not state: the option list is cached, so three responses cost
+        # one upstream read rather than one apiece.
+        assert calls["doorbell"] == 1, (
+            f"chime options should be read once and cached, not {calls['doorbell']}x")
+
+    print("  ok  chime choices: the settings read and BOTH audio writes publish "
+          "the same labelled options, read upstream once")
+
+
+async def test_chime_choices_degrade_to_absent_without_breaking_the_section():
+    """A failed options read costs the LABELS, never the control.
+
+    They come from a second upstream over a different API. If that fails the
+    audio section must still carry supports_chime_type/chime_type/
+    chime_type_options so a caller can fall back to the bare integers.
+    """
+    audio = {"supports_chime_type": True, "chime_type": 0,
+             "chime_type_options": [-1, 0, 1]}
+
+    async def getter(_telus, _camera_id):
+        return dict(audio)
+
+    async def broken(_sess, _tok, _did, **_kw):
+        raise RuntimeError("upstream is having a day")
+
+    shim = types.SimpleNamespace(
+        CameraSettingsError=cs.camera_settings.CameraSettingsError,
+        get_audio_settings=getter, get_image_settings=getter,
+        get_video_config=getter, get_diagnostics=getter,
+        set_call_volume=getter, set_chime=getter)
+
+    async with _app(settings_module=shim, doorbell=broken) as (client, headers, _c):
+        read = await (await client.get(
+            f"/control/cameras/{CAM_DENIED}/settings", headers=headers)).json()
+
+    assert read["audio"]["chime_type_choices"] == [], read["audio"]
+    assert read["audio"]["chime_type_options"] == [-1, 0, 1], read["audio"]
+    assert read["audio"]["supports_chime_type"] is True, read["audio"]
+    print("  ok  chime choices: a failed options read empties the labels and "
+          "leaves the control intact")
 
 
 async def test_account_wide_reads_are_shared_across_cameras():
@@ -571,6 +678,8 @@ async def main():
              test_the_two_gates_err_in_opposite_directions,
              test_token_status_is_read_or_reported_absent,
              test_settings_publishes_the_keys_home_assistant_reads,
+             test_every_audio_response_carries_the_labelled_chime_choices,
+             test_chime_choices_degrade_to_absent_without_breaking_the_section,
              test_account_wide_reads_are_shared_across_cameras,
              test_a_rate_limited_read_is_held_and_does_not_sink_the_response,
              test_a_camera_that_refuses_is_never_sirened,
