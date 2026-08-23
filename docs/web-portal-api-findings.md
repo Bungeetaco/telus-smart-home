@@ -241,15 +241,25 @@ Bounds also use two spellings: **suffix** on the audio/video objects
 never as `0` — reading it as 0 would reject every negative brightness on a camera
 whose real range is `-5..5`.
 
-Option lists are a JSON array *or* an object, and the API is **not
-self-consistent about which half of the object is the settable value**:
-`selectedClipResolution` is `"1440x1440"`, a *value* of `clipResolutionOptions`
-(`{"1": "480x480", "4": "960x960", "7": "1440x1440"}`), while
-`selectedClipQuality` is `"3"`, a *key* of `clipQualityOptions`
-(`{"5": 3, "3": 2, "2": 1}`). Nothing captured disambiguates them, so
-`camera_settings._options` accepts membership in either half — that tolerates a
-wrong-half value the camera may reject, but never sends something absent from the
-mapping altogether.
+Option lists are a JSON array *or* an object — and when it is an object, **which
+half is the settable value differs per field**, in the same document, on the same
+device:
+
+| Field | Object | Settable half |
+| --- | --- | --- |
+| `selectedClipResolution` | `clipResolutionOptions` = `{"1": "480x480", "7": "1440x1440"}` | the **value** (`"1440x1440"`); the key is a resolution-class enum used to prefix a label |
+| `selectedClipQuality` | `clipQualityOptions` = `{"5": 3, "3": 2, "2": 1}` | the **key** (`"3"`); the value is a quality enum used to look up a label |
+| `selectedWebOption` | `webOptions` = `{"1440x1440": "Full High Definition (1440x1440)"}` | the **key** |
+| `selectedCameraTriggeredClipsDuration` | `cameraTriggeredClipsDurationOptions` = `{"30": "30 seconds"}` | the **key** |
+
+None of that is inferable from the payload — `selectedClipQuality` is `"3"`,
+which is *both* a key of its object and a value of it. It was settled by reading
+the portal's own dropdown builders out of its JavaScript (a public static asset;
+see the note on reading enums that way). The resolution builder pushes
+`{value: options[key]}`; the quality builder writes `props.id`, the key.
+
+`camera_settings` declares the half per field, and warns rather than guessing for
+any field that has not been resolved.
 
 ## Practical notes
 
