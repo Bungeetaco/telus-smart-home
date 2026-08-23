@@ -45,6 +45,7 @@ from .const import (
     CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE,
     CAMERA_BRIDGE_AUTOMATIONS_URL,
     CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE,
+    CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE,
     CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE,
     DATA_CONTROLLER,
     DOMAIN,
@@ -133,6 +134,22 @@ async def async_setup_entry(
         return entities
 
     async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_chime)
+
+    @core.callback
+    def _build_led(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """The status-LED switch, only for a camera that reports it can switch it."""
+        led = (camera_data.get("settings") or {}).get("led") or {}
+        # Gated like the chime toggles rather than offered unconditionally like
+        # privacy above: canturnonoffdeviceled is the only thing separating a
+        # device whose indicator light can be switched from one that publishes
+        # the identical `led` shape and refuses the write with a 422. A bridge
+        # older than the `led` section sends no section at all, which reads the
+        # same way and correctly yields no entity.
+        if not led.get("supports_enabled"):
+            return []
+        return [CameraStatusLedSwitch(settings_coordinator, camera_id)]
+
+    async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_led)
 
 
 class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -450,6 +467,84 @@ class CameraOutdoorToneSwitch(_CameraChimeToggle):
     def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
         """Initialize the outdoor tone switch for one camera."""
         super().__init__(coordinator, camera_id, "outdoor_tone")
+
+
+class CameraStatusLedSwitch(CameraSettingsEntity, SwitchEntity):
+    """The status indicator light on one bridge-served TELUS camera.
+
+    Alarm.com's portal calls this the "Camera Status LED": the small light on
+    the device's face that shows it is powered and recording. Turning it off
+    changes nothing about what the camera does, only whether it advertises
+    itself -- which is the usual reason to want it off.
+
+    It is emphatically NOT the infrared illuminator (that is `ir_led_enabled` in
+    the `image` section, a separate field behind a separate flag) and not a
+    floodlight -- the reference doorbell has none.
+
+    Shaped like _CameraChimeToggle above but deliberately not sharing it: that
+    base exists because its TWO subclasses read and write the same `audio`
+    section through the same chime route and differ only in field names. This
+    reads a different section through a different route, so sharing would mean
+    parameterizing the section and the URL onto a base with no second user for
+    either, and blurring comments that are specific to the chime read-modify-write.
+    """
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    # Same tier as the chime toggles and the speaker volume: how the device
+    # presents itself, not a control a dashboard should lead with.
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:led-on"
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the status LED switch for one camera."""
+        super().__init__(coordinator, camera_id, "status_led")
+
+    @property
+    def _led(self) -> dict[str, Any]:
+        """The camera's status-LED settings section."""
+        return self._settings.get("led") or {}
+
+    @property
+    def available(self) -> bool:
+        """Also unavailable if the camera stops reporting the LED as switchable."""
+        return super().available and bool(self._led.get("supports_enabled"))
+
+    @property
+    def is_on(self) -> bool | None:
+        """True while the status LED is lit; None if the camera hasn't said."""
+        # `is not None`, not truthiness: False is a real answer ("LED off") and
+        # must not read as "unknown" the way a missing field does.
+        value = self._led.get("enabled")
+        return bool(value) if value is not None else None
+
+    async def _async_set_enabled(self, enabled: bool) -> None:
+        """Write the on/off field and adopt the `led` section that comes back.
+
+        Only ever reached from a user toggling the entity: this turns a light on
+        a real device in someone's home on or off.
+        """
+        led = await async_bridge_post(
+            self.hass,
+            CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE.format(camera_id=self._camera_id),
+            {"enabled": enabled},
+        )
+        # The route answers with the whole `led` section re-read from the device
+        # after the write, so adopting it beats an immediate poll -- which would
+        # cost live TELUS round trips to learn what is already in hand. It also
+        # carries the brightness the number entity reads, which the write's
+        # read-modify-write may have refreshed.
+        if led:
+            self.coordinator.async_apply_settings_section(self._camera_id, "led", led)
+        else:
+            await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Light the status LED."""
+        await self._async_set_enabled(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the status LED off; the camera keeps working, it just stops showing it."""
+        await self._async_set_enabled(False)
 
 
 class ConfigOptionSwitch(ConfigBaseDevice, SwitchEntity):  # type: ignore

@@ -184,7 +184,7 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
         A camera the coordinator has since dropped is ignored.
 
         Trap: pass only a body the route documents as the refreshed section
-        (`audio`, `image`, `video`). Anything else silently replaces that
+        (`audio`, `image`, `video`, `led`). Anything else silently replaces that
         section for every entity reading it until the next poll.
         """
         data = dict(self.data or {})
@@ -382,7 +382,13 @@ class CameraSettingsEntity(CoordinatorEntity[CameraSettingsCoordinator]):
 
     @property
     def _settings(self) -> dict[str, Any]:
-        """The camera's /settings body: audio, image and video sections."""
+        """The camera's /settings body.
+
+        Sections: `audio`, `image`, `video` and `led` from the website API, plus
+        `siren` and `privacy` from the mobile one -- those two are `None` when
+        the bridge has no record rather than absent, which is not the same as
+        "the camera says no" (see docs/control-api.md).
+        """
         return self._camera_data.get("settings") or {}
 
     @property

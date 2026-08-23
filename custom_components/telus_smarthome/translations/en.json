@@ -123,6 +123,9 @@
     "number": {
       "camera_call_volume": {
         "name": "Speaker volume"
+      },
+      "camera_status_led_brightness": {
+        "name": "Status LED brightness"
       }
     },
     "switch": {
@@ -134,6 +137,9 @@
       },
       "camera_outdoor_tone": {
         "name": "Outdoor tone"
+      },
+      "camera_status_led": {
+        "name": "Status LED"
       }
     },
     "select": {

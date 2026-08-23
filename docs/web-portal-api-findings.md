@@ -50,8 +50,15 @@ back in `raw` but not yet settable.
 | --- | --- | --- |
 | `PUT /web/api/video/settings/imageSettings/{id}` | brightness, contrast, saturation, sharpness (each with min/max), HDR, image flip, max exposure, and a nested `infraredSetting` (IR LEDs, IR sensitivity, night vision) | **implemented** — `POST …/settings/image`; max exposure not modelled. No HA entity yet |
 | `PUT /web/api/video/settings/videoConfigs/{id}` | clip resolution (`480x480` / `960x960` / `1440x1440`), clip quality, alarm-clip duration, camera-triggered clip duration, pre-trigger recording, keep-clips-for-days — all of them in the **`savedVideoSetting`** relationship, not in the document's own attributes (see the wire-shape section) | **implemented** — `POST …/settings/video`; camera-triggered clip duration not modelled. No HA entity yet |
-| `PUT /web/api/video/settings/generalSettings/{id}` | general camera settings | unused |
+| `PUT /web/api/video/settings/generalSettings/{id}` | **the status LED** (`ledLightSetting`: `canTurnOnOffLedLight`, `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`, `ledBrightness`, `ledLightColor`), the doorbell's TELUS-side notification toggles (`doorbellNotificationSetting`), and solar-panel status. "General camera settings" undersold this one badly — see the note below | unused |
 | `PUT /web/api/video/devices/cameras/{id}` | camera device properties | unused |
+
+> **Do not skim `generalSettings`.** This survey originally described it as
+> "general camera settings" and nothing looked at it for months; the status-LED
+> control (backlog E32) sat in there the whole time, and a later note in the
+> mobile-API findings wrongly concluded the LED was mobile-only because the
+> website equivalent had never been opened. The lesson generalises: a vague row
+> in an endpoint inventory is an unread endpoint, not an empty one.
 
 Each `*FeatureSupport` field is an enum where `0` means unsupported and `2` means
 supported/editable — check it before offering a control, because the same payload

@@ -61,6 +61,7 @@ _SUPPORTED = 2
 _AUDIO_URL = "{base}web/api/video/settings/audioSettings/{cid}"
 _IMAGE_URL = "{base}web/api/video/settings/imageSettings/{cid}"
 _VIDEO_URL = "{base}web/api/video/settings/videoConfigs/{cid}"
+_GENERAL_URL = "{base}web/api/video/settings/generalSettings/{cid}"
 _SIGNAL_URL = "{base}web/api/video/signalStrengthInfos/{cid}"
 _BATTERY_URL = "{base}web/api/video/batteryStatusInfos/{cid}"
 _DEVSTATUS_URL = "{base}web/api/video/settings/deviceStatusInfos/{cid}"
@@ -153,6 +154,23 @@ _VIDEO_FIELDS: dict[str, _Field] = {
                                  ("preTriggerRecordingFeatureSupport",), "bool"),
 }
 
+
+# generalSettings -> ledLightSetting. This is the device's STATUS indicator light
+# (alarm.com's own UI calls it "Camera Status LED"), not the IR illuminator -- the
+# IR LEDs are `ir_led_enabled` in _IMAGE_FIELDS, a different object on a different
+# endpoint. Capability flags here are the `canX` boolean style, like imageSettings.
+#
+# The reference doorbell reports canTurnOnOffLedLight true with
+# canChangeLedBrightness false, and publishes NO bounds for ledBrightness -- so
+# brightness resolves as unsupported there and _coerce range-checks nothing. A
+# model that does support it is expected to publish its own bounds; see
+# _read_field, which reports whichever of them it finds.
+_LED_FIELDS: dict[str, _Field] = {
+    "enabled": _Field("ledLightSetting", ("isLedLightEnabled",),
+                      ("canTurnOnOffLedLight",), "bool"),
+    "brightness": _Field("ledLightSetting", ("ledBrightness",),
+                         ("canChangeLedBrightness",), "int"),
+}
 
 # --- low-level HTTP ---------------------------------------------------------
 def _raise_for_status(resp: aiohttp.ClientResponse) -> None:
@@ -295,7 +313,13 @@ def _flatten_result(response: dict | None, sent: dict) -> dict:
     if response is None:
         return sent
     flat = _flatten(response)
-    return flat or sent
+    # A document carrying nothing but id/type is an acknowledgement, not the
+    # settings -- treating it as the new state would report every field as absent
+    # and, through _parse_table, as unsupported. Falling back to what we sent is
+    # both truthful and the state we asked for.
+    if not flat or not (set(flat) - {"id", "type"}):
+        return sent
+    return flat
 
 
 def _obj(attrs: dict, container: str | None) -> dict:
@@ -784,6 +808,46 @@ async def set_video_config(telus: TelusSession, camera_id: str, **fields) -> dic
     url = _VIDEO_URL.format(base=c.TELUS_BASE, cid=camera_id)
     flat = await _apply_table(telus, url, _VIDEO_FIELDS, fields, "video")
     return _parse_table(flat, _VIDEO_FIELDS)
+
+
+# --- status LED -------------------------------------------------------------
+async def get_led_settings(telus: TelusSession, camera_id: str) -> dict:
+    """The device's status-indicator LED, from the generalSettings document.
+
+    Returns ``supports_enabled``/``enabled`` and
+    ``supports_brightness``/``brightness`` (plus ``brightness_min``/``_max`` if
+    the camera publishes them), and ``raw``.
+
+    Not to be confused with the infrared illuminator, which is `ir_led_enabled`
+    in the IMAGE settings -- a different field on a different endpoint. This one
+    is the little light that says the camera is powered/recording.
+
+    The same generalSettings document also carries the doorbell's notification
+    toggles and its solar-panel status, neither of which is modelled here; `raw`
+    holds them for anyone who wants to look.
+    """
+    url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
+    return _parse_table(_flatten(await _get_doc(telus, url)), _LED_FIELDS)
+
+
+async def set_led_settings(telus: TelusSession, camera_id: str, **fields) -> dict:
+    """Turn the status LED on/off or set its brightness; returns the read shape.
+
+    Accepted keys: ``enabled`` (bool), ``brightness`` (int).
+
+    Raises CameraSettingsError with ``unsupported=True`` when the camera reports
+    it cannot do the requested part -- the reference doorbell can toggle the LED
+    but not dim it, so ``brightness`` raises there while ``enabled`` works. Both
+    are checked before anything is written, so a partly-unsupported request
+    leaves the device untouched.
+
+    Read-modify-write like every other setter here: the PUT replaces the whole
+    generalSettings document, so the notification and solar-panel objects
+    alongside the LED are resent exactly as they were read.
+    """
+    url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
+    flat = await _apply_table(telus, url, _LED_FIELDS, fields, "LED")
+    return _parse_table(flat, _LED_FIELDS)
 
 
 # --- diagnostics ------------------------------------------------------------

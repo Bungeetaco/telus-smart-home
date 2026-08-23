@@ -227,8 +227,8 @@ CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE = "http://127.0.0.1:8199/control/au
 #
 # The bridge exposes the website API's camera-settings surface (speaker/call
 # volume, chime, image and video config), its read-only diagnostics endpoints,
-# and the mobile API's siren / privacy-mode commands. {camera_id} is
-# str.format()'d into each. See camera-bridge/bridge/control_server.py for the
+# and the mobile API's siren / privacy-mode commands and status-LED settings.
+# {camera_id} is str.format()'d into each. See camera-bridge/bridge/control_server.py for the
 # response shapes and docs/control-api.md for the error vocabulary.
 #
 # Two properties of that surface shape everything built on it here:
@@ -264,6 +264,13 @@ CAMERA_BRIDGE_CAMERA_IMAGE_URL_TEMPLATE = (
 # alarm_clip_duration. Also not yet driven by an entity.
 CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE = (
     "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/video")
+# POST, body {"enabled": bool?, "brightness": int?} -- any subset. The device's
+# own status indicator light (the mobile API's canturnonoffdeviceled / ledi /
+# ledo / ledmn / ledmx), NOT the infrared illuminator, which is ir_led_enabled
+# on the image route above. Answers with the whole refreshed `led` section, which
+# the caller folds back in rather than re-polling.
+CAMERA_BRIDGE_CAMERA_LED_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/led")
 # POST, body {"action": "start"|"stop"}. This makes a real siren sound in
 # someone's home -- only ever fired from a button press.
 CAMERA_BRIDGE_CAMERA_SIREN_URL_TEMPLATE = (
