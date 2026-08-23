@@ -55,7 +55,7 @@ data:
   # entity_id: camera.front_door
 ```
 
-It's **off until you enable it** (`TALKDOWN_ENABLED` on the bridge), since it opens a real audio session to the device. The audio is band-limited and level-managed for a small doorbell speaker, so music and speech come through cleanly rather than clipping. The mechanism was reverse-engineered against an ADC-VDB750 doorbell; the full protocol and how to turn it on are in [docs/talkdown-fullduplex-protocol.md](docs/talkdown-fullduplex-protocol.md) and [docs/talkdown-DEPLOY.md](docs/talkdown-DEPLOY.md).
+It's **off until you enable it** (`TALKDOWN_ENABLED` on the bridge), since it opens a real audio session to the device. Long clips are safe: the doorbell's audio session is short-lived and per-session, so if one expires mid-clip the bridge transparently opens a fresh one and picks up exactly where it left off. The audio is band-limited and level-managed for a small doorbell speaker, so music and speech come through cleanly rather than clipping. The mechanism was reverse-engineered against an ADC-VDB750 doorbell; the full protocol and how to turn it on are in [docs/talkdown-fullduplex-protocol.md](docs/talkdown-fullduplex-protocol.md) and [docs/talkdown-DEPLOY.md](docs/talkdown-DEPLOY.md).
 
 ## Documentation
 

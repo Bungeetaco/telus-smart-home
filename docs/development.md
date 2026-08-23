@@ -145,3 +145,20 @@ a library class rename would silently change entity IDs rather than raising;
 `mws_client.py` imports two underscore-prefixed helpers from `mobile_auth` (intra-project,
 but they should be renamed public); `pylibsrtp` is pinned though only referenced in a
 commented-out fallback (it arrives transitively via aiortc anyway).
+
+
+## Keeping the docs current
+
+Treat documentation as part of the change:
+
+- **Always update `docs/`** in the same commit as a change to behaviour,
+  configuration, deployment, or dependencies. A new setting goes in
+  [configuration.md](configuration.md); a new failure mode goes in
+  [troubleshooting.md](troubleshooting.md); a deferred idea goes in the
+  enhancement backlog (see `talkdown-fullduplex-protocol.md`) rather than being
+  lost.
+- **Update the root `README.md` when the change is user-visible** -- a new
+  capability, a changed installation step, a new requirement or limitation. Purely
+  internal refactors don't need it.
+- Keep the docs anonymized and shareable (placeholders, never real IPs, account or
+  device IDs, hostnames or secrets).

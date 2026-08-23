@@ -33,6 +33,14 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 - **Commit messages** explain the *why* and the evidence (what changed, what it fixes, how it was verified), not just *what*.
 - **Never commit secrets.** `camera-bridge/.env` and `camera-bridge/secrets.env` are gitignored and hold live credentials; the `*.example` files are the templates. Do not print, log, or commit passwords, tokens, session/stream secrets, or the control secret.
 - **Keep `docs/` shareable/anonymized.** Docs must describe the software generically and use placeholders (`<ha-host>`, `<doorbell-ip>`, `<unit-id>`, `<did>`, `<mac>`, …) — never real IPs, account/device IDs, hostnames, filesystem paths that reveal a user, or secrets. See `docs/development.md`.
+- **Documentation is part of the change, not a follow-up.** After any change that
+  alters behaviour, configuration, deployment, or the dependency set, update
+  `docs/` in the SAME commit, and update the root `README.md` when the change is
+  user-visible (a new capability, a changed setup step, a new requirement or
+  limitation). Internal refactors that a user would never notice need only the
+  `docs/` side. If a change adds a knob, it belongs in `docs/configuration.md`; a
+  new failure mode belongs in `docs/troubleshooting.md`; a deferred idea belongs
+  in the enhancement backlog rather than being dropped.
 - **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`. Bump it on every user-visible change (semver) and add a matching `git tag vX.Y.Z`. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)
