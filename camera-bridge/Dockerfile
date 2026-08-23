@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # intel-media-va-driver / mesa-va-drivers are the userspace VAAPI drivers for
 # Intel (QuickSync) and AMD GPUs respectively -- both can be installed
