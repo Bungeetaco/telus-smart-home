@@ -108,6 +108,12 @@ async def _serve(doorbell, port):
 
 
 async def _make_clip(path, seconds=12):
+    import shutil
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            "these tests require ffmpeg on PATH -- the talkdown transport shells "
+            "out to it to encode the clip (the bridge image ships it; install it "
+            "locally or in CI)")
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
         "-i", f"sine=frequency=600:duration={seconds}", "-ac", "1", "-ar", "8000",
