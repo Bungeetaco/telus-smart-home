@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # MediaMTX: single static binary, no runtime deps. Pin the version tested against this design.
-ARG MEDIAMTX_VERSION=v1.19.2
+ARG MEDIAMTX_VERSION=v1.20.1
 RUN curl -sL -o /tmp/mediamtx.tar.gz \
       https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz \
     && tar xzf /tmp/mediamtx.tar.gz -C /usr/local/bin mediamtx \
