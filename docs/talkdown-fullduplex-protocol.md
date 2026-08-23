@@ -397,8 +397,17 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   re-challenge, plus `nc` rollover safety, for very long streams.
 - **E8 Confirm playback from the ack** -- parse the doorbell's per-chunk JSON ack
   body, not just the HTTP 2xx, so a silently-dropped-but-200 case is caught.
-- **E9 Volume control** -- investigate `duav` (v/min/max, `SupportsVolumeAdjustment`
-  observed false); confirm whether talkdown volume can be set at all.
+- **E9 (ANSWERED 2026-08-23) Volume control -- it IS settable, via the WEBSITE API.**
+  The mobile `<cli>`'s `<duav>` reports `SupportsVolumeAdjustment="false"`, which is
+  misleading. `PUT /web/api/video/settings/audioSettings/{device-id}` carries
+  `microphoneSpeakerSetting.callVolumeValue` with range 0-10 and
+  `callVolumeFeatureSupport: 2` (supported), and a live browser session was observed
+  sweeping it. That is the volume talkdown plays at, making it the other half of the
+  audio-quality story alongside the conditioning chain (E-COND). The same call also
+  exposes the doorbell's own chime (`isOutdoorToneOn`, `outdoorToneVolumeValue` 0-3).
+  It uses the cookie + `ajaxrequestuniquekey` session the integration already holds.
+  Caveat: settings PUTs send the WHOLE object back, so read-modify-write.
+  See [web-portal-api-findings.md](web-portal-api-findings.md).
 
 ### Robustness / networking
 - **E10 Auto-detect LAN vs WAN reachability** to choose the PutAudioStream

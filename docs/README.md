@@ -35,6 +35,7 @@ own deployment.
 | --- | --- |
 | [alarm-com-api.md](alarm-com-api.md) | The Alarm.com backend API and the TELUS SSO login handshake (both reimplementations). |
 | [mobile-api-findings.md](mobile-api-findings.md) | Survey of mobile-app API actions this project does NOT use, and what each would enable. |
+| [web-portal-api-findings.md](web-portal-api-findings.md) | Survey of the web portal API surface (from a browser HAR) — camera settings including speaker volume, diagnostics, and other writes. |
 | [configuration.md](configuration.md) | Every configurable knob across the bridge and the integration, in one place. |
 
 ## Guides
