@@ -302,10 +302,23 @@ VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
   clip early -- a long (e.g. 10-min music) talk only ends when the audio finishes
   or the safety deadline fires. Add a cancel path (control endpoint + a
   per-camera handle that cancels the transport task and tears the session down).
-- **E3 Deploy + wire the HA integration.** Only the bridge is deployed/tested
-  live. `custom_components/telus_smarthome` (the `telus_smarthome.speak` service,
-  `services.yaml`) and the example automation are NOT yet synced to live HA or
-  tested end to end through HA. Sync + restart HA + verify the service.
+- **E3 HA integration + speak service -- DEPLOYED & VERIFIED 2026-08-23.**
+  `custom_components/telus_smarthome` v1.5.1 is live (rsynced to
+  `~/homeassistant/config/...`, HA restarted); `telus_smarthome.speak` is
+  registered and plays through the doorbell end to end via BOTH paths:
+  `media_content_id` = a direct **GLaDOS** omnivoice URL
+  (`http://127.0.0.1:7575/speak?voice=glados&text=...` -- the house voice, and it
+  bypasses HA TTS entirely) and `message` = HA cloud/Google TTS. Two things the
+  live test required: (1) a one-char fix -- the handler re-validated `call.data`
+  (a ReadOnlyDict) with voluptuous which coerces in place -> crash; fixed by
+  validating `dict(call.data)`; (2) the `message` path needs HA's `internal_url`
+  set (was None) so the bridge can fetch the absolute `/api/tts_proxy` URL -- set
+  to `http://10.13.38.2:8123` via WS `config/core/update`. All speak audio gets
+  the default conditioning. **Recommended door voice: GLaDOS via omnivoice.**
+  Still TODO: wire the actual door-greeting AUTOMATION (the example
+  `docs/talkdown-automation.yaml` is a placeholder; the real house door-greeting
+  logic lives in the omnivoice door_greeting_context state machine -- integrate
+  talkdown there rather than a standalone rule).
 
 ### Audio quality / transport
 - **E4 L16 codec -- TESTED, unsupported on THIS doorbell's PUT path (device-
