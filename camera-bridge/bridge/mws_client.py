@@ -564,3 +564,25 @@ async def end_live_stream(session, session_token, device_id=DOORBELL_DEVICE_ID,
         DeviceId=str(device_id), ForDevice=str(for_device))
     log.debug("EndLiveStream DeviceId=%s (SessionToken/slt/Haiku redacted)", device_id)
     return _parse_action_ack(await _post_mws(session, form), "elsr")
+
+
+async def end_full_duplex(session, session_token, device_id=DOORBELL_DEVICE_ID, *,
+                          customer_id=None, mobile_device_uid=None,
+                          seamless_login_token=None):
+    """POST EndFullDuplex&DeviceId=<device_id>. Returns the same ack shape as
+    end_live_stream.
+
+    The app tears a talk down with EndLiveStream (that is what was captured), and
+    that remains the primary path. This exists as a FALLBACK for the case where
+    EndLiveStream fails: leaving the doorbell's mic-input path armed is the one
+    teardown failure with a lasting effect, so it is worth a second attempt by a
+    different route rather than only a log line. Not sent on the happy path --
+    doubling every teardown would double MWS traffic against a rate-limited
+    account for no observed benefit.
+    """
+    form = _base_token_form(
+        "EndFullDuplex", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
+        DeviceId=str(device_id))
+    log.debug("EndFullDuplex DeviceId=%s (SessionToken/slt/Haiku redacted)", device_id)
+    return _parse_action_ack(await _post_mws(session, form), "efdr")

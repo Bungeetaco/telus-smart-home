@@ -398,10 +398,18 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   real webrtc/srtp-capable ADC camera; validate when such a device exists.
 
 ### Testing / observability
-- **E14 (PARTIAL) Repo unit tests** -- `camera-bridge/tests/` now exists and runs
-  in CI, covering talkdown session renegotiation. Still wanted: for the transport (`_Digest` header correctness,
-  schedule-based pacing, prebuffer) and for `parse_doorbell_camera_list` (the
-  parser was verified ad hoc against a capture but no test is committed).
+- **E14 (DONE 2026-08-23) Repo unit tests** -- `camera-bridge/tests/` runs in CI
+  and now covers the talkdown transport (renegotiation resume, the renegotiation
+  bound, opt-in behaviour, stop, conditioning), the metrics counters, and the pure
+  MWS parsers/helpers: `parse_doorbell_camera_list` (ids, credentials, all four
+  endpoint variants, capability flags, plus the no-doorbell / logged-out / wrong-root
+  edges), `_parse_action_ack` (that `ts` and `s` are BOTH required, and that a
+  teardown parse never raises), `config.parse_retry_after` (delta-seconds, HTTP-date,
+  past date, missing, garbage) and `TalkManager._session_deadline` (an implausible
+  `cstet` is ignored). These were previously verified by hand against a live
+  capture, so nothing re-checked them when a field name changed. Still open: the
+  webrtc/srtp transports have no tests, which is really E13 -- they cannot be
+  meaningfully tested without a device that uses them.
 - **E15 (DONE 2026-08-23) Metrics** -- `GET /control/metrics` exposes talkdown
   attempts, succeeded/stopped/failed/rejected, failures by stable reason label,
   endpoint and codec usage, renegotiations, seconds of audio actually played,
@@ -450,8 +458,25 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   candidate parser so the video path stops depending on library internals.
 
 ### Minor
-- **E16 Cache `GetDoorbellCameraList`** within the `cstet` window to save a round
-  trip on rapid repeat talks.
-- **E17 Also send `EndFullDuplex`** (we use `EndLiveStream`, which the app used);
-  send both for symmetry if a session is ever seen lingering.
-- **E18 Document `CHUNK_MS` / `PREBUFFER_MS`** as tunables in config comments.
+- **E16 (DONE 2026-08-23) Cache `GetDoorbellCameraList`** -- a result is reused
+  across talks for `config.TALK_DOORBELL_CACHE_TTL_S` (60 s), saving that round
+  trip on back-to-back talks (measured: 2937 ms cold vs 2597 ms warm for the same
+  clip). Safe because the session is not per-talk in practice -- the doorbell was
+  observed serving the same session port for 12+ hours across many talks -- and
+  because a stale hit self-corrects: the first PUT fails, which is exactly what
+  renegotiation (E1) handles, costing one chunk rather than an error. The cache is
+  dropped on any talk failure and at the start of every renegotiation, so a
+  session known to be bad is never handed out. `0` disables it.
+  *(Note: the original idea was to bound this by `cstet`, but that value proved
+  unreliable as an expiry -- see E1 -- so a plain TTL plus self-correction is used
+  instead.)*
+- **E17 (DONE 2026-08-23) `EndFullDuplex` as a teardown fallback** --
+  `mws_client.end_full_duplex()` exists and is called only when `EndLiveStream`
+  fails. Leaving the mic-input path armed is the one teardown failure with a
+  lasting effect, so it is worth a second attempt by a different route. It is
+  deliberately NOT sent on the happy path: doubling every teardown would double
+  MWS traffic against a rate-limited account for no observed benefit.
+- **E18 (DONE 2026-08-23) `CHUNK_MS` / `PREBUFFER_MS` are documented tunables** --
+  moved to `config.TALK_CHUNK_MS` / `config.TALK_PREBUFFER_MS` (the transport
+  references them under the short names) and documented in
+  [configuration.md](configuration.md), including the trade-off each one makes.

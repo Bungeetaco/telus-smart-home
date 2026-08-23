@@ -46,6 +46,7 @@ from . import talk_webrtc
 from .mobile_auth import MobileSession, mint_if_stale
 from .mws_client import (
     DOORBELL_DEVICE_ID,
+    end_full_duplex,
     FOR_DEVICE_DOORBELL,
     TOKEN_STATUS_LOGGED_OUT,
     end_live_stream,
@@ -123,6 +124,10 @@ class TalkManager:
         # Present only while a talk is running (see speak/stop), so membership
         # doubles as "is a talk in flight for this camera".
         self._stop_events: dict[str, asyncio.Event] = {}
+        # camera_id -> (expires_at_monotonic, doorbell dict). See
+        # config.TALK_DOORBELL_CACHE_TTL_S for why reusing a session across talks
+        # is safe here and how a stale entry self-corrects.
+        self._doorbell_cache: dict[str, tuple[float, dict]] = {}
 
     def _lock_for(self, camera_id: str) -> asyncio.Lock:
         return self._camera_locks.setdefault(camera_id, asyncio.Lock())
@@ -161,6 +166,9 @@ class TalkManager:
                     camera_id, stop_event, audio_url=audio_url,
                     audio_path=audio_path, codec=codec, audio_filter=audio_filter)
             except BaseException as err:
+                # Whatever went wrong, do not hand the next talk a session that
+                # may have been part of the problem.
+                self._doorbell_cache.pop(camera_id, None)
                 metrics.talk.failure(camera_id, _failure_reason(err),
                                      wall_s=time.monotonic() - started)
                 raise
@@ -332,6 +340,11 @@ class TalkManager:
 
         Mints/reuses the MWS SessionToken through the shared login_lock exactly
         like _resolve_endpoint, re-minting once on a server-side logout."""
+        cached = self._doorbell_cache.get(camera_id)
+        if cached and time.monotonic() < cached[0]:
+            log.debug("talkdown: reusing cached doorbell session for %s", camera_id)
+            return cached[1]
+
         if self._mobile.session_token is None:
             await mint_if_stale(self._mobile, self._login_lock)
 
@@ -357,6 +370,9 @@ class TalkManager:
                     log.info("talkdown: doorbell %s does not advertise upstream "
                              "audio; falling back to live-stream path", camera_id)
                     return None
+                if c.TALK_DOORBELL_CACHE_TTL_S > 0:
+                    self._doorbell_cache[camera_id] = (
+                        time.monotonic() + c.TALK_DOORBELL_CACHE_TTL_S, d)
                 return d
         return None
 
@@ -492,6 +508,9 @@ class TalkManager:
                           exc_info=True)
 
             # 2. fresh GetDoorbellCameraList -> new port, password and PUT URL.
+            # Drop the cache first: the session we are replacing is the one that
+            # just died, so a cache hit here would hand back the dead one.
+            self._doorbell_cache.pop(camera_id, None)
             fresh = await self._resolve_doorbell(camera_id)
             if fresh is None:
                 raise RuntimeError("doorbell no longer reports upstream audio")
@@ -548,8 +567,25 @@ class TalkManager:
                     timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
                 )
             except Exception:
-                log.warning("talkdown: EndLiveStream teardown failed (non-fatal)",
-                            exc_info=True)
+                # Leaving the mic-input path armed is the one teardown failure
+                # with a lasting effect, so try the other route before giving up.
+                log.warning("talkdown: EndLiveStream teardown failed; trying "
+                            "EndFullDuplex", exc_info=True)
+                self._doorbell_cache.pop(camera_id, None)
+                try:
+                    await asyncio.wait_for(
+                        end_full_duplex(
+                            self._telus.session, self._mobile.session_token,
+                            state["did"],
+                            customer_id=self._mobile.customer_id,
+                            mobile_device_uid=self._mobile.device_uid,
+                            seamless_login_token=self._mobile.seamless_login_token,
+                        ),
+                        timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+                    )
+                except Exception:
+                    log.warning("talkdown: EndFullDuplex fallback also failed "
+                                "(non-fatal)", exc_info=True)
             finally:
                 _unlink_quiet(tmp_path)
 

@@ -288,6 +288,28 @@ TALK_CODEC_FALLBACK = "mulaw"
 # compress the dynamics, and hard-limit below full scale (no clipping).
 # Tuned by ear on the live doorbell. Set to "" to disable (pass audio
 # through untouched, e.g. for already-conditioned sources).
+# Talkdown wire tuning. One PUT carries TALK_CHUNK_MS of audio; the transport
+# paces to that schedule, so it is both the chunk size and the granularity at
+# which a stop request takes effect. 40ms matches what the app was observed
+# sending (sizes are multiples of 10ms). Larger = fewer round trips and less
+# overhead, but coarser stop response; smaller = more HTTP requests per second
+# at the doorbell.
+TALK_CHUNK_MS = 40
+# How far ahead of real time the stream stays, so the doorbell always holds a
+# jitter buffer. Delivering chunks exactly at playback time underruns into
+# audible gaps; this lead is what makes playback continuous. Raising it costs
+# proportionally more latency before a stop is heard.
+TALK_PREBUFFER_MS = 500
+# How long a GetDoorbellCameraList result may be reused across talks, saving
+# that round trip (~0.3s of latency before audio starts) on back-to-back
+# talks. Safe because the session it carries is NOT per-talk in practice --
+# the doorbell was observed serving the same session port for 12+ hours
+# across many talks -- and because a stale hit is self-correcting: the first
+# PUT fails, which is exactly the case renegotiation handles, costing one
+# chunk instead of an error. The cache is dropped on any talk failure and on
+# every renegotiation, so a session known to be bad is never reused. Set 0 to
+# disable and fetch fresh for every talk.
+TALK_DOORBELL_CACHE_TTL_S = 60
 # Session renegotiation for a talk that outlives its stream session.
 # The doorbell's PutAudioStream URL, port and password are PER-SESSION. A long
 # clip (or a network blip) can outlive one, and the failure is mid-stream: the

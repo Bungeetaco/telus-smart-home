@@ -119,6 +119,9 @@ for the full talk mechanism.
 | `TALK_CODEC` | no (per-request override via POST `codec`) | `mulaw` | Audio codec for the full-duplex PUT path. On the VDB750 (fw 02091) the PUT path is mu-law only — L16 was tested and came out as noise, because that device decodes the body as mu-law regardless of Content-Type. A per-model/firmware limit, not project-wide; the codec plumbing is kept so a working codec can be added per device later. |
 | `TALK_CODEC_FALLBACK` | no | `mulaw` | Fallback codec if the primary fails. Currently also mu-law for the same reason. |
 | `TALK_AUDIO_FILTER` | no | see below | ffmpeg audio-conditioning filter applied to **all** talkdown audio before encoding to the doorbell codec. Set to `""` to pass audio through untouched (e.g. for already-conditioned sources). Applied to every talk path (full-duplex folds it into its encode pass; the webrtc/srtp fallback applies it up front), and overridable per request via the `audio_filter` body field. |
+| `TALK_CHUNK_MS` | no | `40` | Milliseconds of audio per PUT. Also the granularity at which a stop request takes effect. Larger = fewer round trips but coarser stop response; the value matches what the app was observed sending. |
+| `TALK_PREBUFFER_MS` | no | `500` | How far ahead of real time the stream stays, so the doorbell always holds a jitter buffer. Delivering chunks exactly at playback time underruns into audible gaps. Raising it delays how quickly a stop is heard. |
+| `TALK_DOORBELL_CACHE_TTL_S` | no | `60` | How long a `GetDoorbellCameraList` result may be reused across talks, saving that round trip (~0.3 s before audio starts) on back-to-back talks. The session it carries is not per-talk in practice, and a stale hit self-corrects via renegotiation. Dropped on any talk failure and on every renegotiation. `0` disables it. |
 
 The default `TALK_AUDIO_FILTER` is tuned by ear for the doorbell's small speaker,
 which clips and sounds harsh on raw full-range music/TTS:
