@@ -2,20 +2,20 @@
 #
 # Speaks a recorded-notice through the doorbell speaker (telus_smarthome.speak)
 # when a person stands at the front door for >= 10 continuous seconds, but never
-# for the household.
+# for known occupants.
 #
-# DWELL = 10 s. This estate credits Frigate zones by loitering_time and triggers
+# DWELL = 10 s. This deployment credits Frigate zones by loitering_time and triggers
 # HA off the frigate/events zone-entry transition (before.entered_zones ->
-# after.entered_zones), exactly like the existing frigate_doorbell_person
-# automation. The live doorbell camera has only a `front_door` zone with
-# loitering_time: 5 (see ~/frigate/config/config.yml). To get a deterministic
+# after.entered_zones), like a typical frigate doorbell-person
+# automation. If the doorbell camera has only a single door zone with
+# loitering_time: 5 (see <frigate-config>/config.yml). To get a deterministic
 # 10 s dwell without disturbing the 5 s announcement pipeline, add a SECOND,
 # co-located zone `front_door_talk` with loitering_time: 10 sharing the same
 # polygon, and trigger on IT. The zone addition + Frigate restart is a deploy
 # step -- see docs/talkdown-DEPLOY.md. (Alternative: keep only front_door and put
 # a `for: "00:00:10"` dwell on a Frigate person occupancy binary_sensor if that
 # integration is enabled; the second zone is preferred here because it matches
-# the estate's established fire-once zone-transition idiom.)
+# the deployment's established fire-once zone-transition idiom.)
 
 - id: doorbell_talkdown_deterrent
   alias: Doorbell - Talkdown deterrent
@@ -23,7 +23,7 @@
     When a person stands at the front door for >=10 continuous seconds (Frigate
     front_door_talk zone, loitering_time 10), speak a recorded notice through the
     doorbell speaker via telus_smarthome.speak. Gated on binary_sensor.recent_entry
-    being off so it never talks to the household member who just came in. Fires
+    being off so it never talks to an occupant who just came in. Fires
     once per tracked person on the zone-entry transition, same pattern as
     frigate_doorbell_person.
   triggers:
@@ -39,7 +39,7 @@
            and 'front_door_talk' in trigger.payload_json.after.entered_zones
            and 'front_door_talk' not in
                trigger.payload_json.get('before', {}).get('entered_zones', []) }}
-    # Never talk to the household: recent_entry off means nobody just came in.
+    # Never talk to occupants: recent_entry off means nobody just came in.
     - condition: state
       entity_id: binary_sensor.recent_entry
       state: "off"
@@ -47,7 +47,7 @@
     - action: telus_smarthome.speak
       # Omit entity_id to target the doorbell by default; or set it explicitly to
       # the real TELUS bridge camera entity (unique_id = the doorbell device id,
-      # 111937238-2048), e.g. entity_id: camera.doorbell
+      # <unit-id>-<did>), e.g. entity_id: camera.doorbell
       data:
         message: "Hi, you are being recorded."
         # engine: tts.google_translate   # optional; omit to use the default engine

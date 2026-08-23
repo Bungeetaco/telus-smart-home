@@ -11,7 +11,7 @@ The protocol is confirmed and the transport is built + unit-tested — see
 do **not** apply to it (they stay as a fallback for other ADC cameras).
 
 All wiring lives on branch `feature/doorbell-talkdown` in
-`~/claude/telus-smart-home`. The bridge builds its image from that working tree;
+`~/telus-smart-home`. The bridge builds its image from that working tree;
 Home Assistant runs a **separate copy** at
 `~/homeassistant/config/custom_components/telus_smarthome`, so the HA side needs
 an explicit sync. The talk endpoint is **off by default** (`TALKDOWN_ENABLED`),
@@ -27,32 +27,32 @@ Container names (live): `telus-cam-bridge`, `homeassistant`, `frigate`.
 
 ## 1. Deploy the bridge (build from the branch)
 
-The bridge image builds from `~/claude/telus-smart-home/camera-bridge`. Ensure
+The bridge image builds from `~/telus-smart-home/camera-bridge`. Ensure
 the branch is checked out (or merged to your deploy branch) first:
 
-    ssh hass 'cd ~/claude/telus-smart-home && git status --short && git rev-parse --abbrev-ref HEAD'
+    ssh <ha-host> 'cd ~/telus-smart-home && git status --short && git rev-parse --abbrev-ref HEAD'
 
 Rebuild + recreate the container:
 
-    ssh hass 'cd ~/claude/telus-smart-home/camera-bridge && docker compose up -d --build'
+    ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && docker compose up -d --build'
 
 Confirm it came up clean:
 
-    ssh hass 'sudo docker logs --tail 50 telus-cam-bridge'
-    ssh hass 'curl -s http://127.0.0.1:8199/control/health'   # -> {"status": "ok"}
+    ssh <ha-host> 'sudo docker logs --tail 50 telus-cam-bridge'
+    ssh <ha-host> 'curl -s http://127.0.0.1:8199/control/health'   # -> {"status": "ok"}
 
 At this point the talk route exists but returns 403 (`talkdown_disabled`) — that
 is expected until step 3.
 
 ## 2. Deploy the HA integration (sync the separate copy)
 
-    ssh hass 'rsync -a --delete \
-      ~/claude/telus-smart-home/custom_components/telus_smarthome/ \
+    ssh <ha-host> 'rsync -a --delete \
+      ~/telus-smart-home/custom_components/telus_smarthome/ \
       ~/homeassistant/config/custom_components/telus_smarthome/'
 
 Restart Home Assistant so `services.yaml` and `telus_smarthome.speak` register:
 
-    ssh hass 'sudo docker restart homeassistant'
+    ssh <ha-host> 'sudo docker restart homeassistant'
 
 Verify: Developer Tools > Actions > search `telus_smarthome.speak`.
 
@@ -60,11 +60,11 @@ Verify: Developer Tools > Actions > search `telus_smarthome.speak`.
 
 Set the flag (non-secret; put it in `.env`, not `secrets.env`) and recreate:
 
-    ssh hass 'cd ~/claude/telus-smart-home/camera-bridge && \
+    ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && \
       grep -q "^TALKDOWN_ENABLED=" .env && \
       sed -i "s/^TALKDOWN_ENABLED=.*/TALKDOWN_ENABLED=true/" .env || \
       echo "TALKDOWN_ENABLED=true" >> .env'
-    ssh hass 'cd ~/claude/telus-smart-home/camera-bridge && docker compose up -d'
+    ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && docker compose up -d'
 
 ## 4. Manual end-to-end test (someone should be able to hear the doorbell)
 
@@ -74,11 +74,11 @@ WAV, or an MP3 music file). ffmpeg transcodes any input to the doorbell's
 
     SECRET=$(sudo cat <control_secret_path>)   # see config.CONTROL_SECRET_PATH
     # A short WAV/TTS clip:
-    curl -s -X POST http://127.0.0.1:8199/control/cameras/111937238-2048/talk \
+    curl -s -X POST http://127.0.0.1:8199/control/cameras/<unit-id>-<did>/talk \
       -H "Authorization: Bearer $SECRET" -H "Content-Type: application/json" \
       -d '{"audio_url":"http://127.0.0.1:8123/local/test.wav"}'
     # A music file (expect lo-fi 8 kHz mono — telephone grade, not hi-fi):
-    curl -s -X POST http://127.0.0.1:8199/control/cameras/111937238-2048/talk \
+    curl -s -X POST http://127.0.0.1:8199/control/cameras/<unit-id>-<did>/talk \
       -H "Authorization: Bearer $SECRET" -H "Content-Type: application/json" \
       -d '{"audio_url":"http://127.0.0.1:8123/local/music.mp3"}'
     # -> {"path":"full_duplex","chunks":N,"bytes":M}
@@ -101,11 +101,11 @@ Troubleshooting quick map (full contract in control_server.py docstring):
 
 The talk endpoint is a generic "play this audio at the door" primitive; wire it
 to whatever you like. `docs/talkdown-automation.yaml` is **one example** (a 10 s
-Frigate-zone dwell deterrent gated on `binary_sensor.recent_entry` so it never
-greets the household). It is only a sample — do not treat its phrase/trigger as
+Frigate-zone dwell deterrent gated on a `binary_sensor` so it never
+greets known occupants). It is only a sample — do not treat its phrase/trigger as
 part of the feature. If you use it, add a co-located `front_door_talk` zone
-(same polygon as `front_door`, `loitering_time: 10`) under
-`cameras.doorbell.zones` in `~/frigate/config/config.yml`, restart Frigate, add
+(same polygon as your existing door zone, `loitering_time: 10`) under
+`cameras.<doorbell>.zones` in your Frigate `config.yml`, restart Frigate, add
 the automation, and enable it only after the manual test in step 4 plays cleanly.
 
 ---

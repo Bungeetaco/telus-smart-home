@@ -50,9 +50,9 @@ orchestration) → `control_server.py` (`POST /control/cameras/{id}/talk`).
 |---|---|
 | Model | `ADC-VDB750` (firmware `02091`) |
 | MWS `did` | `2048` |
-| `UnitId` | `111937238` |
-| Website globalDeviceId | `111937238-2048` (= `UnitId-did`) |
-| LAN IP | `10.13.38.134` (VLAN 38, same LAN as the bridge `10.13.38.2`) |
+| `UnitId` | `<unit-id>` |
+| Website globalDeviceId | `<unit-id>-<did>` (= `UnitId-did`) |
+| LAN IP | `<doorbell-ip>` (private VLAN, same LAN as the bridge `<bridge-ip>`) |
 | Capability flags | `susa=true` (upstream audio), `sdsa=true` (downstream audio), `sfd=true` (full duplex), `StreamProtocol=0` (RTSP), `SupportsWebRTC=false` |
 
 ## Step 2 — `GetDoorbellCameraList` (`<gdclr>`), the key call
@@ -72,18 +72,18 @@ Real response shape (secrets redacted; one `<cli>` per doorbell under `<dcl>`):
 ```xml
 <gdclr ts="0" s="true" ...>
   <dcl>
-    <cli model="ADC-VDB750" cd="Doorbell" did="2048" UnitId="111937238"
+    <cli model="ADC-VDB750" cd="Doorbell" did="2048" UnitId="<unit-id>"
          Firmware="02091" StreamProtocol="0" SupportsWebRTC="false"
          susa="true" sdsa="true" sfd="true"
          l="vieweruser" p="<PER-SESSION-PASSWORD>"
-         sid="<opaque>" cstet="2026-08-23T03:36:55Z"
-         re  ="rtsp://vieweruser:<PW>@videostreamna11.devicetask.com:8090/api/GetStream?streamID=0"
-         dre ="rtsp://vieweruser:<PW>@10.13.38.134:41925/api/GetStream?streamID=0"
-         lre ="rtsp://vieweruser:<PW>@10.13.38.134:41925/api/GetStream?streamID=0"
+         sid="<opaque>" cstet="<timestamp>"
+         re  ="rtsp://vieweruser:<PW>@videostreamnaNN.devicetask.com:8090/api/GetStream?streamID=0"
+         dre ="rtsp://vieweruser:<PW>@<doorbell-ip>:41925/api/GetStream?streamID=0"
+         lre ="rtsp://vieweruser:<PW>@<doorbell-ip>:41925/api/GetStream?streamID=0"
          pre ="rtsp://vieweruser:<PW>@<PUBLIC-IP>:41925/api/GetStream?streamID=0"
-         uae ="https://videostreamna11.devicetask.com:8090/api/PutAudioStream"
-         duae="https://10.13.38.134:41925/api/PutAudioStream"
-         luae="https://10.13.38.134:41925/api/PutAudioStream"
+         uae ="https://videostreamnaNN.devicetask.com:8090/api/PutAudioStream"
+         duae="https://<doorbell-ip>:41925/api/PutAudioStream"
+         luae="https://<doorbell-ip>:41925/api/PutAudioStream"
          puae="https://<PUBLIC-IP>:41925/api/PutAudioStream" />
   </dcl>
 </gdclr>
@@ -94,7 +94,7 @@ Real response shape (secrets redacted; one `<cli>` per doorbell under `<dcl>`):
 | Attr | Meaning | Used for |
 |---|---|---|
 | `did` | MWS device id (`2048`) | `StartFullDuplex`/`EndLiveStream` `DeviceId` |
-| `UnitId` | account/unit id (`111937238`) | forms `global_device_id` |
+| `UnitId` | account/unit id (`<unit-id>`) | forms `global_device_id` |
 | `l` | stream username (`vieweruser`) | HTTP Digest username |
 | `p` | **per-session stream password** | HTTP Digest password |
 | `uae` | upstream PUT URL — **cloud relay** | WAN fallback (carries `?camera_id=` when relayed) |
@@ -188,9 +188,9 @@ that already live in Home Assistant (see repo README).
 
 ```bash
 # control secret is per-install; path per control_server.py / config.CONTROL_SECRET_PATH
-SECRET=$(ssh hass 'sudo cat <control_secret_path>')
+SECRET=$(ssh <ha-host> 'sudo cat <control_secret_path>')
 # Play an arbitrary file the bridge can fetch (e.g. an mp3 music file):
-curl -s -X POST http://127.0.0.1:8199/control/cameras/111937238-2048/talk \
+curl -s -X POST http://127.0.0.1:8199/control/cameras/<unit-id>-<did>/talk \
   -H "Authorization: Bearer $SECRET" -H "Content-Type: application/json" \
   -d '{"audio_url":"http://127.0.0.1:8123/local/test.mp3"}'
 # -> {"path":"full_duplex","chunks":N,"bytes":M}
@@ -204,7 +204,7 @@ Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
 - App: `com.alarm.alarmmobile.android.telus` 5.10.7, jadx-decompiled. The MWS host
   and obfuscated strings were decoded via the app's `hi1.b` Java-`Random` XOR.
 - Control plane + audio transport captured by frida gst/soup hooks on an **arm64**
-  Android emulator on an Apple M4 Mac (x86 emulators can't inject frida into the
+  Android emulator on an Apple Silicon Mac (x86 emulators can't inject frida into the
   arm64-translated app — "need arm64 Gadget"). A decrypted HTTP capture (friTap +
   the app's TLS keys) contains the exact `GetDoorbellCameraList` `<gdclr>`,
   `StartFullDuplex` → `<sfdr>`, and `EndLiveStream` → `<elsr>` exchanges quoted
@@ -233,7 +233,7 @@ Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
 
 Deployed inert-then-enabled and tested end to end against the live ADC-VDB750.
 Findings:
-- **It works.** A tone streamed to `duae` (direct/LAN `10.13.38.134:41925`) plays
+- **It works.** A tone streamed to `duae` (direct/LAN `<doorbell-ip>:41925`) plays
   at the doorbell. Response `{"status":"spoken","path":"full_duplex","seconds":N}`.
 - **Login `lr` is not the success signal.** The live `<lalr>`/`<slnr>` returns
   `lr=0 cvs=0` with a fully valid session (st/slt/dcid present). `mobile_auth`
@@ -306,19 +306,19 @@ VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
   `custom_components/telus_smarthome` v1.5.1 is live (rsynced to
   `~/homeassistant/config/...`, HA restarted); `telus_smarthome.speak` is
   registered and plays through the doorbell end to end via BOTH paths:
-  `media_content_id` = a direct **GLaDOS** omnivoice URL
-  (`http://127.0.0.1:7575/speak?voice=glados&text=...` -- the house voice, and it
-  bypasses HA TTS entirely) and `message` = HA cloud/Google TTS. Two things the
+  `media_content_id` = a direct URL to a self-hosted TTS engine on the host
+  (e.g. `http://127.0.0.1:<tts-port>/speak?text=...`), which bypasses HA TTS
+  entirely, and `message` = HA cloud/Google TTS. Two things the
   live test required: (1) a one-char fix -- the handler re-validated `call.data`
   (a ReadOnlyDict) with voluptuous which coerces in place -> crash; fixed by
   validating `dict(call.data)`; (2) the `message` path needs HA's `internal_url`
   set (was None) so the bridge can fetch the absolute `/api/tts_proxy` URL -- set
-  to `http://10.13.38.2:8123` via WS `config/core/update`. All speak audio gets
-  the default conditioning. **Recommended door voice: GLaDOS via omnivoice.**
+  to `http://<ha-host-ip>:8123` via WS `config/core/update`. All speak audio gets
+  the default conditioning.
   Still TODO: wire the actual door-greeting AUTOMATION (the example
-  `docs/talkdown-automation.yaml` is a placeholder; the real house door-greeting
-  logic lives in the omnivoice door_greeting_context state machine -- integrate
-  talkdown there rather than a standalone rule).
+  `docs/talkdown-automation.yaml` is a placeholder; if you already run
+  door-greeting logic elsewhere, integrate talkdown there rather than as a
+  standalone rule).
 
 ### Audio quality / transport
 - **E4 L16 codec -- TESTED, unsupported on THIS doorbell's PUT path (device-
