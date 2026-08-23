@@ -112,7 +112,7 @@ for the full talk mechanism.
 
 | Setting | Env var? | Default | Meaning |
 | --- | --- | --- | --- |
-| `TALKDOWN_ENABLED` | **yes** (`TALKDOWN_ENABLED`) | `false` | Master switch. While false the talk endpoint returns `403`, so shipping the wiring does not arm two-way audio until someone opts in. Truthy values: `1`, `true`, `yes`, `on` (case-insensitive, whitespace-trimmed). |
+| `TALKDOWN_ENABLED` | **yes** (`TALKDOWN_ENABLED`) | `true` | Master switch for two-way audio. Set it to a false value and the talk endpoint returns `403`. Truthy values: `1`, `true`, `yes`, `on` (case-insensitive, whitespace-trimmed). It gates **only** talkdown — the camera settings, diagnostics, siren and privacy routes are unaffected by it. |
 | `TALK_PREFER_WEBRTC` | no | `True` | Prefer the `<webrtc>` endpoint (aiortc, clean sendrecv Opus) over `<srtp>` (ffmpeg) for cameras that offer both. |
 | `TALK_PREFER_FULL_DUPLEX` | no | `True` | Prefer the full-duplex HTTP-PUT path when the device advertises upstream audio (`susa=true`). This is the only working talk path for the ADC-VDB750 doorbell, which returns only an `<rtsp>` (video + listen) endpoint. |
 | `TALK_PUT_ENDPOINT_ORDER` | no | `("direct", "local", "public", "cloud")` | Order in which the full-duplex `PutAudioStream` endpoint variants are tried. The bridge shares the doorbell LAN, so the direct/local LAN URL is fastest and relay-free; public then cloud relay are WAN fallbacks. Values are keys in the parsed doorbell camera list `put_urls`. |
@@ -311,9 +311,40 @@ they define how the integration reaches the camera bridge on loopback:
 | `CAMERA_BRIDGE_HISTORY_URL` | `http://127.0.0.1:8199/control/history` |
 | `CAMERA_BRIDGE_CLIP_URL_TEMPLATE` | `http://127.0.0.1:8199/control/clip/{video_event_id}` |
 | `CAMERA_BRIDGE_AUTOMATIONS_URL` | `http://127.0.0.1:8199/control/automations` |
+| `CAMERA_BRIDGE_CAMERA_SETTINGS_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings` |
+| `CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/diagnostics` |
+| `CAMERA_BRIDGE_CAMERA_VOLUME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/volume` |
+| `CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/chime` |
+| `CAMERA_BRIDGE_CAMERA_IMAGE_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/image` |
+| `CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/video` |
+| `CAMERA_BRIDGE_CAMERA_SIREN_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/siren` |
+| `CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/privacy` |
 | `CONF_CLIP_LINK_SECRET` | `clip_link_secret` (entry data key; see reauth note above) |
 
 These share the control port (`8199`) with the bridge; if you override
 `CONTROL_PORT` on the bridge, this URL host/port must match for the two halves to
 talk (they are compiled into the integration, so keep the default unless you also
 patch these).
+
+### Camera settings and diagnostics polling
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the privacy switch, the siren buttons and the camera diagnostic sensors. |
+
+Deliberately slow, and the one knob here worth understanding before changing.
+Unlike the camera-list poll — a local read of an in-memory dict on the bridge —
+each cycle is a real round trip to TELUS per camera — two bridge requests, and
+six upstream reads behind them. These values only change when someone edits them in the app or
+the portal, and Alarm.com's rate limits are undocumented and can lock an account
+(see [troubleshooting.md](troubleshooting.md#alarmcom-rate-limiting-http-429)), so
+shortening it buys responsiveness nobody needs at a real account-level risk. A
+write through one of the `POST` routes asks for its own immediate refresh, so a
+slider you just moved does not wait out the interval.
+
+The siren, privacy, image and video routes have **no interval of their own**:
+they are only ever called from an explicit user action. Nothing in either half of
+the project polls a write route.
+
+The bridge side needs no new configuration for any of this — the routes reuse the
+website session and the MWS session it already maintains.

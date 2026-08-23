@@ -91,6 +91,12 @@ DATA_CONTROLLER = "connection"
 # polling /control/cameras independently.
 DATA_CAMERA_COORDINATOR = "camera_coordinator"
 DATA_ACTIVITY_COORDINATOR = "activity_coordinator"
+# Shared CameraSettingsCoordinator instance. Unlike the two above it is NOT
+# created in __init__.py: number/switch/button/sensor create it on first use via
+# camera_settings_coordinator.async_get_camera_settings_coordinator(), which
+# stores it here. __init__.py pops this whole per-entry dict on unload, so it
+# needs no teardown of its own.
+DATA_CAMERA_SETTINGS_COORDINATOR = "camera_settings_coordinator"
 
 ATTRIB_BATTERY_NORMAL = "Normal"
 ATTRIB_BATTERY_LOW = "Low"
@@ -215,6 +221,64 @@ CLIP_LINK_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 days
 # Pause/resume one rule -- {rule_id} is str.format()'d in. POST, empty body.
 CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/pause"
 CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE = "http://127.0.0.1:8199/control/automations/{rule_id}/resume"
+
+# #
+# CAMERA SETTINGS, DIAGNOSTICS AND DEVICE COMMANDS
+#
+# The bridge exposes the website API's camera-settings surface (speaker/call
+# volume, chime, image and video config), its read-only diagnostics endpoints,
+# and the mobile API's siren / privacy-mode commands. {camera_id} is
+# str.format()'d into each. See camera-bridge/bridge/control_server.py for the
+# response shapes and docs/control-api.md for the error vocabulary.
+#
+# Two properties of that surface shape everything built on it here:
+#  * Every settings field is paired with a "<name>FeatureSupport" enum, and the
+#    same payload shape comes back for a device that CANNOT do the thing. The
+#    bridge resolves those into plain supports_* booleans and answers 422 on a
+#    write to an unsupported field -- so entities are gated on the boolean and
+#    never created for a capability a camera doesn't report.
+#  * Every one of these is a live call against a real camera. The GETs are
+#    polled (slowly, below); the POSTs are only ever issued from an explicit
+#    user action on an entity, never as a side effect of a read.
+# #
+
+CAMERA_BRIDGE_CAMERA_SETTINGS_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings")
+CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/diagnostics")
+
+# POST, body {"volume": int} -- the 0-10 speaker/call volume talkdown plays at.
+CAMERA_BRIDGE_CAMERA_VOLUME_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/volume")
+# POST, body {"indoor_on": bool?, "outdoor_on": bool?, "outdoor_volume": int?}.
+CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/chime")
+# POST, body of brightness/contrast/saturation/sharpness/is_flipped/hdr_enabled/
+# ir_led_enabled/ir_sensitivity/night_vision_enabled. No entity drives these yet
+# -- listed so the bridge's control surface is documented in one place.
+CAMERA_BRIDGE_CAMERA_IMAGE_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/image")
+# POST, body of clip_resolution/clip_quality/pretrigger_enabled/keep_clips_days/
+# alarm_clip_duration. Also not yet driven by an entity.
+CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/video")
+# POST, body {"action": "start"|"stop"}. This makes a real siren sound in
+# someone's home -- only ever fired from a button press.
+CAMERA_BRIDGE_CAMERA_SIREN_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/siren")
+# POST, body {"active": bool}.
+CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/cameras/{camera_id}/privacy")
+
+# How often camera_settings_coordinator.py re-reads the two GET routes above,
+# for every known camera. Deliberately slow: unlike the camera list (a local
+# in-memory dict on the bridge), each of these is a live round trip to TELUS,
+# so the per-cycle cost is 2 requests per camera. These settings only change
+# when someone edits them in the app or the portal, and Alarm.com's rate limits
+# are undocumented and can lock the account (docs/troubleshooting.md), so this
+# buys responsiveness nobody needs at a real risk. A write through one of the
+# POST routes requests its own immediate refresh rather than waiting for this.
+CAMERA_SETTINGS_POLL_INTERVAL_SECONDS = 120
 
 # How often camera.py re-polls the bridge for its camera list. This is a
 # cheap local-loopback HTTP GET against a small in-memory dict on the bridge

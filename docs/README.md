@@ -27,7 +27,7 @@ own deployment.
 | --- | --- |
 | [ha-integration.md](ha-integration.md) | The `telus_smarthome` Home Assistant hub integration — entities, services, coordinators, and how it consumes the bridge. |
 | [camera-bridge.md](camera-bridge.md) | The standalone Docker service that pulls WebRTC video and republishes it as local RTSP. |
-| [control-api.md](control-api.md) | The bridge's loopback HTTP control server — state polling, snapshots, clips, talkdown, and the credential handoff. |
+| [control-api.md](control-api.md) | The bridge's loopback HTTP control server — state polling, snapshots, clips, talkdown, camera settings/diagnostics/siren/privacy, and the credential handoff. |
 
 ## Reference
 

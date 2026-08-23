@@ -109,6 +109,33 @@
       },
       "talkdown_failures": {
         "name": "Talkdown failures"
+      },
+      "camera_signal_strength": {
+        "name": "Signal strength"
+      },
+      "camera_battery": {
+        "name": "Battery"
+      },
+      "camera_device_status": {
+        "name": "Camera status"
+      }
+    },
+    "number": {
+      "camera_call_volume": {
+        "name": "Speaker volume"
+      }
+    },
+    "switch": {
+      "camera_privacy_mode": {
+        "name": "Privacy mode"
+      }
+    },
+    "button": {
+      "camera_siren_start": {
+        "name": "Start siren"
+      },
+      "camera_siren_stop": {
+        "name": "Stop siren"
       }
     },
     "event": {

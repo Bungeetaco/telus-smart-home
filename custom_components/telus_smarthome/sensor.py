@@ -9,6 +9,11 @@ TalkdownStatusSensor / TalkdownFailuresSensor surface the bridge's talkdown
 counters, so a talk that starts failing is visible as an entity (and can drive a
 notification) rather than only as an HTTP error to whoever triggered it.
 
+The camera diagnostic sensors (signal strength, battery, device status) attach
+to the bridge-served camera devices themselves. A camera degrading to poor
+Wi-Fi is otherwise a completely silent failure mode -- the stream just gets
+worse -- which is what these exist to make visible.
+
 ActivityFeedSensor exposes the full recent Activity list (not just the
 single latest entry event.py's TelusActivityEvent tracks) as an attribute,
 for a dashboard card to render as a scrollable feed -- see that entity's
@@ -28,9 +33,12 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+)
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -39,6 +47,12 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .bridge_client import bridge_get
+from .camera_settings_coordinator import (
+    CameraSettingsCoordinator,
+    CameraSettingsEntity,
+    async_add_camera_entities,
+    async_get_camera_settings_coordinator,
+)
 from .const import (
     CAMERA_BRIDGE_METRICS_URL,
     DATA_ACTIVITY_COORDINATOR,
@@ -80,6 +94,31 @@ async def async_setup_entry(
         TalkdownStatusSensor(metrics_coordinator, config_entry),
         TalkdownFailuresSensor(metrics_coordinator, config_entry),
     ])
+
+    # Per-camera diagnostics, served by the camera-bridge and attached to the
+    # camera devices rather than the synthetic integration device above.
+    settings_coordinator = await async_get_camera_settings_coordinator(hass, config_entry)
+
+    @core.callback
+    def _build_diagnostics(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """One sensor per diagnostic field this camera actually reports."""
+        diagnostics = camera_data.get("diagnostics") or {}
+        if not diagnostics:
+            return []
+        # Keyed off what the device reports, not a fixed list: every field of
+        # the diagnostics body is nullable (three separate upstream reads back
+        # it), and a permanently-unknown Battery sensor on a mains-powered
+        # doorbell is noise, not diagnostics. Non-scalar values are skipped
+        # because an entity state must be a scalar.
+        return [
+            sensor_cls(settings_coordinator, camera_id)
+            for key, sensor_cls in CAMERA_DIAGNOSTIC_SENSORS.items()
+            if _scalar_or_none(diagnostics.get(key)) is not None
+        ]
+
+    async_add_camera_entities(
+        config_entry, settings_coordinator, async_add_entities, _build_diagnostics
+    )
 
 
 class AuthHealthSensor(CoordinatorEntity, SensorEntity):  # type: ignore
@@ -331,3 +370,121 @@ class TalkdownFailuresSensor(_TalkMetricsEntity):
             "audio_seconds_played": m.get("audio_seconds_played"),
             "bridge_uptime_seconds": m.get("uptime_seconds"),
         }
+
+
+def _scalar_or_none(value: Any) -> str | float | int | None:
+    """Return `value` if Home Assistant can hold it as a state, else None.
+
+    A sensor state must be a scalar, and these fields carry whatever TELUS
+    reported -- the bridge models three of them and passes the rest through
+    under `raw`. A dict arriving in a modelled field must not turn into a
+    permanent stream of "invalid state" errors in the log.
+    """
+    return value if isinstance(value, (str, int, float)) else None
+
+
+class _CameraDiagnosticSensor(CameraSettingsEntity, SensorEntity):
+    """Shared plumbing for the per-camera diagnostic sensors.
+
+    Subclasses set `_field` (the key in the bridge's /diagnostics body) and are
+    registered in CAMERA_DIAGNOSTIC_SENSORS below.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    _field: str
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the sensor for one camera."""
+        super().__init__(coordinator, camera_id, self._field)
+
+    @property
+    def native_value(self) -> str | float | int | None:
+        """This camera's current value for the field, or None if unusable."""
+        return _scalar_or_none(self._diagnostics.get(self._field))
+
+    @property
+    def _is_numeric(self) -> bool:
+        """Whether the current value is a number HA can graph.
+
+        `bool` is excluded on purpose: it is an `int` subclass, and a True/False
+        status reported as a measurement would be graphed as 1/0.
+        """
+        value = self._diagnostics.get(self._field)
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        """MEASUREMENT only while the value is numeric.
+
+        Declared per-update rather than as a class attribute because these
+        endpoints may answer with a word ("Good") on one camera and a number on
+        another; a numeric state class over a string state makes the recorder
+        log an error on every single update.
+        """
+        return SensorStateClass.MEASUREMENT if self._is_numeric else None
+
+
+class CameraSignalStrengthSensor(_CameraDiagnosticSensor):
+    """Wi-Fi signal strength for one bridge-served TELUS camera.
+
+    Only created for cameras that report one -- a wired camera reports null.
+
+    Deliberately carries NO device class and NO unit, even for a numeric value.
+    The obvious choice, SensorDeviceClass.SIGNAL_STRENGTH, is wrong here: it
+    means dBm, and what the bridge reports is alarm.com's `normalizedSignalStrength`,
+    a 0-100 score (the bars the portal draws). Labelling a 0-100 score "dBm"
+    produces readings like "58 dBm" -- a real dBm figure for Wi-Fi is negative --
+    and, worse, HA records long-term statistics against the declared unit, so
+    the wrong one poisons the history rather than just the display.
+
+    Not relabelled as a percentage either: `_SIGNAL_KEYS` on the bridge side also
+    accepts `signalStrength`/`signalStrengthValue` from models this was never
+    tested against, and those may well be real dBm. Asserting no unit is the only
+    claim that is true whichever key answered. The value is still a number HA
+    graphs, via the MEASUREMENT state class on the base class.
+    """
+
+    _field = "signal_strength"
+    _attr_icon = "mdi:wifi"
+
+
+class CameraBatterySensor(_CameraDiagnosticSensor):
+    """Battery level for one bridge-served TELUS camera.
+
+    Only created for cameras that report a battery at all -- a mains-powered
+    doorbell has none, and an always-unknown battery entity on it is noise.
+    """
+
+    _field = "battery"
+
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        """BATTERY only for a numeric value, since that class implies a percentage."""
+        return SensorDeviceClass.BATTERY if self._is_numeric else None
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Percent for a numeric value; nothing for a status word like "Normal"."""
+        return PERCENTAGE if self._is_numeric else None
+
+
+class CameraDeviceStatusSensor(_CameraDiagnosticSensor):
+    """Device status for one bridge-served TELUS camera, as the settings screen shows it."""
+
+    _field = "device_status"
+    _attr_icon = "mdi:cctv"
+
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        """Always None -- a status is a label, never a measurement."""
+        return None
+
+
+# Field in the bridge's /diagnostics body -> the sensor that presents it. Used
+# by async_setup_entry to create only the sensors a given camera reports.
+CAMERA_DIAGNOSTIC_SENSORS: dict[str, type[_CameraDiagnosticSensor]] = {
+    "signal_strength": CameraSignalStrengthSensor,
+    "battery": CameraBatterySensor,
+    "device_status": CameraDeviceStatusSensor,
+}

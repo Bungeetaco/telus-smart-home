@@ -474,12 +474,12 @@ Two screens (`async_step_init` → `async_step_modes`):
 | `lock` | library locks | Lock/unlock with locking/unlocking transitional states; optional code |
 | `cover` | library garage doors + gates | Open/close with opening/closing states; device class garage or gate |
 | `light` | library lights | On/off, brightness (if supported); optimistic state for lights without state tracking |
-| `button` | all stateful devices | One **Debug** button per device (fires `DEBUG_REQ_EVENT` to dump `debug_data`) |
-| `number` | camera config options | Skybell **brightness** slider/box config option |
-| `switch` | camera config options + bridge automation rules | Skybell binary-chime on/off; **video automation rule** pause/resume (bridge-backed) |
+| `button` | all stateful devices + bridge cameras | One **Debug** button per device (fires `DEBUG_REQ_EVENT` to dump `debug_data`); **siren start/stop** buttons per camera that supports them (bridge-backed) |
+| `number` | camera config options + bridge cameras | Skybell **brightness** slider/box config option; camera **speaker volume** (bridge-backed) |
+| `switch` | camera config options + bridge automation rules + bridge cameras | Skybell binary-chime on/off; **video automation rule** pause/resume; camera **privacy mode** (both bridge-backed) |
 | `select` | camera config options | Skybell **adjustable chime** volume and **motion sensitivity** |
 | `climate` | library thermostats | HVAC mode (heat/cool/auto/fan-only/off), setpoints, fan mode, humidity readout |
-| `sensor` | controller + activity coordinator | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor |
+| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics (bridge-backed) |
 | `camera` | camera bridge | Live RTSP stream + on-demand snapshots (bridge-backed) |
 | `event` | camera bridge | Per-camera video-clip events + a system-wide activity event (bridge-backed) |
 
@@ -628,6 +628,7 @@ a real error.
 | `VideoEventsCoordinator` (event.py) | `/control/events` | 30 s | per-camera event entities |
 | `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, activity-feed sensor |
 | `AutomationRulesCoordinator` (switch.py) | `/control/automations` | 300 s | automation-rule switches |
+| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors |
 
 The camera-list interval (60 s) is kept below the bridge's own camera-discovery
 interval so a camera the bridge just found appears in HA on the next cycle. The
@@ -682,6 +683,152 @@ Three entity kinds:
 
 ---
 
+## Camera settings, siren and diagnostics entities
+
+A second family of bridge-dependent entities sits on top of the bridge's
+camera-settings routes (see
+[control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)):
+a speaker-volume **Number**, a privacy-mode **Switch**, two siren **Buttons**, and
+up to three diagnostic **Sensors**. They exist because the useful half of the
+camera's own configuration — how loud talkdown is heard, whether the chime rings,
+whether the Wi-Fi is degrading — was previously reachable only through TELUS's own
+app or portal.
+
+All of them attach to the **camera device** the [camera platform](#camera-platform)
+already creates (identical `DeviceInfo` identifiers), so they appear as extra
+entities on "Front Door" rather than under the synthetic integration device that
+holds Auth Health and the talkdown sensors. A camera the bridge no longer reports
+takes its settings entities with it.
+
+### The settings coordinator
+
+One `CameraSettingsCoordinator`, shared by all four platforms, polls
+`/control/cameras/{id}/settings` and `/control/cameras/{id}/diagnostics` per
+bridge-reported camera every **120 s**.
+
+That interval is deliberately slow. Each cycle is two bridge requests per camera and
+six upstream TELUS reads behind them (three settings objects, plus signal,
+battery and status). These values only change when a person changes them, and Alarm.com's rate limits are undocumented
+and can lock an account — so there is nothing to win by polling faster and a real
+account-level risk in trying. Nothing in this path touches the always-warm video
+pipeline.
+
+Unlike the camera and activity coordinators it is **not** created in
+`__init__.py`. `camera_settings_coordinator.async_get_camera_settings_coordinator()`
+builds it on first use and stashes it under `DATA_CAMERA_SETTINGS_COORDINATOR`, so
+whichever of the four platforms sets up first wins and the others attach to the
+same instance — and an account with no bridge cameras never creates it at all.
+Teardown is free: `__init__.py` pops the whole per-entry `hass.data` dict on
+unload.
+
+Its first refresh is a plain `async_refresh()`, never
+`async_config_entry_first_refresh()`, for the same reason as the camera and
+activity coordinators: the bridge is deployed and updated **separately** from the
+integration, so it may be down, restarting, or simply an older build that does not
+serve these routes yet. Any of those must leave these entities unavailable and
+nothing else — aborting the config entry would take the alarm panel, the locks and
+every sensor down with it.
+
+That first refresh is also **not awaited**. It runs as a config-entry background
+task (`async_create_background_task`), and `async_get_camera_settings_coordinator`
+returns as soon as the instance is stashed. Swallowing the exception is only half
+the protection: one poll cycle is two bridge requests per camera, each bounded
+only by the shared client's 10 s timeout, so a bridge that is *slow* rather than
+*down* costs up to 20 s per camera and can outlast Home Assistant's 60 s
+platform-setup budget with three cameras — which aborts whichever of
+`button`/`number`/`switch`/`sensor` set up first, taking the Debug buttons, the
+Skybell config entities and the integration diagnostics with it. Not waiting
+turns that into "entities appear a moment later".
+
+The cost of not waiting is that capability-gated entities are **late, not
+missing**: with no data at setup time the siren Buttons cannot be created yet
+(they exist only for a camera reporting the permission), so they arrive on the
+first successful poll via the coordinator listener described below. Anything
+referencing them must tolerate their absence for one poll interval after a
+restart — the same tolerance a camera added to the account later already
+requires.
+
+### The entities
+
+| Entity | Platform | Created when | Behaviour |
+| --- | --- | --- | --- |
+| **Speaker volume** | `number` | The camera reports `supports_call_volume` | Slider over the device's own `call_volume_min`–`call_volume_max` (0–10 on the doorbell), step 1, entity category *config*. Setting it POSTs `/settings/volume` and refreshes the coordinator from the response |
+| **Privacy mode** | `switch` | One per bridge-reported camera | On/off via `/privacy`. Reports **unavailable** when the camera reports no privacy support |
+| **Siren start**, **Siren stop** | `button` | Only when the bridge reports the camera has a siren **this account may manually trigger** | Each press POSTs `/siren` with `start` / `stop` |
+| **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
+| **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
+| **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
+
+### Where each capability flag is read from
+
+The volume Number and the diagnostic Sensors gate on fields the settings and
+diagnostics responses document directly (`supports_call_volume`; a non-null
+`signal_strength` / `battery` / `device_status`).
+
+The siren and privacy capabilities come from somewhere else entirely: the
+**mobile** API's `GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo`, which
+the bridge reads anyway before it will act on a write. It normalizes each into a
+fixed shape and hands them back as two optional sections of the settings
+response — the
+[siren/privacy contract](control-api.md#the-siren-and-privacy-sections--a-fixed-contract)
+in control-api.md is the authority on those key names, and this integration
+depends on them exactly:
+
+| Section | Field | Used for |
+| --- | --- | --- |
+| `settings.siren` | `can_manually_trigger` (bool) | Whether the siren Buttons exist at all |
+| `settings.siren` | `active` (bool), `timestamp_end` | Not consumed today — the Buttons hold no state, deliberately (see below) |
+| `settings.privacy` | `supported` (bool) | Whether the privacy Switch is available |
+| `settings.privacy` | `active` (bool) | The Switch's on/off state |
+
+Either section can be **`null`**, which the integration treats as *not reported*
+and never as *unsupported* — a `null` siren section means no siren Buttons this
+cycle, and a `null` privacy section leaves the Switch unavailable. Both are the
+right outcome for a capability nothing has reported, and both mean neither
+control can be pressed into a `422`. The most common cause is a bridge running
+with `TALKDOWN_ENABLED=false`, which has no mobile session to read either record
+through; it is a bridge-configuration state, not a device one.
+
+Note that the siren Buttons hold no state even though `active` / `timestamp_end`
+are available: the siren's duration is chosen server-side, so there is no on/off
+the integration could honestly represent — hence two Buttons rather than one
+Switch.
+
+**Nothing here writes on its own.** Setup, polling and reloads only ever `GET`;
+the volume, the switch and the buttons issue their `POST` solely from a user (or
+automation) acting on the entity. That matters most for the siren, which is
+audible hardware in a home — see the caution in
+[control-api.md](control-api.md#post-controlcamerascamera_idsiren) before pressing
+it the first time on a new device.
+
+### Absent versus unavailable
+
+The two are used deliberately and differently:
+
+- **A capability the device does not have gets no entity at all.** A camera with
+  no adjustable speaker gets no volume Number; a camera this account may not
+  sound gets no siren Buttons; a mains-powered camera gets no Battery sensor.
+  Creating them anyway would put permanently-broken controls on the dashboard,
+  and every press or slide would be a `422 unsupported` from the bridge.
+- **Privacy mode is the exception: the Switch is always created and goes
+  unavailable** when support is missing. Privacy support is read per poll, so
+  "unsupported" and "the bridge did not answer this cycle" arrive the same way —
+  and an entity that disappears takes its history and any automation referencing
+  it with it, which is a much worse outcome than one that reads unavailable for a
+  poll or two.
+
+A write the device refuses (`422`) surfaces as a `HomeAssistantError` on the
+service call rather than being swallowed, so a control that has stopped being
+supported is visible instead of appearing to work.
+
+The bridge's image and video/clip settings routes have **no entities yet** — the
+URL templates are in `const.py` so the control surface is described in one place,
+but brightness, HDR, clip resolution and retention are still curl-only. That is a
+gap to fill, not a deliberate omission.
+
+
+---
+
 ## Diagnostics
 
 `diagnostics.py` implements `async_get_config_entry_diagnostics`. It returns the
@@ -714,13 +861,14 @@ From `const.py` (timing and identity):
 | `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | 60 | Camera-list poll |
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | 30 | Video-clip / activity poll |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | 300 | Automation-rule poll |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 120 | Camera settings + diagnostics poll |
 | `CLIP_LINK_TTL_SECONDS` | 90 days | Signed clip-link lifetime |
 
 Bridge control endpoints all live on `http://127.0.0.1:8199/control/…` (both
 containers run `--network host`, so loopback reaches the bridge). The shared
 directory is HA's `/share/telus_cam_bridge` (mounted into the bridge at
 `/shared`). `hass.data` keys: `DATA_CONTROLLER`, `DATA_CAMERA_COORDINATOR`,
-`DATA_ACTIVITY_COORDINATOR`.
+`DATA_ACTIVITY_COORDINATOR`, `DATA_CAMERA_SETTINGS_COORDINATOR`.
 
 The blacklisted sensor subtypes (`SENSOR_SUBTYPE_BLACKLIST`) — mobile phone,
 panel image sensor, fixed panic — are excluded from entity creation everywhere.

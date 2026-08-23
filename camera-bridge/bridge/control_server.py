@@ -199,6 +199,103 @@ Contract (as implemented -- this is what callers must match):
       snapshot endpoint's unknown_camera check) -- TELUS itself 404s/errors
       on a bad id and that's surfaced as telus_error, so a second local
       check would just duplicate what TELUS already enforces.
+
+    ---- camera settings, diagnostics, siren and privacy --------------------
+
+    These are INDEPENDENT of TALKDOWN_ENABLED: the settings/diagnostics routes
+    speak the website API through bridge.camera_settings and keep working with
+    talkdown switched off. Only the siren/privacy routes need the mobile MWS
+    SessionToken, which only exists because the talk manager mints one.
+
+    Shared error bodies across all eight: 400 {"error": "malformed"} for a bad
+    body, 404 {"error": "unknown_camera"}, 422 {"error": "unsupported"} when the
+    device itself reports it cannot do the thing, 502 {"error": "telus_error"}
+    on an upstream failure.
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/settings
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"audio": {...}, "image": {...}, "video": {...},
+                    "siren": {"can_manually_trigger": <bool>, "active": <bool>,
+                              "timestamp_end": <value or null>} | null,
+                    "privacy": {"supported": <bool>, "active": <bool>} | null}
+      The camera's three website settings objects, each carrying its own
+      supports_* flags. Those flags are not decoration: every website settings
+      field is paired with a "<name>FeatureSupport" enum (0 = unsupported,
+      2 = editable) and the SAME payload shape comes back for a device that
+      CANNOT do the thing, so a caller must read the flag before offering a
+      control rather than reading a field's presence as permission.
+      "siren"/"privacy" are this camera's records from the mobile-side
+      GetAllSirenDevices / GetAllCameraPrivacyModeInfo, and are the only read a
+      caller gets for "may this account trigger the siren" and "is privacy mode
+      on" -- there is no separate route for either. Their keys above are this
+      API's contract, NOT the upstream spelling: _normalize_siren /
+      _normalize_privacy translate the record, because the upstream key names
+      come from the decompiled app rather than a live capture and its booleans
+      arrive as the STRINGS "true"/"false" -- passing the raw record through
+      made every caller re-implement the same candidate-key list and the same
+      string-bool trap, and get it wrong. Both sections are best-effort and
+      degrade to null (never a 502) when the talk manager was not constructed or
+      the MWS read fails, so an MWS outage still returns the website settings.
+      Three website GETs per call plus AT MOST two MWS POSTs: those two actions
+      are account-wide, so they are read once per _MWS_ACCOUNT_READ_TTL_S and
+      shared by every camera rather than re-issued per camera. Poll this SLOWLY
+      regardless -- alarm.com's rate limits are undocumented and can lock the
+      account.
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/diagnostics
+
+    Response: 200 {"signal_strength": ..., "battery": ..., "device_status": ...,
+                    "raw": {...}}
+      A camera degrading to poor Wi-Fi is otherwise a silent failure mode --
+      nothing else in this API surfaces it.
+
+    POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/settings/volume
+    Body: {"volume": <int>}
+
+      The talk/call volume -- i.e. the volume talkdown itself plays at (E9 in
+      docs/talkdown-fullduplex-protocol.md). Bounded by the device's own
+      call_volume_min..call_volume_max as reported by the settings read; a value
+      outside that range is 400, never silently clamped, so a caller is told its
+      value was not applied instead of quietly getting a different one.
+      Response: 200 <the same object GET .../settings returns under "audio">
+
+    POST .../settings/chime
+    Body: at least one of {"indoor_on": <bool>, "outdoor_on": <bool>,
+                            "outdoor_volume": <int>}
+      The doorbell's own chime. outdoor_volume is bounded by the device's
+      outdoor_tone_volume_max the same way. Response: the audio settings object.
+
+    POST .../settings/image
+    Body: at least one of brightness / contrast / saturation / sharpness /
+      ir_sensitivity (ints), is_flipped / hdr_enabled / ir_led_enabled /
+      night_vision_enabled (bools). Response: the image settings object.
+
+    POST .../settings/video
+    Body: at least one of clip_resolution (str, e.g. "960x960"), clip_quality
+      (int or str), pretrigger_enabled (bool), keep_clips_days (int),
+      alarm_clip_duration (int). Response: the video config object.
+
+      All four writes read the current settings first, purely to honour the
+      FeatureSupport gate above (422 rather than a write TELUS would refuse);
+      the read-modify-write a website settings PUT requires -- it sends the
+      WHOLE object back, and a partial body risks resetting unrelated fields --
+      is camera_settings' job, not this module's.
+
+    POST .../siren      Body: {"action": "start"|"stop"}
+    POST .../privacy    Body: {"active": <bool>}
+
+    Response: 200 {"status": "applied"}
+      503 {"error": "mws_unavailable"} when no talk manager was constructed
+          (TALKDOWN_ENABLED=false), since it owns the MWS SessionToken these
+          two actions need.
+      A siren "start" is gated on this camera's canManuallyTriggerSiren, which
+      is a per-account PERMISSION and not merely "this device has a siren" --
+      it makes a real siren sound in someone's home, so it is never fired blind
+      (docs/mobile-api-findings.md). "stop" is deliberately NOT gated: silencing
+      a running siren has to stay possible even when the capability read fails.
+      The siren is also time-bounded server-side (timestampEnd), so it stops on
+      its own eventually; "stop" is how a caller ends it early.
 """
 import asyncio
 import logging
@@ -214,11 +311,29 @@ from aiohttp import web
 APP_CURRENT_SECRET = web.AppKey("current_secret", dict)
 APP_SECRET_ROTATION_TASK = web.AppKey("secret_rotation_task", asyncio.Task)
 
+from . import camera_settings
 from . import config as c
 from . import metrics
 from . import talk as talk_mod
 from . import talk_fullduplex
-from .telus_auth import relogin_if_stale
+from .mobile_auth import mint_if_stale
+# _jget/_json_bool are module-private in mws_client and imported anyway, on
+# purpose: they are the canonical way this codebase reads an MWS JSON scalar, and
+# the trap they exist for -- the API sends booleans as the STRINGS "true"/"false",
+# so bool("false") is True -- is exactly what a second, local implementation gets
+# wrong. Sharing them keeps one definition of "what does this camera actually say"
+# rather than two that can drift apart.
+from .mws_client import (
+    TOKEN_STATUS_LOGGED_OUT,
+    _jget as _mws_jget,
+    _json_bool as _mws_json_bool,
+    get_privacy_mode_info,
+    get_siren_devices,
+    set_privacy_mode,
+    start_siren,
+    stop_siren,
+)
+from .telus_auth import RateLimited, relogin_if_stale
 from .telus_rest import (
     get_snapshot_url,
     get_video_events_by_ids,
@@ -247,6 +362,349 @@ async def _fetch_with_relogin(telus_session, login_lock, coro_fn, *args):
             await relogin_if_stale(telus_session, login_lock)
             return await coro_fn(telus_session, *args)
         raise
+
+
+# Accepted body fields for the image/video settings writes and the type each
+# must have. Enforced here rather than left to camera_settings so a typo'd key
+# is a local 400 instead of a round trip against a rate-limited account.
+_IMAGE_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "brightness": int,
+    "contrast": int,
+    "saturation": int,
+    "sharpness": int,
+    "ir_sensitivity": int,
+    "is_flipped": bool,
+    "hdr_enabled": bool,
+    "ir_led_enabled": bool,
+    "night_vision_enabled": bool,
+}
+_VIDEO_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "clip_resolution": str,
+    # A STRING, despite looking like a number: the capture shows
+    # selectedClipQuality as "3", a KEY of the clipQualityOptions object, not the
+    # integer value it maps to (docs/web-portal-api-findings.md). This used to
+    # accept (int, str) from before the capture settled it, which disagreed with
+    # camera_settings' own "str" typing -- an int passed here only to be refused a
+    # layer down.
+    "clip_quality": str,
+    "pretrigger_enabled": bool,
+    "keep_clips_days": int,
+    "alarm_clip_duration": int,
+}
+_CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "indoor_on": bool,
+    "outdoor_on": bool,
+    "outdoor_volume": int,
+}
+# One support flag per chime field -- and the outdoor tone's on/off is NOT the
+# same feature as its volume. The reference doorbell reports
+# outdoorToneEnableDisableFeatureSupport 2 alongside outdoorToneVolumeFeatureSupport
+# 0: it can mute the outdoor tone but not change its level. Mapping both to the
+# on/off flag let a volume write past this pre-read gate and be refused a layer
+# down by camera_settings instead -- the same 422 in the end, but by accident, and
+# only after a round trip against a rate-limited account.
+_CHIME_SUPPORT: dict[str, str] = {
+    "indoor_on": "supports_indoor_chime",
+    "outdoor_on": "supports_outdoor_tone",
+    "outdoor_volume": "supports_outdoor_tone_volume",
+}
+
+
+def _validate_fields(body: object, spec: dict) -> dict | None:
+    """Return the requested fields from `body`, or None if the body is unusable.
+
+    None means "respond 400": not a JSON object, empty, an unknown key, or a
+    value of the wrong type. Trap: bool is a subclass of int in Python, so an
+    int-typed field must reject True/False explicitly -- otherwise
+    {"brightness": true} would be written to a live camera as brightness=1.
+    """
+    if not isinstance(body, dict) or not body:
+        return None
+    fields: dict = {}
+    for key, value in body.items():
+        want = spec.get(key)
+        if want is None:
+            return None
+        if want is bool:
+            if not isinstance(value, bool):
+                return None
+        elif isinstance(value, bool) or not isinstance(value, want):
+            return None
+        fields[key] = value
+    return fields
+
+
+def _unsupported_flags(current: dict, flags: list[str]) -> list[str]:
+    """Return the entries of `flags` the device explicitly reports it cannot do.
+
+    Only a flag that is PRESENT and exactly False blocks a write. Every website
+    settings field is paired with a "<name>FeatureSupport" enum and the same
+    payload shape comes back for a device that cannot do the thing, so a flag
+    camera_settings did not surface means "unknown", not "unsupported" --
+    refusing on a missing flag would make a perfectly capable camera permanently
+    un-settable through this API.
+    """
+    return [flag for flag in flags if current.get(flag) is False]
+
+
+def _settings_error(err, camera_id: str, what: str) -> web.Response:
+    """Map a camera_settings.CameraSettingsError onto this API's status codes.
+
+    `unsupported` is the device reporting it cannot do the thing at all (its
+    *FeatureSupport enum is not 2) -- the documented 422, and the same answer
+    _unsupported_flags gives from the pre-read gate. Everything else the exception
+    covers is a CALLER mistake (an unknown field, a wrong value type, a number
+    outside the range the device published) and is a 400, matching what
+    _out_of_range already returns for the value it can check locally: an
+    out-of-range write is a 400 whichever of the two notices it first.
+
+    Deliberately branches on the flag and never on the message text, as that
+    exception's own docstring requires. Logged at info, not exception: neither
+    outcome is a bug in this process, and a stack trace per refused write would
+    bury the ones that are."""
+    status, body = (422, "unsupported") if err.unsupported else (400, "malformed")
+    log.info("Control endpoint: %s refused for %s (field=%s, unsupported=%s): %s",
+             what, camera_id, err.field, err.unsupported, err)
+    return web.json_response({"error": body}, status=status)
+
+
+def _bound(setter, **fields):
+    """Bind keyword `fields` to a camera_settings setter so it can be passed to
+    _fetch_with_relogin, which forwards positional args only and logs
+    coro_fn.__name__ (functools.partial has no __name__).
+    """
+    async def call(telus, camera_id):
+        return await setter(telus, camera_id, **fields)
+
+    call.__name__ = setter.__name__
+    return call
+
+
+# The two account-wide MWS reads, named once so the cache key, the log line and
+# the post-write invalidation below cannot drift apart.
+_MWS_SIREN_READ = "GetAllSirenDevices"
+_MWS_PRIVACY_READ = "GetAllCameraPrivacyModeInfo"
+
+# How long one account-wide MWS read is reused across cameras. Both actions are
+# ACCOUNT-WIDE -- tests/test_mws_json_actions.py asserts neither may even carry a
+# DeviceId -- but /settings is per-camera, so re-issuing them there cost 2 identical
+# upstream POSTs per camera per poll against an API whose rate limits are
+# undocumented and can lock the account.
+#
+# The window only has to outlive ONE of Home Assistant's coordinator sweeps, not
+# its 120s poll interval: that sweep walks the cameras SEQUENTIALLY (deliberately
+# -- see camera_settings_coordinator.py) at roughly six upstream round trips each,
+# so a handful of cameras is tens of seconds. 30s covers that while staying a
+# quarter of the poll interval, i.e. it can add at most 25% to a staleness the
+# entities reading these records already accept by design. It is not load-bearing
+# for correctness after a write: both write routes invalidate their own action's
+# entry, so the read-back the privacy switch performs is never served from here.
+# Lives here rather than in config.py because it is an implementation detail of
+# this route, not a knob an operator should be turning against a live account.
+_MWS_ACCOUNT_READ_TTL_S = 30
+
+# How many container levels below an MWS action result _mws_entry_for_device
+# descends before giving up. The known shapes sit one level below the ack's
+# "data" ({"CameraPrivacyModeInfo": {...}}) or two ({"AllCameraSirenInfo":
+# [{...}]}), so 3 clears both with one level of slack for a wrapper alarm.com
+# adds -- these shapes come from the decompiled app, not a live capture. Bounded
+# rather than unlimited so the cost of this search stays something you can read
+# off the page: an unexpected payload turns into a miss (which every caller
+# already handles), never into a walk of an arbitrarily deep tree on every poll.
+_MWS_SEARCH_DEPTH = 3
+
+
+def _mws_ack_data(result: dict) -> dict:
+    """Return the action's own body from an mws_client ack envelope.
+
+    _parse_json_ack hands back ``{"ok", "error", "data"}`` with the per-device
+    records inside ``data`` -- so code that iterated the ack itself was iterating
+    [bool, str|None, dict] and matched nothing. Recognised by the presence of
+    "ok"/"error" ALONGSIDE a dict "data" rather than by "data" alone, so a raw
+    action body that happens to carry a "data" member is not unwrapped by
+    accident. Anything that is not an ack is returned untouched, which keeps this
+    usable on a bare action body in a test.
+    """
+    if isinstance(result, dict) and isinstance(result.get("data"), dict) and (
+            "ok" in result or "error" in result):
+        return result["data"]
+    return result
+
+
+def _mws_entry_for_device(result: dict, camera_id: str) -> dict | None:
+    """Return the per-device record for `camera_id` in an MWS JSON action result.
+
+    Takes the ack _parse_json_ack returns (or a bare action body) and searches
+    every list- and dict-valued member of it down to _MWS_SEARCH_DEPTH instead of
+    one fixed key: these two actions' shapes were recovered from the decompiled
+    app rather than a live capture (`AllCameraSirenInfo` is a list,
+    `CameraPrivacyModeInfo` an object -- docs/mobile-api-findings.md), so the key
+    they arrive under is not something to hard-code against. Matches the website
+    globalDeviceId "<unit-id>-<did>" against either half as well as whole, because
+    MWS speaks the bare numeric id (mws_client.get_live_video_stream splits it the
+    same way). Returns None when nothing matches -- callers decide what that
+    means, and the siren and privacy routes deliberately decide differently.
+    """
+    want = str(camera_id)
+    candidates = {want, want.split("-", 1)[0], want.rsplit("-", 1)[-1]}
+
+    def _matches(item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        return any(key in item and str(item[key]) in candidates
+                   for key in ("device_id", "DeviceId", "did", "id"))
+
+    def _search(node: object, depth: int) -> dict | None:
+        if depth < 0:
+            return None
+        if isinstance(node, dict):
+            if _matches(node):
+                return node
+            children: object = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            return None
+        for child in children:
+            found = _search(child, depth - 1)
+            if found is not None:
+                return found
+        return None
+
+    return _search(_mws_ack_data(result), _MWS_SEARCH_DEPTH)
+
+
+def _mws_flag(entry: dict, *names: str):
+    """Return the first of `names` present in `entry`, else None.
+
+    Accepts both the wire spelling from the decompiled app
+    ("canManuallyTriggerSiren", "SupportsPrivacyMode") and a snake_case
+    normalisation, since no live capture exists to settle which one mws_client
+    emits. None means "the device said nothing about it", which is NOT the same
+    as False -- each call site documents which way it errs.
+    """
+    for name in names:
+        if name in entry:
+            return entry[name]
+    return None
+
+
+def _normalize_siren(entry: dict) -> dict:
+    """Map one GetAllSirenDevices record to the keys this API publishes:
+
+        {"can_manually_trigger": bool, "active": bool, "timestamp_end": <value|None>}
+
+    The translation lives on this side of the wire on purpose. The upstream
+    spellings were recovered from the decompiled app rather than a live capture,
+    and this API sends booleans as the STRINGS "true"/"false" -- so every consumer
+    that read the record raw would have to carry the same candidate-key list and
+    the same trap, and a plain truthiness test on "false" silently means True.
+
+    ``can_manually_trigger`` therefore fails CLOSED: absent, null or unrecognised
+    is False. It is the per-account PERMISSION that gates sounding a real siren in
+    someone's home (the app has a dedicated checker for it), not a hint about the
+    hardware. ``timestamp_end`` is passed through untouched -- the server picks
+    both the value and its format, and an active siren with no timestamp_end is
+    the app's own error case, i.e. "state unknown", not "runs forever".
+    """
+    return {
+        "can_manually_trigger": _mws_json_bool(
+            _mws_flag(entry, "can_manually_trigger_siren", "canManuallyTriggerSiren"),
+            default=False),
+        "active": _mws_json_bool(
+            _mws_flag(entry, "is_active", "isActive", "IsActive"), default=False),
+        "timestamp_end": _mws_flag(entry, "timestamp_end", "timestampEnd",
+                                   "TimestampEnd"),
+    }
+
+
+def _normalize_privacy(entry: dict) -> dict:
+    """Map one GetAllCameraPrivacyModeInfo record to the keys this API publishes:
+
+        {"supported": bool, "active": bool}
+
+    ``supported`` defaults the OPPOSITE way from _normalize_siren's permission
+    flag, deliberately. This action returns a privacy-STATE object rather than an
+    enumeration of capable devices, so a missing SupportsPrivacyMode is a gap in a
+    shape recovered from the decompiled app, not the device saying no; only an
+    explicit false reports unsupported. Erring the other way would leave the
+    privacy switch permanently unavailable on every camera. (SupportsPrivacyMode
+    IS false on the account this was built against, so the gate is expected to
+    fire -- docs/mobile-api-findings.md.) _json_bool cannot express that
+    distinction on its own -- it collapses "absent" and "false" into False -- so
+    the None _mws_flag returns for an absent key is handled here instead.
+
+    ``active`` comes from ``State``, which the one recovered shape carries as 0/1;
+    _json_bool reads that, a real bool, or the "true"/"false" strings the request
+    side of this API uses. Anything else is reported as off rather than guessed
+    at: claiming a camera is blinded when it is still recording is the dangerous
+    direction to be wrong in.
+    """
+    supports = _mws_flag(entry, "supports_privacy_mode", "SupportsPrivacyMode")
+    return {
+        "supported": True if supports is None else _mws_json_bool(supports, default=True),
+        "active": _mws_json_bool(
+            _mws_flag(entry, "state", "State", "is_active", "IsActive"), default=False),
+    }
+
+
+def _mws_token_status(result: dict) -> int | None:
+    """The MWS TokenStatus carried by an action result, or None if it carried none.
+
+    Both places an mws_client parser can put it are read, because the two put it
+    in different places and this module must not care which one it is holding:
+
+    * TOP LEVEL -- _parse_json_ack surfaces ``token_status`` on the ack itself
+      (and strips ``tokenstatus`` out of ``data`` so it cannot be read twice).
+      This is the JSON actions' source, and it is what makes the logged-out
+      re-mint in _mws_call reachable rather than the dead branch it used to be,
+      when this read ``result["token_status"]`` against an ack that had no such
+      key and so was always None.
+    * INSIDE ``data`` -- _parse_validate_session emits ``data["token_status"]``
+      instead, since it models a status-only response.
+
+    Checking both is what keeps this decoupled from either parser's layout: an
+    envelope key that moves (as ``TokenStatus`` just did, from surviving inside
+    ``data`` to being hoisted onto the ack) is absorbed here rather than needing
+    a matching edit at every call site. ``data`` is checked first so a future
+    action that carries a status in its own body still wins over the envelope's.
+
+    Returns None, never a guess, when the field is absent or unparsable: None
+    means "the server said nothing about the token", and callers must not treat
+    that as a status value -- least of all as TOKEN_STATUS_OK, which would make a
+    logged-out session that simply does not report itself look healthy (see
+    _mws_failure_note, which omits the field entirely rather than logging None).
+    """
+    sources = (result.get("data") if isinstance(result, dict) else None, result)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for name in ("TokenStatus", "token_status"):
+            raw = _mws_jget(source, name)
+            if raw is None:
+                continue
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                log.debug("Control endpoint: unparsable MWS %s=%r", name, raw)
+                return None
+    return None
+
+
+def _mws_failure_note(result: dict) -> str:
+    """A short reason string for logging a not-ok MWS result.
+
+    Always reports the server's ErrorMessage, and reports the token status ONLY
+    when the response actually carried one. The lines here used to log
+    "token_status=%s" unconditionally against a key _parse_json_ack never emits,
+    so every one of them printed None -- which reads as "the server answered
+    'unknown'" when it means "we never looked in the right place".
+    """
+    parts = [f"error={result.get('error')!r}"]
+    status = _mws_token_status(result)
+    if status is not None:
+        parts.append(f"token_status={status}")
+    return ", ".join(parts)
 
 
 def _load_or_create_secret() -> str:
@@ -319,6 +777,16 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
     # video_event_id -> (monotonic_ts, response_payload). See handle_clip.
     _clip_cache: dict[str, tuple[float, dict]] = {}
+
+    # MWS action name -> (monotonic deadline, action result or None). Holds the
+    # two account-wide reads for _MWS_ACCOUNT_READ_TTL_S so one coordinator sweep
+    # costs one POST each instead of one per camera. Only ever two keys, so unlike
+    # _clip_cache it needs no eviction pass. Failures are cached too (as None) --
+    # see _mws_account_read. The per-action locks stop a cold cache stampeding
+    # into N simultaneous upstream calls when several camera requests are in
+    # flight at once, which is the exact burst this cache exists to prevent.
+    _mws_account_cache: dict[str, tuple[float, dict | None]] = {}
+    _mws_account_locks: dict[str, asyncio.Lock] = {}
 
     def _camera_for_path(path_name: str) -> dict | None:
         return next(
@@ -611,6 +1079,462 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         log.info("Control endpoint: credentials updated and re-login succeeded")
         return web.json_response({"status": "applied"})
 
+    # ---- camera settings / diagnostics (website API) ------------------------
+    # Unrelated to TALKDOWN_ENABLED: these speak the same website session the
+    # snapshot and events routes already use, so they must keep working with
+    # talkdown switched off.
+
+    def _camera_guard(request: web.Request) -> tuple[str | None, web.Response | None]:
+        """Auth + registry check shared by the eight camera settings routes.
+        Returns (camera_id, None) when the request may proceed, else
+        (None, <the response to send>)."""
+        if (err := _check_auth(request)) is not None:
+            return None, err
+        camera_id = request.match_info["camera_id"]
+        if camera_id not in camera_registry:
+            return None, web.json_response({"error": "unknown_camera"}, status=404)
+        return camera_id, None
+
+    async def _mws_post(action_fn, mobile, *args) -> dict:
+        # Bounded like talk.py's MWS lookups so a wedged servlet call fails this
+        # one request rather than holding a control-server connection open for
+        # aiohttp's default.
+        return await asyncio.wait_for(
+            action_fn(
+                telus_session.session,
+                mobile.session_token,
+                *args,
+                customer_id=mobile.customer_id,
+                mobile_device_uid=mobile.device_uid,
+                seamless_login_token=mobile.seamless_login_token,
+            ),
+            timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+        )
+
+    def _mobile_session():
+        """The MobileSession the talk manager owns, or None when there isn't one.
+
+        Deliberately reuses the talk manager's instance instead of constructing a
+        second MobileSession: a new one registers another mobile device uid and
+        re-walks the SSO bootstrap against the same Cloudflare edge that
+        rate-limits the website login -- exactly the duplication
+        mobile_auth.mint_if_stale exists to collapse. getattr rather than a bare
+        attribute so a rename in talk.py degrades these two routes to a logged
+        503 instead of 500-ing every request."""
+        if talk_manager is None:
+            return None
+        mobile = getattr(talk_manager, "_mobile", None)
+        if mobile is None:
+            log.warning("Control endpoint: talk manager exposes no MobileSession; "
+                        "siren/privacy routes unavailable")
+        return mobile
+
+    async def _mws_call(action_fn, *args) -> dict:
+        """Run one mws_client action with a live MWS SessionToken, re-minting
+        exactly once if the server reports the token logged out.
+
+        Mirrors talk.TalkManager._resolve_endpoint: all minting goes through
+        mint_if_stale under the SAME shared login_lock, so a control request
+        racing a website re-login (or another talk) collapses into a single mint
+        rather than each walking the SSO bootstrap. Returns the action's parsed
+        result; the caller decides what a not-ok result means, since that differs
+        per route. Only call this after _mobile_session() returned non-None."""
+        mobile = _mobile_session()
+        if mobile.session_token is None:
+            await mint_if_stale(mobile, login_lock)
+
+        result = await _mws_post(action_fn, mobile, *args)
+        # Read through _mws_token_status, not result["token_status"]: the JSON
+        # actions go through _parse_json_ack, which returns ok/error/data and no
+        # token status at all, so the original lookup was always None and this
+        # re-mint could never fire. The envelope's own TokenStatus survives inside
+        # data (the ack strips only isSuccess/ErrorMessage/DidSeamlesslyLogin), and
+        # that is where the helper finds it. A response that genuinely carries no
+        # status yields None, which is not TOKEN_STATUS_LOGGED_OUT and so leaves
+        # the not-ok result for the caller to interpret rather than blindly
+        # re-minting a token the server never complained about.
+        if not result.get("ok") and _mws_token_status(result) == TOKEN_STATUS_LOGGED_OUT:
+            log.info("Control endpoint: MWS token rejected (logged out), re-minting once")
+            mobile.session_token = None
+            await mint_if_stale(mobile, login_lock)
+            result = await _mws_post(action_fn, mobile, *args)
+        return result
+
+    async def _mws_account_fetch(action_fn, what: str) -> tuple[dict | None, float]:
+        """Run one account-wide MWS read; return (result or None, seconds to cache).
+
+        Never raises -- the caller is a best-effort section of the settings
+        bundle. The TTL comes back with the result so a rate-limited edge can be
+        held longer than an ordinary miss."""
+        try:
+            result = await _mws_call(action_fn)
+        except RateLimited as err:
+            # Logged apart from every other failure, and held for the server's own
+            # Retry-After: this is Cloudflare's edge limiter (telus_auth.RateLimited),
+            # and coming straight back at it is precisely what turns one rate-limit
+            # window into a multi-hour outage. Swallowing the Retry-After -- which
+            # this route used to do -- meant the next poll re-hammered it 120s later
+            # having learned nothing.
+            log.warning("Control endpoint: %s rate limited by the edge, "
+                        "Retry-After=%ss; holding a negative result that long",
+                        what, err.retry_after_s)
+            return None, max(_MWS_ACCOUNT_READ_TTL_S, float(err.retry_after_s))
+        except Exception:
+            log.warning("Control endpoint: %s read failed", what, exc_info=True)
+            return None, _MWS_ACCOUNT_READ_TTL_S
+        if not result.get("ok"):
+            log.info("Control endpoint: %s not ok (%s)", what, _mws_failure_note(result))
+            return None, _MWS_ACCOUNT_READ_TTL_S
+        return result, _MWS_ACCOUNT_READ_TTL_S
+
+    async def _mws_account_read(action_fn, what: str) -> dict | None:
+        """The cached result of one account-wide MWS read, or None.
+
+        A FAILURE is cached exactly like a success. The only caller is a poll, so
+        the alternative is every camera in the sweep independently retrying an
+        upstream that just failed -- against an account whose rate limits are
+        undocumented -- and getting the same answer N times.
+
+        The cache is re-checked after taking the lock so only the first waiter of
+        a sweep pays for the round trip; the rest see the value it stored."""
+        now = time.monotonic()
+        cached = _mws_account_cache.get(what)
+        if cached is not None and now < cached[0]:
+            return cached[1]
+
+        lock = _mws_account_locks.setdefault(what, asyncio.Lock())
+        async with lock:
+            cached = _mws_account_cache.get(what)
+            if cached is not None and time.monotonic() < cached[0]:
+                return cached[1]
+            result, ttl = await _mws_account_fetch(action_fn, what)
+            _mws_account_cache[what] = (time.monotonic() + ttl, result)
+            return result
+
+    def _mws_invalidate(what: str) -> None:
+        """Drop a cached account-wide read after a write that may have changed it.
+
+        Without this, a caller that writes and then reads its own state back --
+        which the privacy switch does on purpose, because an accepted MWS command
+        is not proof the camera moved -- could be answered from a record minted
+        before the write."""
+        _mws_account_cache.pop(what, None)
+
+    async def _mws_camera_record(action_fn, camera_id: str, what: str,
+                                 normalize) -> dict | None:
+        """Best-effort NORMALISED per-camera record for the settings bundle.
+
+        Never raises. Returns None when talkdown was never constructed, the
+        account-wide read failed, or nothing in it matches this camera -- null for
+        the whole section, so a caller can tell "no data" from "the camera says
+        no". The website settings are the point of that route; an MWS outage must
+        not take them down with it.
+
+        `normalize` is _normalize_siren/_normalize_privacy, the same functions the
+        siren and privacy gates run, so the shape a caller reads and the shape
+        this bridge enforces come from ONE place."""
+        if _mobile_session() is None:
+            return None
+        result = await _mws_account_read(action_fn, what)
+        if result is None:
+            return None
+        entry = _mws_entry_for_device(result, camera_id)
+        if entry is None:
+            log.debug("Control endpoint: %s carries no record for %s", what, camera_id)
+            return None
+        return normalize(entry)
+
+    async def handle_camera_settings(request: web.Request) -> web.Response:
+        """Audio, image and video settings for one camera, plus its siren and
+        privacy records. Every object carries supports_* flags the caller must
+        check before offering a control -- see the module docstring."""
+        camera_id, err = _camera_guard(request)
+        if err is not None:
+            return err
+
+        try:
+            # Sequential, not gathered: alarm.com's rate limits are undocumented,
+            # so this route keeps its TELUS load to one call at a time rather than
+            # firing a three-wide burst per poll. Latency is irrelevant here --
+            # callers poll it slowly by design.
+            audio = await _fetch_with_relogin(
+                telus_session, login_lock, camera_settings.get_audio_settings, camera_id)
+            image = await _fetch_with_relogin(
+                telus_session, login_lock, camera_settings.get_image_settings, camera_id)
+            video = await _fetch_with_relogin(
+                telus_session, login_lock, camera_settings.get_video_config, camera_id)
+        except Exception:
+            log.exception("Control endpoint: camera settings fetch failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response({
+            "audio": audio,
+            "image": image,
+            "video": video,
+            "siren": await _mws_camera_record(get_siren_devices, camera_id,
+                                              _MWS_SIREN_READ, _normalize_siren),
+            "privacy": await _mws_camera_record(get_privacy_mode_info, camera_id,
+                                                _MWS_PRIVACY_READ, _normalize_privacy),
+        })
+
+    async def handle_diagnostics(request: web.Request) -> web.Response:
+        camera_id, err = _camera_guard(request)
+        if err is not None:
+            return err
+
+        try:
+            diagnostics = await _fetch_with_relogin(
+                telus_session, login_lock, camera_settings.get_diagnostics, camera_id)
+        except Exception:
+            log.exception("Control endpoint: diagnostics fetch failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response(diagnostics)
+
+    def _out_of_range(fields: dict, current: dict, camera_id: str) -> web.Response | None:
+        """Return a 400 response if a volume field is outside the range the device
+        itself reports, else None.
+
+        Refusing beats clamping: silently writing a different value than the caller
+        asked for to a live camera hides the mismatch from them. A device that
+        publishes no bounds is not second-guessed -- TELUS is then the judge."""
+        for name, min_key, max_key in (("volume", "call_volume_min", "call_volume_max"),
+                                       ("outdoor_volume", None, "outdoor_tone_volume_max")):
+            if name not in fields:
+                continue
+            low = current.get(min_key) if min_key else 0
+            high = current.get(max_key)
+            if not isinstance(low, int) or not isinstance(high, int):
+                continue
+            if not low <= fields[name] <= high:
+                log.warning("Control endpoint: %s reports %s range %s..%s; refusing %s",
+                            camera_id, name, low, high, fields[name])
+                return web.json_response({"error": "malformed"}, status=400)
+        return None
+
+    async def _settings_write(request: web.Request, getter, setter, spec: dict,
+                              support_flags) -> web.Response:
+        """Shared body for the four settings writes: validate, refuse anything
+        the device reports unsupported, then apply.
+
+        support_flags maps a body field to the supports_* key that gates it.
+        The pre-read exists only for that gate -- the read-modify-write a website
+        settings PUT needs is camera_settings' job. It costs one extra GET per
+        write, which is acceptable because a write is an explicit user action and
+        never a background poll.
+
+        camera_settings.CameraSettingsError is caught ahead of the generic handler
+        on BOTH upstream calls because it is not an upstream failure at all: its
+        docstring says to branch on `.unsupported`, and folding it into the blanket
+        `except Exception` reported a device that clearly said "I cannot do this"
+        as a 502 telus_error -- the one status that tells a caller to retry. The
+        generic handler stays behind it for genuine upstream failures."""
+        camera_id, err = _camera_guard(request)
+        if err is not None:
+            return err
+
+        try:
+            body = await request.json()
+        except Exception:
+            log.warning("Control endpoint: malformed %s body for %s",
+                        request.path, camera_id, exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+
+        fields = _validate_fields(body, spec)
+        if fields is None:
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            current = await _fetch_with_relogin(telus_session, login_lock, getter, camera_id)
+        except camera_settings.CameraSettingsError as err:
+            return _settings_error(err, camera_id, "settings pre-read")
+        except Exception:
+            log.exception("Control endpoint: settings pre-read failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        unsupported = _unsupported_flags(
+            current, sorted({support_flags(name) for name in fields}))
+        if unsupported:
+            log.info("Control endpoint: %s reports no support for %s",
+                     camera_id, ", ".join(unsupported))
+            return web.json_response({"error": "unsupported"}, status=422)
+
+        if (err := _out_of_range(fields, current, camera_id)) is not None:
+            return err
+
+        try:
+            result = await _fetch_with_relogin(
+                telus_session, login_lock, _bound(setter, **fields), camera_id)
+        except camera_settings.CameraSettingsError as err:
+            return _settings_error(err, camera_id, setter.__name__)
+        except Exception:
+            log.exception("Control endpoint: %s failed for %s", setter.__name__, camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response(result)
+
+    async def handle_set_volume(request: web.Request) -> web.Response:
+        """Set the camera's talk/call volume -- the volume talkdown plays at."""
+        return await _settings_write(
+            request, camera_settings.get_audio_settings, camera_settings.set_call_volume,
+            {"volume": int}, lambda _name: "supports_call_volume")
+
+    async def handle_set_chime(request: web.Request) -> web.Response:
+        """Set the doorbell's own indoor chime / outdoor tone."""
+        return await _settings_write(
+            request, camera_settings.get_audio_settings, camera_settings.set_chime,
+            _CHIME_FIELDS, _CHIME_SUPPORT.__getitem__)
+
+    async def handle_set_image(request: web.Request) -> web.Response:
+        """Set picture/IR fields on one camera (see _IMAGE_FIELDS for the set)."""
+        return await _settings_write(
+            request, camera_settings.get_image_settings, camera_settings.set_image_settings,
+            _IMAGE_FIELDS, lambda name: f"supports_{name}")
+
+    async def handle_set_video(request: web.Request) -> web.Response:
+        """Set clip recording fields on one camera (see _VIDEO_FIELDS)."""
+        return await _settings_write(
+            request, camera_settings.get_video_config, camera_settings.set_video_config,
+            _VIDEO_FIELDS, lambda name: f"supports_{name}")
+
+    # ---- siren / privacy (mobile MWS API) -----------------------------------
+
+    async def handle_siren(request: web.Request) -> web.Response:
+        """Start or stop this camera's siren.
+
+        A start is gated on the account's canManuallyTriggerSiren permission and
+        never fired blind -- it makes a real siren sound in someone's home. A
+        stop is not gated at all, deliberately."""
+        camera_id, err = _camera_guard(request)
+        if err is not None:
+            return err
+
+        try:
+            action = (await request.json())["action"]
+        except Exception:
+            log.warning("Control endpoint: malformed siren request for %s", camera_id,
+                        exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        if action not in ("start", "stop"):
+            return web.json_response({"error": "malformed"}, status=400)
+
+        if _mobile_session() is None:
+            return web.json_response({"error": "mws_unavailable"}, status=503)
+
+        if action == "start":
+            # canManuallyTriggerSiren is a per-camera PERMISSION (the app carries
+            # a dedicated checker for it), not "this device has a siren", so a
+            # device advertising one is not this account being allowed to fire it
+            # -- docs/mobile-api-findings.md. No matching entry means the device
+            # is absent from the list of siren-capable devices, i.e. no siren.
+            # Uncached, unlike the settings bundle's copy of this same read: a
+            # permission check standing between a caller and a siren in someone's
+            # home is worth one guaranteed-fresh round trip, and a start is an
+            # explicit user action, never a poll, so it adds no steady-state load.
+            try:
+                info = await _mws_call(get_siren_devices)
+            except Exception:
+                log.exception("Control endpoint: siren capability read failed for %s", camera_id)
+                return web.json_response({"error": "telus_error"}, status=502)
+            if not info.get("ok"):
+                log.warning("Control endpoint: %s not ok for %s (%s)",
+                            _MWS_SIREN_READ, camera_id, _mws_failure_note(info))
+                return web.json_response({"error": "telus_error"}, status=502)
+            entry = _mws_entry_for_device(info, camera_id)
+            # Through the same _normalize_siren the settings bundle publishes, so
+            # what Home Assistant reads as can_manually_trigger and what this gate
+            # enforces cannot disagree. It coerces the flag rather than testing it
+            # for truthiness: the value arrives as the STRING "false", and
+            # `not "false"` is False -- so the bare truthiness test this replaces
+            # would have FIRED the siren on a camera that explicitly refused it.
+            siren = _normalize_siren(entry) if entry is not None else None
+            if siren is None or not siren["can_manually_trigger"]:
+                log.info("Control endpoint: %s may not be manually sirened", camera_id)
+                return web.json_response({"error": "unsupported"}, status=422)
+
+        try:
+            result = await _mws_call(start_siren if action == "start" else stop_siren,
+                                     camera_id)
+        except Exception:
+            log.exception("Control endpoint: siren %s failed for %s", action, camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+        if not result.get("ok"):
+            log.warning("Control endpoint: siren %s rejected for %s (%s)",
+                        action, camera_id, _mws_failure_note(result))
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        # The cached siren record now describes a state this command changed.
+        _mws_invalidate(_MWS_SIREN_READ)
+        log.info("Control endpoint: siren %s applied to %s", action, camera_id)
+        return web.json_response({"status": "applied"})
+
+    async def handle_privacy(request: web.Request) -> web.Response:
+        """Turn this camera's privacy mode on or off."""
+        camera_id, err = _camera_guard(request)
+        if err is not None:
+            return err
+
+        try:
+            active = (await request.json())["active"]
+        except Exception:
+            log.warning("Control endpoint: malformed privacy request for %s", camera_id,
+                        exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        if not isinstance(active, bool):
+            return web.json_response({"error": "malformed"}, status=400)
+
+        if _mobile_session() is None:
+            return web.json_response({"error": "mws_unavailable"}, status=503)
+
+        # Uncached for the same reason the siren gate is: this decides whether a
+        # write reaches a camera, and it runs only when a caller asked for one.
+        try:
+            info = await _mws_call(get_privacy_mode_info)
+        except Exception:
+            log.exception("Control endpoint: privacy support read failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+        if not info.get("ok"):
+            log.warning("Control endpoint: %s not ok for %s (%s)",
+                        _MWS_PRIVACY_READ, camera_id, _mws_failure_note(info))
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        entry = _mws_entry_for_device(info, camera_id)
+        # Only an explicit false refuses. Unlike the siren list, this action
+        # returns a privacy-state object rather than an enumeration of capable
+        # devices, so failing to match an entry is a response-shape mismatch and
+        # not evidence that the camera lacks the feature. SupportsPrivacyMode was
+        # false for every camera on the account surveyed, so this gate is the one
+        # that will actually fire (docs/mobile-api-findings.md).
+        #
+        # _normalize_privacy carries that asymmetry (an absent flag reports
+        # supported True; only an explicit false reports False), so the gate is a
+        # plain read of the same "supported" key the settings bundle publishes and
+        # the switch reads -- one definition of "may this camera do it", not two.
+        # The entry-is-None case stays here rather than inside the normaliser
+        # because there is no record to normalise: no match means allow through.
+        privacy = _normalize_privacy(entry) if entry is not None else None
+        if privacy is not None and not privacy["supported"]:
+            log.info("Control endpoint: %s reports no privacy-mode support", camera_id)
+            return web.json_response({"error": "unsupported"}, status=422)
+
+        try:
+            result = await _mws_call(set_privacy_mode, camera_id, active)
+        except Exception:
+            log.exception("Control endpoint: privacy mode write failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+        if not result.get("ok"):
+            log.warning("Control endpoint: privacy mode rejected for %s (%s)",
+                        camera_id, _mws_failure_note(result))
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        # The cached privacy record is now stale by definition, and the caller is
+        # expected to read this state straight back (an accepted MWS command is not
+        # proof the camera moved), so it must not be answered from before the write.
+        _mws_invalidate(_MWS_PRIVACY_READ)
+        log.info("Control endpoint: privacy mode %s for %s",
+                 "on" if active else "off", camera_id)
+        return web.json_response({"status": "applied"})
+
     app = web.Application()
     app[APP_CURRENT_SECRET] = current_secret
 
@@ -649,6 +1573,14 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_post("/control/automations/{rule_id}/resume", handle_resume_rule)
     app.router.add_post("/control/cameras/by-path/{path_name}/activate", handle_activate_by_path)
     app.router.add_post("/control/cameras/by-path/{path_name}/deactivate", handle_deactivate_by_path)
+    app.router.add_get("/control/cameras/{camera_id}/settings", handle_camera_settings)
+    app.router.add_get("/control/cameras/{camera_id}/diagnostics", handle_diagnostics)
+    app.router.add_post("/control/cameras/{camera_id}/settings/volume", handle_set_volume)
+    app.router.add_post("/control/cameras/{camera_id}/settings/chime", handle_set_chime)
+    app.router.add_post("/control/cameras/{camera_id}/settings/image", handle_set_image)
+    app.router.add_post("/control/cameras/{camera_id}/settings/video", handle_set_video)
+    app.router.add_post("/control/cameras/{camera_id}/siren", handle_siren)
+    app.router.add_post("/control/cameras/{camera_id}/privacy", handle_privacy)
     return app
 
 

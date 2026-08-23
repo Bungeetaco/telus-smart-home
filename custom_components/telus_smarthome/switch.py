@@ -14,7 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -31,11 +31,19 @@ from pyalarmdotcomajax.extensions import (
 
 from .base_device import ConfigBaseDevice
 from .bridge_client import bridge_get, read_control_secret
+from .camera_settings_coordinator import (
+    CameraSettingsCoordinator,
+    CameraSettingsEntity,
+    async_add_camera_entities,
+    async_bridge_post,
+    async_get_camera_settings_coordinator,
+)
 from .const import (
     AUTOMATION_RULES_POLL_INTERVAL_SECONDS,
     CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE,
     CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE,
     CAMERA_BRIDGE_AUTOMATIONS_URL,
+    CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE,
     DATA_CONTROLLER,
     DOMAIN,
 )
@@ -89,6 +97,21 @@ async def async_setup_entry(
 
     _add_new_rules()
     config_entry.async_on_unload(automation_coordinator.async_add_listener(_add_new_rules))
+
+    # Camera privacy mode, served by the camera-bridge off the mobile API.
+    settings_coordinator = await async_get_camera_settings_coordinator(hass, config_entry)
+
+    @core.callback
+    def _build_privacy(camera_id: str, _camera_data: dict[str, Any]) -> list[Entity]:
+        """One privacy switch per bridge-reported camera, supported or not."""
+        # The deliberate exception to "no entity for an unreported capability":
+        # privacy support is re-read every poll, so "this camera can't do it" and
+        # "the bridge didn't answer this cycle" arrive identically. An entity that
+        # comes and goes takes its history and any automation referencing it with
+        # it, which is worse than one that reads unavailable for a poll or two.
+        return [CameraPrivacyModeSwitch(settings_coordinator, camera_id)]
+
+    async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_privacy)
 
 
 class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -217,6 +240,58 @@ class AutomationRuleSwitch(CoordinatorEntity[AutomationRulesCoordinator], Switch
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Pause the rule."""
         await self._async_call_bridge(CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE, "pause")
+
+
+class CameraPrivacyModeSwitch(CameraSettingsEntity, SwitchEntity):
+    """Privacy mode for one bridge-served TELUS camera.
+
+    On means privacy mode is active, i.e. the camera has stopped capturing.
+    Privacy mode is gated per camera by the account's `SupportsPrivacyMode`
+    flag, which was false for every camera on the account this was built
+    against, so the unsupported case is the expected one: the switch stays
+    unavailable rather than offering a control the camera would refuse.
+    """
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the privacy switch for one camera."""
+        super().__init__(coordinator, camera_id, "privacy_mode")
+
+    @property
+    def _privacy(self) -> dict[str, Any]:
+        """The camera's privacy section of the bridge's settings response."""
+        return self._settings.get("privacy") or {}
+
+    @property
+    def available(self) -> bool:
+        """Unavailable while the camera reports privacy mode as unsupported."""
+        return super().available and bool(self._privacy.get("supported"))
+
+    @property
+    def is_on(self) -> bool | None:
+        """True while privacy mode is active; None if the state isn't known."""
+        active = self._privacy.get("active")
+        return bool(active) if active is not None else None
+
+    async def _async_set_privacy(self, active: bool) -> None:
+        await async_bridge_post(
+            self.hass,
+            CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE.format(camera_id=self._camera_id),
+            {"active": active},
+        )
+        # Read the state back rather than assuming the command took: this
+        # command was never observed live on a real account (the app exposes no
+        # UI for it), so an accepted request is not proof the camera moved.
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn privacy mode on (the camera stops capturing)."""
+        await self._async_set_privacy(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn privacy mode off (the camera resumes capturing)."""
+        await self._async_set_privacy(False)
 
 
 class ConfigOptionSwitch(ConfigBaseDevice, SwitchEntity):  # type: ignore

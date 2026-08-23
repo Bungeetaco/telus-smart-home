@@ -397,7 +397,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   re-challenge, plus `nc` rollover safety, for very long streams.
 - **E8 Confirm playback from the ack** -- parse the doorbell's per-chunk JSON ack
   body, not just the HTTP 2xx, so a silently-dropped-but-200 case is caught.
-- **E9 (ANSWERED 2026-08-23) Volume control -- it IS settable, via the WEBSITE API.**
+- **E9 (DONE) Volume control -- it IS settable, via the WEBSITE API.**
   The mobile `<cli>`'s `<duav>` reports `SupportsVolumeAdjustment="false"`, which is
   misleading. `PUT /web/api/video/settings/audioSettings/{device-id}` carries
   `microphoneSpeakerSetting.callVolumeValue` with range 0-10 and
@@ -407,7 +407,11 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   exposes the doorbell's own chime (`isOutdoorToneOn`, `outdoorToneVolumeValue` 0-3).
   It uses the cookie + `ajaxrequestuniquekey` session the integration already holds.
   Caveat: settings PUTs send the WHOLE object back, so read-modify-write.
-  See [web-portal-api-findings.md](web-portal-api-findings.md).
+  Implemented in `camera-bridge/bridge/camera_settings.py` (read-modify-write,
+  `supports_*` gating) behind `POST /control/cameras/{id}/settings/volume`, and
+  surfaced as a speaker-volume number entity in Home Assistant. The chime half
+  landed with it. See [control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)
+  and [web-portal-api-findings.md](web-portal-api-findings.md).
 
 ### Robustness / networking
 - **E10 Auto-detect LAN vs WAN reachability** to choose the PutAudioStream
@@ -504,3 +508,84 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   moved to `config.TALK_CHUNK_MS` / `config.TALK_PREBUFFER_MS` (the transport
   references them under the short names) and documented in
   [configuration.md](configuration.md), including the trade-off each one makes.
+
+### Adjacent alarm.com surfaces (from the web-portal survey)
+These are not talkdown, but they are gaps found while working the same account
+and there is no better backlog to put them in. Full detail in
+[web-portal-api-findings.md](web-portal-api-findings.md).
+
+- **E24 Bluetooth arming device config -- genuinely unimplemented.**
+  `PUT /web/api/devices/bluetoothArmingDevices/{id}` carries
+  `isDisarmingEnabledForDevice` (plus `enrolledPartitionId`, `description`,
+  `macAddress`, `managedDeviceType: 29`) -- i.e. whether a paired phone may
+  auto-disarm the panel on approach. Nothing in this integration and nothing in
+  `pyalarmdotcomajax` models it. Whole-object read-modify-write, the same shape
+  as the camera settings documents, so `camera_settings.py` is the template.
+  Worth doing here rather than deferring to local panel access: alarm.com is the
+  **configuration authority** for the Qolsys panel and pushes settings down to
+  it, while the Control4 endpoint on the same panel is **local access only** --
+  the two coexist and are wired independently, so this is a real alarm.com-side
+  toggle, not a cloud mirror. Treat it with siren-level caution: it decides
+  whether a phone walking up to the house disarms the alarm.
+- **E25 Selective sensor bypass -- a small delta, NOT a missing capability.**
+  `POST /web/api/devices/partitions/{id}/bypassSensors` was previously read as
+  "this project cannot bypass sensors". It can: `CONF_FORCE_BYPASS` is passed as
+  `force_bypass` on all three arm calls in `alarm_control_panel.py`, so bypass
+  ships today. The endpoint would only add *selective* bypass (naming specific
+  sensors) on top of the existing bypass-whatever-is-open. **If this is ever
+  built it must extend the existing `force_bypass` option, never sit beside it**
+  -- two independent bypass paths against one partition will disagree about
+  which zones are skipped on a live alarm system.
+
+## Camera-settings gaps found while implementing E9 (2026-08-23)
+
+Logged rather than fixed, per the project's rule that a gap noticed is a gap
+recorded. None of these block the shipped feature; all were found while grounding
+`camera_settings.py` against the browser capture.
+
+- **E26 The doorbell's chime has no Home Assistant entity.**
+  `set_chime` works and `POST …/settings/chime` is routed, but nothing in the
+  integration calls it -- `const.py` even defines
+  `CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE` with no consumer. The indoor chime
+  on/off and the outdoor tone on/off are both `FeatureSupport: 2` on the
+  reference doorbell, so two switches would work today. Note the outdoor tone's
+  *volume* is `FeatureSupport: 0` there -- a control for it would be correctly
+  refused, so gate on `supports_outdoor_tone_volume`, which is a different flag
+  from `supports_outdoor_tone`.
+
+- **E27 `selectedChimeType` is readable but not writable.**
+  `get_audio_settings` reports `chime_type` and `chime_type_options`
+  (`[-1, 0, 1]` on the reference device, `indoorChimeTypeFeatureSupport: 2`), but
+  `set_chime` has no argument for it. A select entity is the obvious shape. The
+  option values are bare ints with no labels in the payload; the portal UI must
+  hold the names, so a capture of that screen would be needed to label them.
+
+- **E28 Resolve the option-list key/value ambiguity.**
+  `clipResolutionOptions` and `clipQualityOptions` are objects, and the API is
+  inconsistent about which half is the settable value (see
+  [web-portal-api-findings.md](web-portal-api-findings.md)). `_options` currently
+  accepts either half. A single captured `PUT` that *changes* clip quality would
+  settle it and let the check tighten. `clipQualityFeatureSupport` is `0` on the
+  reference doorbell, so this needs a different camera model to test.
+
+- **E29 Surface `Retry-After` on the siren and privacy routes.**
+  `telus_auth.RateLimited` carries the server's own retry delay and
+  `_mws_account_read` honours it for the cached reads, but on
+  `POST …/siren` / `POST …/privacy` the exception becomes a bare `502` and Home
+  Assistant retries on its own schedule. Returning `429` with the header would
+  let the caller back off correctly.
+
+- **E30 Two more settings fields are parsed but not routed.**
+  `camera_settings` handles `max_exposure` (image) and
+  `camera_triggered_clip_duration` (video), but neither is in
+  `control_server._IMAGE_FIELDS` / `_VIDEO_FIELDS`, so neither is reachable over
+  the control API. Both are `FeatureSupport: 0`/unsupported on the reference
+  doorbell, which is why they were not needed -- another model may differ.
+
+- **E31 Signal strength has no unit.**
+  The bridge reports `normalizedSignalStrength`, a 0-100 score. The sensor
+  deliberately declares no device class and no unit, because the fallback key
+  names kept for untested camera models may be real dBm and mislabelling would
+  poison Home Assistant's long-term statistics. Confirming that every model this
+  integration sees reports the normalized score would allow labelling it `%`.
+

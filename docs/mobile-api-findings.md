@@ -26,6 +26,14 @@ opaque UDP.
 `GetDoorbellCameraList`, `GetLiveVideoStream`, `StartFullDuplex`, `EndLiveStream`,
 `SeamlessLoginNew`, `GetStreamPreloadProperties`, `GetDoorbellAssociatedItems`.
 
+Added since this survey: `GetAllSirenDevices`, `ManualSirenStart`,
+`ManualSirenStop`, `GetAllCameraPrivacyModeInfo`, `SetCameraPrivacyModeState`,
+`ValidateSession` — all in `camera-bridge/bridge/mws_client.py`, exposed as the
+bridge's siren and privacy routes (see
+[control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)).
+They are marked **[implemented]** below; everything else in this document is
+still unused.
+
 ## Actions NOT used, grouped by what they would enable
 
 ### Camera / doorbell diagnostics — highest practical value
@@ -45,7 +53,7 @@ the existing talkdown ones.
 | --- | --- |
 | `UberPoll` | One batch poll returning **deltas** for every device class. The response carries `Completed*CommandsList` / `TimedOut*CommandsList` elements — this is how the app learns a command actually took effect. |
 | `UberSeamlessLoginNew` | Combined seamless login + initial bulk fetch (we do the two separately) |
-| `ValidateSession` | Cheap liveness check; response `<vsr … siv="true">`. The app calls it constantly. Better than inferring auth health indirectly. |
+| `ValidateSession` **[implemented]** | Cheap liveness check; response `<vsr … siv="true">`. The app calls it constantly. Better than inferring auth health indirectly. Note it answers **XML** even though its JSON-era siblings below do not. |
 | `GetDashboard` | Dashboard summary; response `<gdr>` carries flags including some that look siren-related (`hsr`, `srtsmac`) |
 
 The `AddToPendingCommands=true` parameter on commands plus those UberPoll lists
@@ -100,7 +108,7 @@ the account tested), `POST adc-vid-rstats.devicetask.com/api/v1/RecordMobileStre
 integration drives locks through the website API today, whereas this works off the
 mobile session the bridge already mints for talkdown. Worth knowing as a fallback.
 
-## Camera siren and privacy mode — resolved from the app binary
+## Camera siren and privacy mode — resolved from the app binary **[implemented]**
 
 The app calls `GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo` on every
 camera screen, but the account tested exposes no UI for either, so no command
@@ -116,9 +124,9 @@ form-urlencoded POST with the standard token envelope.
 
 | Action | Extra parameters | Response |
 | --- | --- | --- |
-| `ManualSirenStart` | `DeviceId` | `StartSirenResponse` (JSON) |
-| `ManualSirenStop` | `DeviceId` | `StopSirenResponse` (JSON) |
-| `SetCameraPrivacyModeState` | `DeviceId`, `IsActive` (`true`/`false` as a string) | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
+| `ManualSirenStart` **[implemented]** | `DeviceId` | `StartSirenResponse` (JSON) |
+| `ManualSirenStop` **[implemented]** | `DeviceId` | `StopSirenResponse` (JSON) |
+| `SetCameraPrivacyModeState` **[implemented]** | `DeviceId`, `IsActive` (`true`/`false` as a string) | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
 
 Constructors in the app are `(customerId, deviceId)` and
 `(customerId, deviceId, isActive)`; `customerId` rides in the standard envelope
@@ -128,26 +136,30 @@ Constructors in the app are `(customerId, deviceId)` and
 
 | Action | Response shape |
 | --- | --- |
-| `GetAllSirenDevices` | `{"AllCameraSirenInfo": [ {"DeviceId": …, "isActive": …, "timestampEnd": …, "canManuallyTriggerSiren": …}, … ]}` |
-| `GetAllCameraPrivacyModeInfo` | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
+| `GetAllSirenDevices` **[implemented]** | `{"AllCameraSirenInfo": [ {"DeviceId": …, "isActive": …, "timestampEnd": …, "canManuallyTriggerSiren": …}, … ]}` |
+| `GetAllCameraPrivacyModeInfo` **[implemented]** | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
 
-### Before implementing, note these caveats
+### Caveats — all still true, and all honoured by the implementation
 
 - **`canManuallyTriggerSiren` is a per-camera permission**, and the app has a
   dedicated `ManualCameraSirenPermissionChecker`. A device advertising a siren is
   not the same as this account being allowed to trigger it — read
-  `GetAllSirenDevices` first and honour that flag rather than firing blind.
+  `GetAllSirenDevices` first and honour that flag rather than firing blind. The
+  bridge reads it before every start and answers `422 unsupported` when it is
+  false; Home Assistant creates no siren buttons for such a camera at all.
 - The siren is **time-bounded**: `CameraSirenInfoDTO` carries `timestampEnd`, and
   the app has an error path for "isActive:true but received null or empty
   timestampEnd". Expect a server-chosen duration, and use `ManualSirenStop` to end
   it early rather than assuming it stops on its own.
 - The doorbell's `<cli>` advertises `srn="true"` and `GetDashboard` carries
   siren-shaped attributes, but **no live command was ever observed on this
-  account** — the UI is absent. Treat a first invocation as an experiment, on a
-  device where an unexpected siren is acceptable.
+  account** — the UI is absent. This is still true: the implemented siren path has
+  never been fired against a real device. Treat a first invocation as an
+  experiment, on a device where an unexpected siren is acceptable.
 - Privacy mode is also gated by `SupportsPrivacyMode`, which is **false** for the
   cameras on the account tested — so `SetCameraPrivacyModeState` would likely be
-  refused there even though the action exists.
+  refused there even though the action exists. The privacy switch therefore ships
+  reporting *unavailable* on those cameras rather than pretending to work.
 
 ## Not resolved by this survey
 
