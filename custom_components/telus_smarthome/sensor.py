@@ -12,7 +12,9 @@ notification) rather than only as an HTTP error to whoever triggered it.
 The camera diagnostic sensors (signal strength, battery, device status) attach
 to the bridge-served camera devices themselves. A camera degrading to poor
 Wi-Fi is otherwise a completely silent failure mode -- the stream just gets
-worse -- which is what these exist to make visible.
+worse -- which is what these exist to make visible. CameraSolarPanelSensor joins
+them from the settings side rather than the diagnostics one (E39), and is
+expected to appear on NO camera on most accounts.
 
 ActivityFeedSensor exposes the full recent Activity list (not just the
 single latest entry event.py's TelusActivityEvent tracks) as an attribute,
@@ -67,6 +69,14 @@ LOGGER = logging.getLogger(__name__)
 
 AUTH_HEALTH_STATES = ["ok", "reauth_required", "telus_error"]
 
+# The two states CameraSolarPanelSensor can report. Named rather than inlined so
+# the entity, its `options` list and strings.json's state block cannot drift --
+# an ENUM sensor whose state is not in its own options logs an error on every
+# update, and a state missing from the translations renders as a raw slug.
+SOLAR_PANEL_CONNECTED = "connected"
+SOLAR_PANEL_NOT_CONNECTED = "not_connected"
+SOLAR_PANEL_STATES = [SOLAR_PANEL_CONNECTED, SOLAR_PANEL_NOT_CONNECTED]
+
 
 async def async_setup_entry(
     hass: core.HomeAssistant,
@@ -118,6 +128,28 @@ async def async_setup_entry(
 
     async_add_camera_entities(
         config_entry, settings_coordinator, async_add_entities, _build_diagnostics
+    )
+
+    @core.callback
+    def _build_solar(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """A solar-panel sensor, only for a camera that reports the feature.
+
+        Expect this to yield NOTHING on most accounts, including both cameras on
+        the one this was built against: `connectedToSolarPanelFeatureSupport` is
+        0 on each, so the bridge reports supports_connected false. That is the
+        correct outcome, not a gap -- `isConnectedToSolarPanel` is also false
+        there, and a camera with no solar hardware at all is indistinguishable
+        from one that has some and is disconnected if you read the value instead
+        of the flag. A permanent "Not connected" on every doorbell in every
+        install would be noise dressed up as diagnostics.
+        """
+        solar = (camera_data.get("settings") or {}).get("solar") or {}
+        if not solar.get("supports_connected"):
+            return []
+        return [CameraSolarPanelSensor(settings_coordinator, camera_id)]
+
+    async_add_camera_entities(
+        config_entry, settings_coordinator, async_add_entities, _build_solar
     )
 
 
@@ -489,6 +521,69 @@ class CameraDeviceStatusSensor(_CameraDiagnosticSensor):
     def state_class(self) -> SensorStateClass | None:
         """Always None -- a status is a label, never a measurement."""
         return None
+
+
+class CameraSolarPanelSensor(CameraSettingsEntity, SensorEntity):
+    """Whether one bridge-served TELUS camera reports a solar panel attached (E39).
+
+    A SENSOR rather than a binary_sensor, which is worth justifying because the
+    underlying field is a plain boolean and binary_sensor is the reflexive choice
+    for one.
+
+    Home Assistant renders a binary_sensor's two states through its device class,
+    and there is no device class for "is a solar accessory attached". Without one
+    it reads as a bare On/Off, which for a wiring fact says the wrong thing -- On
+    suggests something is powered up or generating, when all the camera has told
+    us is that an accessory is present. An enum sensor with translated states
+    says Connected / Not connected, which is exactly and only what the flag
+    means. The device classes that come closest (`plug`, `power`, `connectivity`)
+    all describe a live electrical or network condition rather than an
+    installation, so borrowing one would trade a vague label for a wrong one.
+
+    The secondary reason is structural: every bridge-coordinator-backed camera
+    entity in this integration lives here, and binary_sensor.py is exclusively
+    the pyalarmdotcomajax device-model platform -- it has no coordinator wiring
+    of this kind at all, so putting the first one there would duplicate the
+    plumbing rather than reuse it.
+
+    No state class and no statistics: this does not change unless someone
+    physically installs or removes a panel.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:solar-panel"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = SOLAR_PANEL_STATES
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the solar-panel sensor for one camera."""
+        super().__init__(coordinator, camera_id, "solar_panel")
+
+    @property
+    def _solar(self) -> dict[str, Any]:
+        """The camera's solar settings section."""
+        return self._settings.get("solar") or {}
+
+    @property
+    def available(self) -> bool:
+        """Also unavailable if the camera stops reporting the feature.
+
+        Gated on the support flag, never on the value: a camera that cannot
+        answer the question sends the same `connected: false` as one that
+        answered "no".
+        """
+        return super().available and bool(self._solar.get("supports_connected"))
+
+    @property
+    def native_value(self) -> str | None:
+        """"connected" / "not_connected", or None if the camera has not said."""
+        # `is not None`, not truthiness: False is a real answer here ("supported,
+        # and nothing is attached") and must not read as unknown the way a bridge
+        # too old to send the section does.
+        value = self._solar.get("connected")
+        if value is None:
+            return None
+        return SOLAR_PANEL_CONNECTED if value else SOLAR_PANEL_NOT_CONNECTED
 
 
 # Field in the bridge's /diagnostics body -> the sensor that presents it. Used

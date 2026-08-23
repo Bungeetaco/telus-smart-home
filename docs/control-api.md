@@ -76,6 +76,10 @@ BASE=http://127.0.0.1:8199
 | POST | `/control/partitions/{partition_id}/bypass` | bearer | Bypass / un-bypass named sensors — **a bypassed zone stops triggering the alarm** |
 | GET | `/control/arming-devices` | bearer | List the Bluetooth arming devices (phones that may auto-disarm the panel) |
 | POST | `/control/arming-devices/{device_id}/disarming` | bearer | Turn a phone's auto-disarm permission on or off |
+| POST | `/control/arming-devices/{device_id}/enrolled-partition` | bearer | Move a paired phone to a different partition |
+| DELETE | `/control/arming-devices/{device_id}` | bearer | Unpair one phone — **not undoable from this side** |
+| GET | `/control/bluetooth-disarming` | bearer | The panel-wide Bluetooth pairing flag and disarm window |
+| POST | `/control/bluetooth-disarming` | bearer | Change the panel-wide Bluetooth pairing flag and disarm window |
 | POST | `/control/cameras/{camera_id}/settings/notifications` | bearer | Turn TELUS-side push notifications on/off |
 | POST | `/control/cameras/{camera_id}/settings/led` | bearer | Turn the device's status LED on/off, or set its brightness |
 | POST | `/control/cameras/{camera_id}/settings/image` | bearer | Set picture settings (brightness, HDR, IR, night vision, …) |
@@ -212,7 +216,14 @@ Notes:
   `no_upstream_audio`, `timeout`, `transport_error`, `network_error`,
   `upstream_error`, `cancelled`) — never exception text, which could carry a URL
   or token.
-- `recent` is the last 20 talks, oldest first.
+- `recent` is the last 20 talks, oldest first. Each entry carries the outcome plus
+  `played_seconds`, `seconds`, `renegotiations`, `codec` and `chunks` when the
+  talk reported them.
+- **The per-talk timing measurements are not aggregated here.** `put_rtt_*`,
+  `late_chunks`, `max_late_ms` and `prebuffer_ms` are returned on the talk
+  response itself (see
+  [`POST …/talk`](#post-controlcamerascamera_idtalk)); these counters stay coarse
+  on purpose, for "has this been failing all week?" rather than for tuning.
 - `GET /control/status` carries a short summary of the same data alongside the
   camera states.
 
@@ -281,9 +292,10 @@ curl -s -H "Authorization: Bearer $SECRET" \
 ## `POST /control/cameras/{camera_id}/talk`
 
 Plays a short audio clip (typically an HA-rendered TTS phrase) through the
-camera's speaker via two-way audio (talkdown). **Off by default:** the route
-is enabled by default and returns `403` only when `TALKDOWN_ENABLED` is set false,
-so the wiring ships inert.
+camera's speaker via two-way audio (talkdown). The route is **enabled by
+default** and returns `403` only when `TALKDOWN_ENABLED` is set false. Nothing
+ever speaks on its own: it plays what a caller explicitly asks it to, and nothing
+else.
 
 Only one talk may be in flight per camera at a time. A concurrent trigger for
 the same camera is rejected with `409` — never queued. See `talk.py` /
@@ -312,12 +324,59 @@ tuned for speech). The three inputs resolve as follows:
 **Success response**
 
 ```json
-200 {"status": "spoken", "path": "webrtc"}
+200 {
+  "status": "spoken",
+  "path": "full_duplex",
+  "codec": "mulaw",
+  "chunks": 251,
+  "bytes": 80320,
+  "seconds": 10.0,
+  "played_seconds": 10.0,
+  "renegotiations": 0,
+  "reconnects": 0,
+  "stopped": false,
+  "encode": "streaming",
+  "put_rtt_p50_ms": 6.2,
+  "put_rtt_p95_ms": 11.8,
+  "put_rtt_max_ms": 41.0,
+  "put_rtt_stdev_ms": 3.1,
+  "late_chunks": 0,
+  "max_late_ms": 0.0,
+  "prebuffer_ms": 500,
+  "cert_pinned": true
+}
 ```
 
-`path` reports which upstream-audio transport carried the clip — `"webrtc"` or
-`"srtp"` (additional keys from the talk manager's result are merged into the
-response).
+The whole result the talk manager produced is merged into the response, so the
+exact key set depends on which transport ran.
+
+| Field | Notes |
+| --- | --- |
+| `path` | Which upstream-audio transport carried the clip: `full_duplex` (the chunked HTTP PUT the ADC-VDB750 uses), `webrtc`, or `srtp` |
+| `codec` | The codec that actually carried it — `mulaw` on the doorbell this was built against |
+| `chunks` / `bytes` | Chunks and bytes delivered to the device |
+| `seconds` | Length of the audio that was produced by the encoder |
+| `played_seconds` | Audio actually pushed to the speaker — lower than `seconds` for a clip that was stopped early |
+| `stopped` | `true` when a `talk/stop` ended it; the call still returns `200` with partial stats |
+| `renegotiations` / `reconnects` | How many times a fresh device session, or a fresh socket on the same session, was needed mid-clip. Non-zero is not a failure — the stream resumes at the exact byte offset it reached — but a persistently non-zero count says the session or the link is unstable |
+| `encode` | `streaming` or `buffered`, i.e. which side of `TALK_STREAMING_ENCODE` the clip ran on |
+| `cert_pinned` | Present only when a certificate pin applied and a certificate was seen: `true` when the device's certificate matched the pin, `false` when it did not (in `warn` mode, where the talk proceeds anyway) |
+
+**Timing measurements** (full-duplex path; present whenever at least one chunk
+was delivered). They exist so a later tuning of the chunk size or the
+jitter-buffer lead has real numbers instead of a guess — the current values were
+tuned by ear:
+
+| Field | Notes |
+| --- | --- |
+| `put_rtt_p50_ms`, `put_rtt_p95_ms`, `put_rtt_max_ms`, `put_rtt_stdev_ms` | Distribution of the per-chunk PUT round trip. Sampling is capped at the first 50 000 chunks (~33 minutes of audio), past which the distribution is long settled |
+| `late_chunks` | Chunks whose scheduled slot had already passed when they went out, i.e. round-trip time eating into the jitter-buffer lead. **This is the one that matters**, and it **deliberately excludes the opening prebuffer fill** — those chunks go out back to back *by design*, since that burst is what fills the doorbell's buffer, and counting them would report every healthy talk as a dozen chunks late |
+| `max_late_ms` | The worst such overshoot |
+| `prebuffer_ms` | The lead actually used. Equal to `TALK_PREBUFFER_MS` unless `TALK_PREBUFFER_ADAPTIVE` is on and raised it |
+
+A healthy talk on the LAN reports single-digit `put_rtt_p50_ms` and
+`late_chunks: 0`. Persistent late chunks with a `put_rtt_p95_ms` approaching
+`prebuffer_ms` is the shape of audio that will be heard as gaps.
 
 **Errors**
 
@@ -400,9 +459,11 @@ and treats that case as a no-op.
 
 ## Camera settings, diagnostics, siren and privacy
 
-Eight routes cover the per-camera **settings** surface (speaker volume, the
-doorbell's own chime, image, video/clip), read-only **diagnostics** (signal,
-battery, device status), the camera **siren**, and **privacy mode**.
+Ten routes cover the per-camera **settings** surface (speaker volume, the
+doorbell's own chime, TELUS's own push notifications, the status LED, image,
+video/clip), read-only **diagnostics** (signal, battery, device status), the
+camera **siren**, and **privacy mode**. One settings section — `solar` — is
+read-only and has no write route of its own.
 
 They are independent of talkdown: `TALKDOWN_ENABLED` does not gate them and they
 never open an audio session. Settings and diagnostics come from the **website
@@ -431,7 +492,7 @@ Two properties of the upstream API shape every route in this group:
   `supports_*` boolean on the read routes, and writing an unsupported field is a
   **`422 unsupported`**, not a silently-dropped write.
 
-Errors shared by all eight (individual routes note anything extra):
+Errors shared by all ten (individual routes note anything extra):
 
 | Status | Body | Meaning |
 | --- | --- | --- |
@@ -465,11 +526,15 @@ a different value will fix. Both leave the camera untouched.
 
 ## `GET /control/cameras/{camera_id}/settings`
 
-Reads one camera's audio, image and video/clip settings, plus its siren and
-privacy records — five keys. Uncached: a settings value a UI renders as a slider
-must not be stale. Each call is **three website GETs and two mobile MWS POSTs**,
-which makes it the heaviest read here; the Home Assistant side polls it every
-120 s, and you should not poll it tighter.
+Reads one camera's audio, image and video/clip settings, its status LED,
+notification and solar-panel sections, and its siren and privacy records — eight
+keys. Uncached: a settings value a UI renders as a slider must not be stale. Each
+call is **four website GETs and two mobile MWS reads** (plus one more, cached for
+much longer, for the chime-type names), which makes it the heaviest read here;
+the Home Assistant side polls it every 120 s, and you should not poll it tighter.
+
+`led`, `notifications` and `solar` all come out of the **same** upstream
+`generalSettings` document and cost one request between them.
 
 **Path parameter:** `camera_id` — must exist in the camera registry.
 
@@ -625,6 +690,11 @@ which makes it the heaviest read here; the Home Assistant side polls it every
     ],
     "raw": {}
   },
+  "solar": {
+    "supports_connected": false,
+    "connected": false,
+    "raw": {}
+  },
   "siren": {
     "can_manually_trigger": true,
     "active": false,
@@ -748,9 +818,9 @@ unlike the ambiguous `<field>Options` objects elsewhere in this API.
 
 ### The `led` object — the status indicator light
 
-Read from `generalSettings`, a document that also carries the doorbell's
-TELUS-side notification toggles and its solar-panel status; neither is modelled,
-but both are in `raw`, and both are resent untouched by a write.
+Read from `generalSettings`, the same document that carries the `notifications`
+and `solar` objects below; a write to any of them resends the other two
+untouched.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -829,6 +899,34 @@ enforced by this bridge or by nothing**: `camera_settings` refuses anything
 outside `format_choices` before the read-modify-write touches the document.
 `format_choices` is a constant rather than an upstream read, so unlike
 `chime_type_choices` it is always present when the feature is supported.
+
+### The `solar` object — is a solar panel attached
+
+Read from the same `generalSettings` document as the LED and the notification
+toggles, at no extra upstream cost. **Read-only: there is no write route**, and
+that is deliberate — whether a solar panel is bolted to a camera is a fact about
+the installation, and the two things that could change it are someone fitting a
+panel and someone removing one.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `supports_connected` | bool | From `connectedToSolarPanelFeatureSupport` — whether this device has anything to say about a solar panel at all |
+| `connected` | bool | From `isConnectedToSolarPanel`. Only meaningful when `supports_connected` is true |
+| `raw` | object | The untouched `solarPanelSetting` document |
+
+**Expect `supports_connected: false` on any camera that is not a battery+solar
+model** — it is false on both cameras this was built against. That is the correct
+outcome rather than a gap: `connected` is false there too, and a camera with no
+solar hardware reporting a permanent "no solar panel" is noise dressed up as
+diagnostics. A caller should create nothing for a camera that reports the feature
+unsupported.
+
+One nuance worth knowing if you read `raw`: elsewhere in this API a
+`*FeatureSupport` of `2` means "supported **and** editable", and nothing
+establishes that a camera reporting `2` here would accept a write — the field
+reads like a statement about hardware rather than a preference. Since nothing
+writes it, the bridge uses the enum only as "does this device answer the
+question", which is the weaker claim and the one that fails closed.
 
 ### The `siren` and `privacy` sections — a fixed contract
 
@@ -1147,21 +1245,55 @@ disarm the panel when they come within range.
 
 ```json
 {"devices": [
-  {"id": "<unit>-5264",
+  {"id": "<unit>-<did>",
    "description": "Someone's iPhone",
    "disarming_enabled": true,
    "enrolled_partition_id": "1",
+   "enrolled_partition_choices": [
+     {"value": "1", "label": "Home"}
+   ],
    "supports_disarming_toggle": true,
+   "supports_enrolled_partition": true,
    "raw": {}}
 ]}
 ```
 
-`supports_disarming_toggle` is assembled rather than read from a single flag:
-this endpoint publishes no `*FeatureSupport` enum and no `canSetX` for the field,
-and the portal renders its switch unconditionally. It combines `canBeSaved`
-(which does discriminate — true on these devices, false on plain mobile devices
-in the same catalog), `canAccessWebSettings` (the bridge is a website client),
-and the field being present as a real boolean.
+| Field | Type | Notes |
+| --- | --- | --- |
+| `id` | string | The alarm.com device id of the paired phone |
+| `description` | string | The phone's name as its owner typed it — routinely a real person's name, so treat it as text: never parsed, sliced, or used to build an identifier |
+| `disarming_enabled` | bool | Whether this phone disarms the panel on approach |
+| `enrolled_partition_id` | string | The partition it disarms, as the panel's own partition **number** (`"1"`) — see the warning below |
+| `enrolled_partition_choices` | list | `{"value": "<partition number>", "label": "<partition description>"}` for every partition on the account, so a client can build a picker without a second read. `[]` when the partition list could not be read |
+| `supports_disarming_toggle` | bool | Whether the disarming toggle may be written |
+| `supports_enrolled_partition` | bool | Whether the enrolled partition may be written |
+| `raw` | object | The untouched upstream record |
+
+**`enrolled_partition_id` is the partition NUMBER, not a device id.** The same
+partition also has an alarm.com device id of the form `<unit>-127` — which is
+what `GET /control/partitions` reports as `id` and what the alarm panel entity
+uses as its unique id — and posting *that* to the write route below is a `400`.
+Match against `partition_id` from `/control/partitions`, as strings.
+
+`enrolled_partition_choices` is stamped onto **every** response that carries an
+arming device, the list route and both write routes alike, because the record is
+a single contract. A client that renders a picker from the choices, writes, and
+then adopts the echoed record must not have the choices vanish underneath it.
+
+Both `supports_*` flags are assembled rather than read from a single flag: this
+endpoint publishes no `*FeatureSupport` enum and no `canSetX`, and the portal
+renders its controls unconditionally. Each combines `canBeSaved` (which does
+discriminate — true on these devices, false on plain mobile devices in the same
+catalog), `canAccessWebSettings` (the bridge is a website client), and *its own*
+field being present with a usable type. They are separate flags because a record
+can be missing one field and not the other, and gating the partition control on
+the disarming field would offer it on the strength of something unrelated.
+
+`supports_enrolled_partition` is deliberately **not** gated on the account having
+more than one partition. That is a fact about the account, not about this
+record's writability — but it is a real consideration for whoever builds a
+control, and the Home Assistant side acts on it (see
+[ha-integration.md](ha-integration.md#the-entities)).
 
 **Errors:** the shared table, minus `400`/`422` — this route takes no caller
 input, so an upstream problem is a `502` rather than "you asked wrong".
@@ -1193,6 +1325,188 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}' \
   $BASE/control/arming-devices/<device_id>/disarming
+```
+
+---
+
+## `POST /control/arming-devices/{device_id}/enrolled-partition`
+
+Moves one paired phone to a different partition — **which** partition it disarms,
+the same class of setting as whether it may disarm at all.
+
+**Request body:** `{"partition_id": "<partition number>"}` — a non-empty JSON
+**string** carrying the panel's own partition number (`"1"`, `"2"`), exactly as
+the arming-device record reports it. It is never coerced: it goes back onto a
+whole-record `PUT` as it arrived, and `str(1)` would change its type on the wire
+without anyone noticing.
+
+Four refusals, cheapest first:
+
+| Situation | Status |
+| --- | --- |
+| Body is not a non-empty JSON string | `400 malformed` |
+| Device id is not in the catalog | `404 unknown_device` |
+| The record's own `supports_enrolled_partition` is false | `422 unsupported` |
+| The partition is not one this account has | `400 malformed` |
+
+That last gate **fails closed**: the partition must appear in the account's own
+partition list, and if that list cannot be read the write does **not** happen
+(`502`) rather than proceeding unverified. A `PUT` here replaces the whole
+record, and `enrolledPartitionId` is a bare panel-side number with no way to tell
+a valid one from a typo by looking at it, so writing an id nothing confirmed
+exists is the mistake this route is built to be incapable of making.
+
+**Success response:** the same object `GET /control/arming-devices` returns for
+that device, `enrolled_partition_choices` included.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"partition_id": "2"}' \
+  $BASE/control/arming-devices/<device_id>/enrolled-partition
+```
+
+---
+
+## `DELETE /control/arming-devices/{device_id}`
+
+Unpairs one phone from the panel's Bluetooth disarming. **This cannot be undone
+from this side** — re-pairing needs physical access to both the phone and the
+panel. There is no cloud-side undo and nothing the bridge can call to reverse it.
+
+One device per call. The vendor portal also offers a delete-all for the whole
+account; it is deliberately not implemented, because one mis-aimed call would
+unpair every phone in the household at once.
+
+Membership is checked against the device catalog first, so an id the catalog does
+not know is a `404` rather than a `DELETE` aimed at whatever that id happens to
+address.
+
+**Success response**
+
+```json
+200 {"status": "unpaired", "unpaired": "<unit>-<did>", "description": "Someone's iPhone"}
+```
+
+The description is read **before** the delete, so the reply can name the phone
+that was removed — afterwards it is no longer knowable.
+
+**Errors:** the shared table, plus `404 {"error": "unknown_device"}`.
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $SECRET" \
+  $BASE/control/arming-devices/<device_id>
+```
+
+---
+
+## `GET /control/bluetooth-disarming`
+
+The **panel-wide** Bluetooth disarming settings: whether the panel accepts
+Bluetooth pairing at all, and the disarm window. System-wide, one document per
+account, addressed by the session's own system id.
+
+**Response**
+
+```json
+200 {
+  "id": "<system-id>",
+  "pairing_enabled": true,
+  "supports_pairing_enabled": true,
+  "timeout": 5,
+  "supports_timeout": true,
+  "timeout_unit": "minutes",
+  "timeout_options": [1, 5, 10, 20, 30],
+  "enrolled_device_ids": ["<unit>-<did>"],
+  "raw": {}
+}
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `pairing_enabled` | bool | Whether the panel accepts Bluetooth pairing — i.e. whether a phone that is not already enrolled can be added |
+| `timeout` | int \| null | The disarm window, in the unit below |
+| `timeout_unit` | string | `"minutes"` |
+| `timeout_options` | list | The five windows the vendor offers: `[1, 5, 10, 20, 30]` |
+| `supports_pairing_enabled` / `supports_timeout` | bool | See the caveat below — a weaker claim than the per-device flags |
+| `enrolled_device_ids` | list | The phones the panel says are paired, as ids. The same set `GET /control/arming-devices` discovers, reported here so a caller can tell "pairing is configured" from "the document exists but nothing is paired" without a second read |
+| `raw` | object | The untouched flat document |
+
+**The unit and the option set do not come from the payload.** The upstream
+document publishes neither: it carries a bare `timeout` with no unit, no bounds
+and no options. Both come from the vendor portal's own picker, which builds its
+five entries by rendering `[1, 5, 10, 20, 30]` through a "minutes" string — which
+is exactly why the bridge reports them, since no client could derive them from
+the document.
+
+**The `supports_*` flags here are weaker than the per-device ones.** This
+document publishes no capability flag of any kind — its whole attribute set is
+`deviceId`, `isBluetoothPairingEnabledForSystem` and `timeout` — so rather than
+invent a gate, the bridge reports the only signal there is: the field is present
+and holds a value of the expected type. It fails closed for a panel with no
+Bluetooth support and for a payload shape that has changed, but it does **not**
+claim the panel will accept a write.
+
+**This is not the capability gate for the per-device disarming toggle**, and must
+not be used as one. The portal's per-device settings page never consults this
+document, and **whether the panel firmware treats system-wide `pairing_enabled:
+false` as a veto over a phone whose own flag is `true` is not known.** "The
+portal does not read it" is evidence about the portal, not about the firmware.
+Treat the two as independent, and do not tell a user that turning one off
+disables the other.
+
+**Errors:** the shared table, minus `400`/`422` — this route takes no caller
+input, so an upstream problem is a `502`.
+
+---
+
+## `POST /control/bluetooth-disarming`
+
+Changes the panel-wide settings above.
+
+> **The write shape this reaches is INFERRED, not captured.** No `PUT` to this
+> upstream endpoint was ever observed. What the bridge sends is the convention
+> this API uses everywhere else — the flat whole-document body proven against the
+> per-device endpoint — applied to the one captured `GET`. Two parts of it in
+> particular are reconstructions rather than observations: how the to-many
+> `enrolledDevices` relationship is resent, and the pluralized resource type. If
+> a write here fails, suspect the reconstruction at least as readily as the panel.
+
+**Request body:** any non-empty subset of
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `pairing_enabled` | bool | A real JSON boolean |
+| `timeout` | int | Must be one of `timeout_options` — `1`, `5`, `10`, `20` or `30` minutes |
+
+An unknown key, a wrong type, or a boolean where an int is wanted is a `400`. The
+bool-for-int check is not pedantry: `bool` is an `int` subclass in Python, so
+`{"timeout": true}` would otherwise be written to a real panel as `1`.
+
+`timeout` is range-checked against the offered set rather than against invented
+bounds, because unlike a range the set is *known*: the panel is never asked to
+reject a value the vendor never offers.
+
+Both fields are checked against a freshly-read document before anything is
+mutated, so a partly-unsupported request leaves the panel untouched rather than
+half-applied. A field the panel does not report is a `422 unsupported`.
+
+Unlike the per-device write there is **no membership pre-read**: the document is
+the session's own system, addressed by its `Context-Id`, so there is no id for a
+caller to have got wrong.
+
+**Success response:** the same shape `GET /control/bluetooth-disarming` returns,
+refreshed after the write — so a client can adopt it instead of polling.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"timeout": 10}' \
+  $BASE/control/bluetooth-disarming
 ```
 
 ---

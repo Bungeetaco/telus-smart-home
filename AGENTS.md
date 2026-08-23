@@ -33,14 +33,42 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 - **Commit messages** explain the *why* and the evidence (what changed, what it fixes, how it was verified), not just *what*.
 - **Never commit secrets.** `camera-bridge/.env` and `camera-bridge/secrets.env` are gitignored and hold live credentials; the `*.example` files are the templates. Do not print, log, or commit passwords, tokens, session/stream secrets, or the control secret.
 - **Keep `docs/` shareable/anonymized.** Docs must describe the software generically and use placeholders (`<ha-host>`, `<doorbell-ip>`, `<unit-id>`, `<did>`, `<mac>`, …) — never real IPs, account/device IDs, hostnames, filesystem paths that reveal a user, or secrets. See `docs/development.md`.
-- **Documentation is part of the change, not a follow-up.** After any change that
-  alters behaviour, configuration, deployment, or the dependency set, update
-  `docs/` in the SAME commit, and update the root `README.md` when the change is
-  user-visible (a new capability, a changed setup step, a new requirement or
-  limitation). Internal refactors that a user would never notice need only the
-  `docs/` side. If a change adds a knob, it belongs in `docs/configuration.md`; a
-  new failure mode belongs in `docs/troubleshooting.md`; a deferred idea belongs
-  in the enhancement backlog rather than being dropped.
+- **Documentation is part of the change, not a follow-up — and the whole set must
+  stay consistent.** Anything that changes behaviour, configuration, deployment,
+  the dependency set, or the shape of a request or response updates `docs/` in the
+  SAME commit. Not "a doc" — every doc the change makes wrong. A change that
+  leaves one page right and another page contradicting it is worse than one that
+  updates neither, because the reader cannot tell which to believe.
+
+  Work the list, and touch every entry the change actually affects:
+
+  | Doc | Update it when… |
+  | --- | --- |
+  | `README.md` (root) | the change is user-visible — a new capability, entity or service, a changed setup step, a new requirement or limitation |
+  | `docs/architecture.md` | a component, module, data flow or backend relationship changes — including the mermaid diagram |
+  | `docs/camera-bridge.md` | a bridge module is added, removed, or changes responsibility |
+  | `docs/ha-integration.md` | an entity, service, coordinator or poll interval changes — keep the entity table exhaustive |
+  | `docs/control-api.md` | ANY route, request field, response field or status code changes — this is a contract other code is written against |
+  | `docs/configuration.md` | a knob, env var, URL template or interval is added or changed |
+  | `docs/troubleshooting.md` | a new failure mode exists, or an old symptom now has a different cause |
+  | `docs/*-api-findings.md` | something new is learned about an upstream API, INCLUDING that a previous finding was wrong |
+  | the enhancement backlog | an idea is deferred, closed, or proven unachievable — with the evidence |
+  | `docs/README.md` | a doc is added, so the index never goes stale |
+
+  **These docs are a source of truth, not a changelog.** They state what the
+  system IS and what is KNOWN, in the present tense. What changed, when and why
+  belongs in the commit and the PR — that is where anyone asking will look. So:
+  no dates on statements, no "corrected on…", no "this used to say…", no "an
+  earlier version wrongly claimed…". When something turns out to be wrong,
+  **rewrite the page so it states the truth and delete the wrong claim** rather
+  than leaving a trail beside it. A page narrating its own edit history buries
+  the answer the reader came for.
+
+  The one thing always worth writing down is **the limit of what is known** —
+  "unverified", "inferred from the sibling endpoint rather than captured", "needs
+  hardware this account does not have". That is not history; it is the current
+  state of the evidence, and it is what stops the next person trusting a guess or
+  re-deriving a settled question.
 - **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes** — fixes, tuning, tests, docs, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes** — a new capability, a changed default, anything a user would notice or react to. Bias towards patch. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)

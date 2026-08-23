@@ -26,6 +26,7 @@ from pyalarmdotcomajax.exceptions import (
 )
 
 from .bypass_service import async_register_bypass_service, async_remove_bypass_service
+from .unpair_service import async_register_unpair_service, async_remove_unpair_service
 from .camera import CameraBridgeCoordinator
 from .clip_view import TelusClipRedirectView
 from .const import (
@@ -259,6 +260,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # deliberately not wired into the arm path -- CONF_FORCE_BYPASS remains the
     # only bypass that happens as a side effect of arming (see bypass_service.py).
     async_register_bypass_service(hass)
+    async_register_unpair_service(hass)
 
     async def handle_telus_smarthome_debug_request_event(event: Event) -> None:
         """Dump debug data when requested via Home Assistant event."""
@@ -430,5 +432,6 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
     if not remaining_entries:
         async_remove_speak_service(hass)
         async_remove_bypass_service(hass)
+        async_remove_unpair_service(hass)
 
     return unload_ok

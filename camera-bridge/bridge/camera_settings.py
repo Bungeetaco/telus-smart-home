@@ -214,6 +214,28 @@ _LED_FIELDS: dict[str, _Field] = {
                          ("canChangeLedBrightness",), "int"),
 }
 
+# generalSettings -> solarPanelSetting. Backs backlog E39, and it is the only
+# section here with NO setter: whether a solar panel is bolted to a camera is a
+# fact about the installation, and this API's own enum says so -- see below.
+#
+# `connectedToSolarPanelFeatureSupport` is 0 on BOTH cameras on the reference
+# account, so this correctly resolves to unsupported there and no caller should
+# create anything for it. That is the expected outcome of this section, not a
+# fault, and it is asserted in tests/test_camera_settings.py so a future change
+# that starts reporting a phantom "no solar panel" everywhere is caught.
+#
+# Note the enum is being used slightly against its own grain: elsewhere in this
+# API 2 means "supported AND editable" (see _supported), and nothing establishes
+# that a camera reporting 2 here would accept a write -- the field reads like a
+# statement about hardware, not a preference. Nothing here writes it, so the
+# question does not arise; the enum is used purely as "does this device have
+# anything to say about a solar panel", which is the weaker claim and the one
+# that fails closed.
+_SOLAR_FIELDS: dict[str, _Field] = {
+    "connected": _Field("solarPanelSetting", ("isConnectedToSolarPanel",),
+                        ("connectedToSolarPanelFeatureSupport",), "bool"),
+}
+
 # generalSettings -> doorbellNotificationSetting. These are the notifications
 # TELUS/alarm.com sends to its OWN app -- a different thing from anything Home
 # Assistant does, and worth exposing mainly so the two can be kept from
@@ -1000,8 +1022,9 @@ async def get_led_settings(telus: TelusSession, camera_id: str) -> dict:
     is the little light that says the camera is powered/recording.
 
     The same generalSettings document also carries the doorbell's notification
-    toggles and its solar-panel status, neither of which is modelled here; `raw`
-    holds them for anyone who wants to look.
+    toggles (get_notification_settings) and its solar-panel status
+    (get_solar_panel_status); `raw` holds them here too, and get_general_settings
+    returns all three sections from one request.
     """
     url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
     return _parse_table(_flatten(await _get_doc(telus, url)), _LED_FIELDS)
@@ -1020,7 +1043,10 @@ async def set_led_settings(telus: TelusSession, camera_id: str, **fields) -> dic
 
     Read-modify-write like every other setter here: the PUT replaces the whole
     generalSettings document, so the notification and solar-panel objects
-    alongside the LED are resent exactly as they were read.
+    alongside the LED are resent exactly as they were read. The solar-panel
+    object in particular has no setter of its own anywhere in this module, so
+    this path and the notification one are the ONLY things that ever put it back
+    on the wire -- a partial body here would drop it.
     """
     url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
     flat = await _apply_table(telus, url, _LED_FIELDS, fields, "LED")
@@ -1100,21 +1126,50 @@ async def set_notification_settings(telus: TelusSession, camera_id: str,
     return _parse_notifications(flat)
 
 
+# --- solar panel -------------------------------------------------------------
+async def get_solar_panel_status(telus: TelusSession, camera_id: str) -> dict:
+    """Whether this camera reports a solar panel attached (backlog E39).
+
+    Returns ``supports_connected``/``connected`` and ``raw``, the same shape the
+    other _parse_table sections use.
+
+    READ ONLY -- there is deliberately no setter. This reports how the camera is
+    installed, and the two things that could make it change are someone bolting a
+    panel on and someone taking one off; neither is done from Home Assistant.
+
+    ``supports_connected`` is False on both cameras this was built against
+    (``connectedToSolarPanelFeatureSupport`` is 0 on each), so a caller gets
+    nothing to show, which is right: ``isConnectedToSolarPanel`` is also False
+    there, and a camera with no solar hardware at all reporting a permanent "no
+    solar panel" is noise dressed up as diagnostics. Only a camera that
+    advertises the feature has actually answered the question.
+
+    Read from the same generalSettings document as the status LED and the
+    notification toggles -- get_general_settings returns all three from one
+    request, which is what the settings bundle uses.
+    """
+    url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
+    return _parse_table(_flatten(await _get_doc(telus, url)), _SOLAR_FIELDS)
+
+
 async def get_general_settings(telus: TelusSession, camera_id: str) -> dict:
-    """Both generalSettings-backed sections in ONE request.
+    """All three generalSettings-backed sections in ONE request.
 
-    Returns ``{"led": {...}, "notifications": {...}}`` -- the same shapes
-    get_led_settings and get_notification_settings return individually.
+    Returns ``{"led": {...}, "notifications": {...}, "solar": {...}}`` -- the
+    same shapes get_led_settings, get_notification_settings and
+    get_solar_panel_status return individually.
 
-    They live in the same upstream document, so a caller that wants both (the
+    They live in the same upstream document, so a caller that wants them (the
     settings bundle does, on every poll, for every camera) should not fetch it
-    twice against an API with undocumented rate limits. The single-section
-    getters remain for the write routes, which need their own fresh read anyway.
+    three times against an API with undocumented rate limits. The single-section
+    getters remain for the write routes, which need their own fresh read anyway
+    -- and for ``solar``, which has no write route at all.
     """
     url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
     flat = _flatten(await _get_doc(telus, url))
     return {"led": _parse_table(flat, _LED_FIELDS),
-            "notifications": _parse_notifications(flat)}
+            "notifications": _parse_notifications(flat),
+            "solar": _parse_table(flat, _SOLAR_FIELDS)}
 
 
 # --- diagnostics ------------------------------------------------------------

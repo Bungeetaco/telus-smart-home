@@ -32,8 +32,13 @@ from pyalarmdotcomajax.extensions import (
 
 from .arming_devices_coordinator import (
     ArmingDevicesCoordinator,
+    PanelBluetoothCoordinator,
+    arming_device_device_info,
     async_add_arming_device_entities,
+    async_add_panel_bluetooth_entities,
     async_get_arming_devices_coordinator,
+    async_get_panel_bluetooth_coordinator,
+    async_set_bluetooth_disarming,
     async_set_disarming_enabled,
 )
 from .base_device import ConfigBaseDevice
@@ -202,6 +207,31 @@ async def async_setup_entry(
 
     async_add_arming_device_entities(
         config_entry, arming_coordinator, async_add_entities, _build_arming_device)
+
+    # The PANEL-level Bluetooth setting (backlog E41): whether the alarm panel
+    # accepts Bluetooth pairing at all. System-wide, so its own coordinator and
+    # no per-device anything -- and NOT a master switch over the per-phone
+    # toggles above, whatever it looks like sitting next to them.
+    panel_bluetooth_coordinator = await async_get_panel_bluetooth_coordinator(hass, config_entry)
+
+    @core.callback
+    def _build_panel_bluetooth(settings: dict[str, Any]) -> list[Entity]:
+        """The panel pairing switch, only if the panel reports the setting.
+
+        This document publishes no capability flag of its own, so the bridge's
+        `supports_pairing_enabled` is the weaker claim "the field is there and
+        holds a boolean" rather than "the panel will accept a write". It is still
+        the right gate: it is False for a panel with no Bluetooth support, for a
+        bridge too old for the route, and for a poll that has not succeeded yet,
+        which are the three cases where a switch would be a lie.
+        """
+        if not settings.get("supports_pairing_enabled"):
+            return []
+        return [PanelBluetoothPairingSwitch(panel_bluetooth_coordinator, config_entry)]
+
+    async_add_panel_bluetooth_entities(
+        config_entry, panel_bluetooth_coordinator, async_add_entities,
+        _build_panel_bluetooth)
 
 
 class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -690,31 +720,12 @@ class ArmingDeviceDisarmingSwitch(CoordinatorEntity[ArmingDevicesCoordinator], S
         self._device_id = device_id
         self._attr_unique_id = f"{device_id}_bluetooth_disarming"
 
-        # Its OWN device, not a camera's and not the integration service device.
-        # A paired phone is a real thing the panel knows about, with an
-        # alarm.com device id in the same namespace as every other device here,
-        # so it is registered the way camera.py and base_device.py register
-        # theirs: identified by that id, named by what the account calls it.
-        # Hanging these off the service device instead (as the automation rule
-        # switches do, having no device of their own to name) would pile one
-        # switch per household phone onto a single "TELUS Smart Home
-        # Integration" entry and read as "<the integration> <someone>'s iPhone",
-        # which says nothing about whose phone opens the house.
-        #
-        # via_device points at that service device, which sensor.py's auth
-        # health sensor creates unconditionally at setup -- so unlike the
-        # dangling link base_device.py warns about, it always resolves.
-        #
-        # `name` is the phone's description exactly as the account holder typed
-        # it, passed straight through: it may contain a curly apostrophe
-        # (U+2019) and it is never parsed or reshaped. The bridge already falls
-        # back to the device id when the record has no description.
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, device_id)},
-            name=(coordinator.data or {}).get(device_id, {}).get("description") or device_id,
-            model="Bluetooth arming device",
-            via_device=(DOMAIN, f"{config_entry.entry_id}_integration"),
-        )
+        # The phone's own device, not a camera's and not the integration service
+        # device -- see arming_device_device_info for the whole reasoning. It is
+        # shared with the enrolled-partition select in select.py because the two
+        # are gated on different flags and either can exist without the other.
+        self._attr_device_info = arming_device_device_info(
+            config_entry, coordinator, device_id)
 
     @property
     def _record(self) -> dict[str, Any]:
@@ -787,6 +798,116 @@ class ArmingDeviceDisarmingSwitch(CoordinatorEntity[ArmingDevicesCoordinator], S
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Stop this phone disarming the panel when it arrives."""
+        await self._async_set(False)
+
+
+class PanelBluetoothPairingSwitch(CoordinatorEntity[PanelBluetoothCoordinator], SwitchEntity):
+    """Whether the alarm panel accepts Bluetooth pairing at all (backlog E41).
+
+    System-wide, one per account, and NOT a master switch over the per-phone
+    "Disarm alarm on arrival" toggles -- whatever it looks like sitting beside
+    them in the UI. The TELUS portal's per-device page never consults this
+    document, and whether the panel FIRMWARE treats this being off as a veto over
+    a phone whose own flag is on is UNRESOLVED. Nothing here, including the
+    entity name and the strings, may claim it is one; a user who wants to be sure
+    a particular phone cannot disarm must turn that phone's own switch off.
+
+    What it is definitely for: taking the panel out of pairing mode, so a phone
+    that is not already enrolled cannot be added.
+
+    Attached to the integration's service device rather than to a phone or to the
+    alarm panel entity's device. It belongs to neither of the first two -- there
+    is no phone it is about -- and the panel device comes from
+    pyalarmdotcomajax's device model, which this bridge-served entity has no
+    handle on and which is not guaranteed to exist. The service device is where
+    the other account-level entities (auth health, the talkdown counters) already
+    live and is created unconditionally at setup.
+
+    Trap: the bridge's write shape for this endpoint is INFERRED from the sibling
+    per-device endpoint rather than captured from a real save. If turning this
+    switch fails, suspect the reconstruction before the panel.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    # Configuration, like the per-phone toggle: this is how the alarm system is
+    # set up, not a control a dashboard should present alongside arm/disarm.
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "panel_bluetooth_pairing"
+    _attr_icon = "mdi:bluetooth-settings"
+
+    def __init__(
+        self, coordinator: PanelBluetoothCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        """Initialize the panel Bluetooth pairing switch."""
+        super().__init__(coordinator)
+
+        self._attr_unique_id = f"{config_entry.entry_id}_panel_bluetooth_pairing"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_integration")},
+            name="TELUS Smart Home Integration",
+            manufacturer="TELUS",
+            entry_type=dr.DeviceEntryType.SERVICE,
+        )
+
+    @property
+    def _settings(self) -> dict[str, Any]:
+        """The panel's whole settings record, or {} while it is not known."""
+        return self.coordinator.data or {}
+
+    @property
+    def available(self) -> bool:
+        """Unavailable unless the bridge currently reports the setting as present.
+
+        Fails closed on every unknown, like the per-phone switch: a failed poll, a
+        bridge that no longer serves the route, and a panel that stops reporting
+        the field all land here.
+        """
+        return (
+            super().available
+            and bool(self._settings)
+            and bool(self._settings.get("supports_pairing_enabled"))
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """True while the panel accepts Bluetooth pairing; None if not known."""
+        # `is not None`, not truthiness: False is a real answer and must not read
+        # as "unknown" the way a bridge too old to send the field does.
+        value = self._settings.get("pairing_enabled")
+        return bool(value) if value is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """The phones the panel says are paired, as opaque ids.
+
+        Ids and not descriptions on purpose: those are household members' names,
+        and an entity attribute is recorded, shown in the UI and included in
+        diagnostics downloads. The switch entities in this integration are named
+        after the phones already, for anyone who needs to know which is which.
+        """
+        enrolled = self._settings.get("enrolled_device_ids")
+        return {"enrolled_device_ids": enrolled} if enrolled is not None else {}
+
+    async def _async_set(self, enabled: bool) -> None:
+        """Write the flag and adopt the settings that come back."""
+        LOGGER.info("Setting panel Bluetooth pairing %s", "on" if enabled else "off")
+        settings = await async_set_bluetooth_disarming(self.hass, pairing_enabled=enabled)
+        # The route answers with the document as the server has it after the
+        # write, so adopting it beats a poll of a coordinator that deliberately
+        # runs every 15 minutes. An empty or unreadable reply falls through to a
+        # real re-read rather than to an assumption that the value took.
+        if settings:
+            self.coordinator.async_apply_settings(settings)
+        else:
+            await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Let the panel pair new Bluetooth devices."""
+        await self._async_set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop the panel pairing new Bluetooth devices."""
         await self._async_set(False)
 
 

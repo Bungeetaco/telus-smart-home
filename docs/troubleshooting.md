@@ -20,8 +20,13 @@ the component READMEs.
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
 - [Talkdown audio sounds bad on the doorbell speaker](#talkdown-audio-sounds-bad-on-the-doorbell-speaker)
+- [Talkdown logs a certificate fingerprint mismatch](#talkdown-logs-a-certificate-fingerprint-mismatch)
+- [Talkdown logs that no PutAudioStream endpoint answered](#talkdown-logs-that-no-putaudiostream-endpoint-answered)
 - [A camera control is missing, or a settings write returns 422](#a-camera-control-is-missing-or-a-settings-write-returns-422)
 - [No camera settings entities appear at all](#no-camera-settings-entities-appear-at-all)
+- [A bypass appears to do nothing](#a-bypass-appears-to-do-nothing)
+- [A control answers `429`, or Home Assistant keeps retrying into a rate limit](#a-control-answers-429-or-home-assistant-keeps-retrying-into-a-rate-limit)
+- [An arming-device write answers `404 unknown_device`](#an-arming-device-write-answers-404-unknown_device)
 
 ---
 
@@ -371,6 +376,102 @@ switch to mu-law. If you hear *intelligible but harsh/clipping* audio, adjust or
 re-enable conditioning. If it's simply *lo-fi*, that's the 8 kHz mono speaker
 ceiling.
 
+---
+
+## Talkdown logs a certificate fingerprint mismatch
+
+**Symptom.** A talk still plays, but the bridge log carries a warning like:
+
+```text
+talkdown: the device at <doorbell-ip> presented certificate sha256=<observed> but
+TALK_DEVICE_CERT_SHA256 pins <pinned>. If this device was replaced, reset, or had
+a firmware update, that is expected -- update TALK_DEVICE_CERT_SHA256 to the
+presented value. Otherwise the connection is not the device it claims to be.
+(mode=warn -- continuing anyway)
+```
+
+**Cause.** The doorbell serves its audio endpoint over HTTPS with a **self-signed**
+certificate, so there is no CA to verify it against and the certificate itself is
+the only identity it has. The bridge pins its SHA-256 (`TALK_DEVICE_CERT_SHA256`)
+and checks it once per connection. The pinned default is the fingerprint observed
+on **one** ADC-VDB750 — it is not a vendor-wide constant, and a **firmware
+update, a factory reset, or a replacement unit all change it legitimately**.
+
+**Fix.** If you did any of those three, this is expected: copy the presented
+fingerprint into `TALK_DEVICE_CERT_SHA256` in the bridge's `.env` and recreate
+the container. If you did none of them, the connection is not the device it
+claims to be — investigate before dismissing it.
+
+**Note what the default mode does.** `TALK_TLS_PIN_MODE` defaults to `warn`,
+which logs and **still connects**, so a mismatch never silences the doorbell. Move
+to `enforce` only once the pin is known good for your device — a mismatch there
+aborts the talk, which surfaces as `502 telus_error` to the caller and
+`transport_error` in the talkdown counters, with the actionable detail in the log
+above. The pin is never applied to the `cloud` endpoint: that one is the vendor
+relay, a different host with its own CA-signed certificate.
+
+Two related lines mean something different:
+
+- `talkdown: no certificate pin configured; the device at <doorbell-ip> presented
+  sha256=<observed> -- set TALK_DEVICE_CERT_SHA256 to this value to pin it` —
+  there is nothing to verify against. Paste the value in to start pinning.
+- `talkdown: TALK_DEVICE_CERT_SHA256=... is not a 32-byte hex SHA-256; ignoring
+  the pin` — the knob is malformed, and talkdown continues **unpinned**. Fix the
+  value.
+
+The talk result reports `cert_pinned` (`true` matched, `false` mismatched in warn
+mode) when a pin applied, so a mismatch is also visible to whoever triggered the
+talk — see [control-api.md](control-api.md#post-controlcamerascamera_idtalk).
+
+---
+
+## Talkdown logs that no PutAudioStream endpoint answered
+
+**Symptom.** Before audio starts, the bridge logs:
+
+```text
+talkdown: none of the PutAudioStream endpoints (direct,local,public,cloud)
+answered a connect probe; trying direct anyway
+```
+
+and the talk then either works anyway or fails with a transport error.
+
+**Cause.** The doorbell advertises up to four routes to its audio endpoint — two
+LAN addresses (`direct`, `local`), the site's own WAN address (`public`), and the
+vendor cloud relay (`cloud`). The bridge probes them concurrently with a bare TCP
+connect (`TALK_ENDPOINT_PROBE_TIMEOUT_S`, 1 s) and uses the first one in
+preference order that answers, so that being off the doorbell's LAN does not mean
+stalling on a TCP connect to an unreachable RFC1918 address with the per-camera
+talk lock held. This message means **none** of them accepted a connection inside
+that budget.
+
+Detection is never allowed to be the reason a talk fails, so the first preferred
+URL is used anyway and the `PUT` itself produces the real error. That is why this
+line can appear on a talk that then works.
+
+**Fix — in order of likelihood:**
+
+- **The bridge is not on the doorbell's LAN and the WAN paths are blocked or
+  slow.** Confirm which endpoint should work from the bridge host, then pin it
+  with `TALK_PUT_ENDPOINT=cloud` (or `public`) so no time is spent probing routes
+  that cannot work.
+- **A firewall drops the probe but would pass the real PUT.** Same fix: pin the
+  endpoint with `TALK_PUT_ENDPOINT`, or set `TALK_ENDPOINT_PROBE_TIMEOUT_S=0` to
+  disable probing entirely and restore a blind walk down
+  `TALK_PUT_ENDPOINT_ORDER`.
+- **The link is simply slower than one second to accept a connection.** Raise
+  `TALK_ENDPOINT_PROBE_TIMEOUT_S`.
+- **The doorbell is offline or the session is stale.** Then nothing answers
+  because there is nothing there; check the camera is streaming at all.
+
+A pinned endpoint the doorbell does not advertise is ignored with a warning
+(`TALK_PUT_ENDPOINT=... is not one of the endpoints this doorbell advertises`)
+and auto-detection runs anyway — a mistyped knob must not silence the doorbell.
+The endpoint that was actually used is counted in `by_endpoint` at
+`GET /control/metrics`.
+
+---
+
 ## A camera control is missing, or a settings write returns 422
 
 **Symptom.** A camera has no speaker-volume slider, no siren buttons, or no
@@ -470,6 +571,68 @@ Note also that a poll can succeed and still produce no entities for a given
 camera, which is correct: the siren buttons exist only for a camera whose account
 reports the `canManuallyTriggerSiren` permission, and an account with no
 siren-capable devices gets none. See "A camera control is missing" above.
+
+## A bypass appears to do nothing
+
+Symptom: `telus_smarthome.bypass_sensors` returns without error, but the sensors
+look unchanged.
+
+**Give it ten seconds.** The write reaches the panel asynchronously: a bypass
+returns `200` immediately, but the sensor still reports `isBypassed: false` about
+five seconds later and `true` about ten seconds later. An un-bypass takes the
+same. The service already delays its post-write refresh past that window for
+exactly this reason — a refresh fired the instant the POST returns reads the old
+state and repaints the sensors unchanged, which is indistinguishable from a call
+that did nothing.
+
+If it is still unchanged well after that, check the two gates the partition
+publishes, which the bridge re-reads before every write:
+
+```bash
+S=$(sudo docker exec telus-cam-bridge cat /shared/control_secret)
+curl -s -H "Authorization: Bearer $S" http://127.0.0.1:8199/control/partitions
+```
+
+`has_permission_to_change_state` false, or `can_bypass_when_armed` false while
+the partition is armed, are both refusals — they answer `422`, not a silent
+no-op. A panel that reports `canBypassSensorWhenArmed: false` can only be
+bypassed while disarmed.
+
+Note also that the vendor's own portal hides its bypass control while the panel
+is disarmed, gated on `extendedArmingOptions`. The endpoint honours the call
+anyway; that is a UI choice, not an API constraint.
+
+---
+
+## A control answers `429`, or Home Assistant keeps retrying into a rate limit
+
+The siren and privacy routes answer `429` with a `Retry-After` header carrying
+**the server's own wait**, plus `{"error": "rate_limited", "retry_after": N}`.
+Honour that value rather than retrying on your own schedule — the next attempt
+otherwise walks straight back into the limiter, and Alarm.com's limits are
+undocumented and can lock the account.
+
+The camera-settings poll absorbs a rate limit internally instead of surfacing it:
+it caches the negative result for the server's stated wait, so the next cycle does
+not re-hammer the edge.
+
+---
+
+## An arming-device write answers `404 unknown_device`
+
+The device id is not in the account's device catalog. This is deliberate: an id
+the catalog does not know is refused rather than turned into a blind `PUT` at
+whatever that id happens to address. Re-read the list and use an id from it:
+
+```bash
+S=$(sudo docker exec telus-cam-bridge cat /shared/control_secret)
+curl -s -H "Authorization: Bearer $S" http://127.0.0.1:8199/control/arming-devices
+```
+
+A phone that has been unpaired from the panel disappears from that list, and its
+Home Assistant switch goes unavailable rather than continuing to show a position.
+
+---
 
 ## Checking whether talkdown has been failing
 

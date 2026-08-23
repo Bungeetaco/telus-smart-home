@@ -53,12 +53,10 @@ back in `raw` but not yet settable.
 | `PUT /web/api/video/settings/generalSettings/{id}` | **the status LED** (`ledLightSetting`: `canTurnOnOffLedLight`, `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`, `ledBrightness`, `ledLightColor`), the doorbell's TELUS-side notification toggles (`doorbellNotificationSetting`), and solar-panel status. "General camera settings" undersold this one badly — see the note below | **implemented** — `POST …/settings/led` and `POST …/settings/notifications`, both with HA switches. `notificationFormat` is read-only (E40) and solar panel is unmodelled (E39) |
 | `PUT /web/api/video/devices/cameras/{id}` | camera device properties | unused |
 
-> **Do not skim `generalSettings`.** This survey originally described it as
-> "general camera settings" and nothing looked at it for months; the status-LED
-> control (backlog E32) sat in there the whole time, and a later note in the
-> mobile-API findings wrongly concluded the LED was mobile-only because the
-> website equivalent had never been opened. The lesson generalises: a vague row
-> in an endpoint inventory is an unread endpoint, not an empty one.
+> **`generalSettings` carries more than its name suggests** — the status LED, the
+> doorbell's TELUS-side notification toggles and the solar-panel status all live
+> there. A vague row in an endpoint inventory is an unread endpoint, not an empty
+> one; open it before concluding a capability is missing.
 
 Each `*FeatureSupport` field is an enum where `0` means unsupported and `2` means
 supported/editable — check it before offering a control, because the same payload
@@ -104,69 +102,25 @@ ASP.NET web-service style, not JSON:API.
 | `PUT /web/api/video/ovRules/{id}` | video/object rules |
 | `POST /web/api/swa/wizard/automation/zwave-troubleshooting/{LqiTest,Rediscover,ResetPanel,ResetSettings}` | Z-Wave troubleshooting wizard |
 
-### `bypassSensors` is not a gap — sensor bypass already ships
+### Sensor bypass: two independent mechanisms
 
-**Correction to an earlier reading of this survey.** `POST
-/web/api/devices/partitions/{id}/bypassSensors` was listed above as an unused
-write, which invited the conclusion that this project cannot bypass sensors. It
-can, and has all along, by a different route.
+Bypass reaches this account two ways, and they are not alternatives.
 
-The integration exposes bypass as the `force_bypass` arming option
-(`CONF_FORCE_BYPASS` in `const.py`, surfaced per arm mode in the options flow and
-documented in [configuration.md](configuration.md)). `alarm_control_panel.py`
-passes it on **all three** arm calls — `async_arm_away`, `async_arm_stay` and
-`async_arm_night` each receive `force_bypass=CONF_FORCE_BYPASS in arm_options` —
-so `pyalarmdotcomajax` sends the bypass instruction as part of the arm command
-itself. That is the actual answer to "arm with a door open", and it is already
-wired end to end.
+**`force_bypass`, the arming option.** `CONF_FORCE_BYPASS` is passed as
+`force_bypass` on all three arm calls in `alarm_control_panel.py`
+(`async_arm_away`, `async_arm_stay`, `async_arm_night`), surfaced per arm mode in
+the options flow and documented in [configuration.md](configuration.md). It means
+"bypass whatever is open as you arm" and is automatic.
 
-What the portal endpoint would add is **selective** bypass: naming specific
-sensors to skip, instead of the all-or-nothing "bypass whatever is open" that
-rides along with the arm. That is a genuine feature difference, but a small one
-relative to its cost.
+**`POST /web/api/devices/partitions/{id}/bypassSensors`, the manual action.** The
+body carries `bypass` and `unbypass` as pipe-separated device-id strings and is
+applied immediately, independent of any arm call. It is exposed as the
+`telus_smarthome.bypass_sensors` service.
 
-> **Do not build a second bypass path.** If selective bypass is ever added, it
-> must extend the existing `force_bypass` option rather than sit beside it. Two
-> independent bypass mechanisms against one partition will fight: a selective
-> bypass posted before an arm that then sends `force_bypass` is redundant at
-> best, and at worst the two disagree about which zones are skipped on a live
-> alarm system. Whoever picks this up should start by reading how
-> `CONF_FORCE_BYPASS` reaches the three arm calls, and decide how a per-sensor
-> list interacts with the existing flag *before* writing any request code.
+Only one of them is automatic, which is what keeps them from disagreeing about
+which zones are skipped. **Do not add a second automatic path**: two of those
+racing over one partition is a genuine hazard on a live alarm system.
 
-### `bluetoothArmingDevices` — genuinely unimplemented, worth a backlog entry
-
-`PUT /web/api/devices/bluetoothArmingDevices/{id}` is the real gap of the two.
-Nothing in `custom_components/telus_smarthome/` and nothing in
-`pyalarmdotcomajax` knows this object exists — there is no entity, no service and
-no model for it.
-
-Observed fields on the object:
-
-| Field | Meaning |
-| --- | --- |
-| `isDisarmingEnabledForDevice` | **The toggle that matters** — whether this paired phone may auto-disarm the panel on approach |
-| `enrolledPartitionId` | Which partition the device is enrolled against |
-| `description` | The device's display name |
-| `macAddress` | The paired phone's Bluetooth MAC |
-| `managedDeviceType` | `29` for this object type |
-
-It is a whole-object `PUT` in the same style as the camera settings documents:
-read the current object, change one field, send it all back. The read-modify-write
-discipline `camera_settings.py` already implements is the template.
-
-**Why this is legitimately an alarm.com-side setting**, and not something local
-panel access shadows: alarm.com is the **configuration authority** for the Qolsys
-panel and pushes settings down to it, while the Control4 endpoint on the same
-panel is **local access only**. The two coexist and are wired independently, so a
-bluetooth-arming toggle set through alarm.com is the real setting and not a cloud
-mirror of something better reached locally. That distinction is what makes this
-worth implementing here rather than deferring to a local integration.
-
-Handle with the same caution as the siren: this controls whether a phone walking
-up to the house **disarms the alarm**, which is a security posture decision, not a
-convenience toggle. Read before write, and never flip it as a side effect of
-anything.
 
 ## Reads the integration doesn't use
 

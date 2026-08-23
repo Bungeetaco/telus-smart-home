@@ -122,6 +122,19 @@ for the full talk mechanism.
 | `TALK_CHUNK_MS` | no | `40` | Milliseconds of audio per PUT. Also the granularity at which a stop request takes effect. Larger = fewer round trips but coarser stop response; the value matches what the app was observed sending. |
 | `TALK_PREBUFFER_MS` | no | `500` | How far ahead of real time the stream stays, so the doorbell always holds a jitter buffer. Delivering chunks exactly at playback time underruns into audible gaps. Raising it delays how quickly a stop is heard. |
 | `TALK_DOORBELL_CACHE_TTL_S` | no | `60` | How long a `GetDoorbellCameraList` result may be reused across talks, saving that round trip (~0.3 s before audio starts) on back-to-back talks. The session it carries is not per-talk in practice, and a stale hit self-corrects via renegotiation. Dropped on any talk failure and on every renegotiation. `0` disables it. |
+| `TALK_PUT_ENDPOINT` | **yes** (`TALK_PUT_ENDPOINT`) | *(empty — auto-detect)* | Pin the full-duplex PUT to one endpoint kind (`direct`, `local`, `public`, `cloud`) instead of letting reachability detection choose. Set it when detection is wrong: a firewall that drops the probe but would pass the real PUT, or an endpoint that accepts a connection but cannot carry audio. A value this doorbell does not advertise is ignored with a warning and auto-detection runs anyway — a mistyped knob must not silence the doorbell. |
+| `TALK_ENDPOINT_PROBE_TIMEOUT_S` | **yes** (`TALK_ENDPOINT_PROBE_TIMEOUT_S`) | `1.0` | How long the reachability probe may take per candidate. `TALK_PUT_ENDPOINT_ORDER` above is a *preference*, not a reachability claim — off the doorbell's LAN its first two entries are RFC1918 addresses that simply do not answer — so the candidates are probed concurrently and consumed in preference order, and only unreachable ones are skipped. A probe is a bare TCP connect: no TLS, no HTTP, nothing written, so it cannot disturb the audio path. Raise it if the doorbell is across a link that legitimately takes longer than a second to accept a connection; `0` disables probing and restores a blind walk down the order. If nothing answers, the first preferred URL is used anyway so the PUT itself produces the real error. |
+| `TALK_STREAMING_ENCODE` | **yes** (`TALK_STREAMING_ENCODE`) | `true` | Feed the PUT loop from ffmpeg's stdout as it decodes instead of encoding the whole clip into memory first. The doorbell starts speaking after one chunk is ready rather than after the entire file is transcoded, and encoded-audio memory is bounded by the lookahead below rather than by the clip. Set it false to restore buffer-then-send — the switch exists so a field regression in a live audio path is an `.env` change rather than a code change. Both modes run the same send/pacing loop. |
+| `TALK_ENCODE_LOOKAHEAD_S` | no | `30` | How far ahead of the send schedule the streaming encoder may run. This is what makes streaming safe: ffmpeg decodes far faster than real time, so without a bound it would simply re-buffer the whole clip. It doubles as a jitter buffer for the *encoder* — a decode hiccup with tens of seconds already queued is inaudible. Approximate; the OS pipe buffer adds a little more. |
+| `TALK_ENCODE_READ_TIMEOUT_S` | no | `15` | A read from the encoder that blocks this long means ffmpeg is wedged rather than merely slow (it normally runs hundreds of chunks ahead), and fails the talk instead of letting the doorbell run dry with the session held open. |
+| `TALK_PREBUFFER_ADAPTIVE` | **yes** (`TALK_PREBUFFER_ADAPTIVE`) | `false` | Let the jitter-buffer lead grow to cover the worst observed PUT round trip. **Leave it off until someone has listened to a talk with it on** — `TALK_PREBUFFER_MS` was tuned by ear against the real speaker, and nothing available offline justifies moving it. The *measurement* is always on regardless (see the talk response's `put_rtt_*` / `late_chunks`), so a later tuning has data rather than a guess. The adaptation is one-directional by design: it may only raise the lead, never lower it below the tuned value. |
+| `TALK_PREBUFFER_MAX_MS` | no | `2000` | Ceiling on the adaptive lead, and therefore also the ceiling on how much audio the doorbell may still be holding when a stop arrives — which is why it is not larger. |
+| `TALK_MAX_RECONNECTS` | no | `2` | Consecutive in-place retries — same credentials, new socket, fresh Digest handshake — before escalating to a full renegotiation. Two failures do not need new credentials: a dropped keep-alive connection, and a `401` the Digest middleware could not clear by itself. Renegotiation is three round trips of dead air and is bounded, so spending one on a problem a new socket fixes can cost the talk later. Any successful chunk resets the counter, and the safety deadline is deliberately *not* extended for a reconnect, so a link that blips forever still terminates. `0` sends every failure straight to renegotiation. |
+| `TALK_MAX_RENEGOTIATIONS` | no | `2` | How many times a talk may fetch a fresh doorbell session and resume from the exact byte offset it reached. The PUT URL, port and password are per-session, so a long clip or a network blip can outlive one; bounded so a persistently broken session fails the request instead of looping. |
+| `TALK_RENEGOTIATE_MARGIN_S` | no | `20` | When a session expiry can be determined, swap this many seconds early rather than waiting for the first failed PUT — a proactive swap costs one silent gap of a few hundred ms instead of a failed chunk plus a teardown/setup round trip. |
+| `TALK_DEVICE_CERT_SHA256` | **yes** (`TALK_DEVICE_CERT_SHA256`) | the fingerprint observed on one ADC-VDB750 (the literal is in `config.py`) | SHA-256 of the DER certificate the doorbell presents on its audio endpoint. Change it after a firmware update, a factory reset or a replacement unit — all three legitimately change the certificate, and a mismatch logs the presented fingerprint so it can be pasted here. Set it empty to run unpinned; a value that is not a 32-byte hex digest is rejected at startup with an error and the talk continues unpinned. |
+| `TALK_TLS_PIN_MODE` | **yes** (`TALK_TLS_PIN_MODE`) | `warn` | `warn` verifies the fingerprint, logs loudly on a mismatch (with both values and the fix) and **connects anyway**; `enforce` refuses the connection on a mismatch; `off` disables the check. See below. |
+| `TALK_TLS_PIN_ENDPOINT_KINDS` | no | `("direct", "local", "public")` | Which endpoint kinds the pin applies to. The fingerprint is the *device's* own, so it is only meaningful where TLS terminates at the device: the two LAN URLs and the site's WAN address. The `cloud` endpoint is the vendor relay — a different host with its own CA-signed certificate — and pinning the doorbell's fingerprint there would break WAN talkdown outright. |
 
 The default `TALK_AUDIO_FILTER` is tuned by ear for the doorbell's small speaker,
 which clips and sounds harsh on raw full-range music/TTS:
@@ -133,6 +146,37 @@ highpass=f=250,lowpass=f=2800,acompressor=threshold=-18dB:ratio=3:attack=5:relea
 That chain high-passes out the bass the speaker can't reproduce, low-passes the
 harsh top end (warmer), gently compresses the dynamics, and hard-limits below full
 scale so nothing clips.
+
+**Certificate pinning, and why the default only warns.** The doorbell serves its
+audio endpoint over HTTPS with a **self-signed** certificate, so ordinary CA
+verification cannot apply and the only identity the device has is the certificate
+itself. `TALK_DEVICE_CERT_SHA256` + `TALK_TLS_PIN_MODE` turn that into a real
+check instead of a connection with verification switched off.
+
+The shipped fingerprint was observed on **one** ADC-VDB750, and it is not a
+vendor-wide constant: a firmware update, a factory reset or a replacement unit all
+legitimately present a different certificate. That is exactly why `warn` is the
+default — it detects and reports, printing both fingerprints and the fix, and
+still connects, so a routine firmware update cannot turn into a silent doorbell
+with an obscure TLS error. Move to `enforce` once the pin is known good for *your*
+device, and re-pin after any firmware update. With no pin configured at all,
+`warn` and `enforce` both degrade to learn-and-report: the observed fingerprint is
+logged once so it can be adopted, and the talk proceeds.
+
+The check runs once per connection rather than per request, so a keep-alive chunk
+stream pays for it once, and it never applies to the `cloud` endpoint — see
+`TALK_TLS_PIN_ENDPOINT_KINDS` above.
+
+**The jitter-buffer lead is tuned by ear.** `TALK_PREBUFFER_MS` is how far ahead
+of real time the stream stays so the doorbell always holds a jitter buffer;
+delivering chunks exactly at playback time underruns into audible gaps. It was set
+by listening to the real speaker, which is why `TALK_PREBUFFER_ADAPTIVE` ships off
+and why raising the lead is the only direction the adaptation is allowed to move
+it. A larger lead cannot cause an underrun — it only delays how quickly a stop is
+heard and leaves more audio buffered at the doorbell — whereas a smaller one can.
+What is always on is the measurement: every talk reports the observed PUT
+round-trip distribution and how many chunks missed their slot, in the talk
+response (see [control-api.md](control-api.md#post-controlcamerascamera_idtalk)).
 
 **Talkdown timeouts** (module constants):
 
@@ -321,6 +365,14 @@ they define how the integration reaches the camera bridge on loopback:
 | `CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/settings/video` |
 | `CAMERA_BRIDGE_CAMERA_SIREN_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/siren` |
 | `CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/privacy` |
+| `CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/talk/stop` |
+| `CAMERA_BRIDGE_METRICS_URL` | `http://127.0.0.1:8199/control/metrics` |
+| `CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE` | `http://127.0.0.1:8199/control/automations/{rule_id}/pause` |
+| `CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/automations/{rule_id}/resume` |
+| `CAMERA_BRIDGE_ARMING_DEVICES_URL` | `http://127.0.0.1:8199/control/arming-devices` |
+| `CAMERA_BRIDGE_ARMING_DEVICE_DISARMING_URL_TEMPLATE` | `http://127.0.0.1:8199/control/arming-devices/{device_id}/disarming` |
+| `CAMERA_BRIDGE_PARTITIONS_URL` | `http://127.0.0.1:8199/control/partitions` |
+| `CAMERA_BRIDGE_PARTITION_BYPASS_URL_TEMPLATE` | `http://127.0.0.1:8199/control/partitions/{partition_id}/bypass` |
 | `CONF_CLIP_LINK_SECRET` | `clip_link_secret` (entry data key; see reauth note above) |
 
 These share the control port (`8199`) with the bridge; if you override
@@ -333,6 +385,11 @@ patch these).
 | Constant | Value | Meaning |
 | --- | --- | --- |
 | `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the status-LED and TELUS-notification switches, the privacy switch, the siren buttons and the camera diagnostic sensors. |
+| `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | `900` | How often the Bluetooth arming devices are re-read, backing the per-phone "Disarm alarm on arrival" switches. Deliberately far slower than the camera settings: nothing but a person can change these records, the poll is not the feedback path for a user's own toggle (the write adopts the record the response echoes), and each cycle is a live round trip competing for the same undocumented rate-limit budget. The cost is that a change made in the TELUS app, or a newly paired phone, takes up to 15 minutes to appear. |
+| `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | see `const.py` | How often the camera list is re-read from the bridge. Cheap — a local read of an in-memory dict, not a TELUS round trip. |
+| `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | see `const.py` | How often clip/event history is re-read, backing the recent-activity sensors and event entities. |
+| `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | see `const.py` | How often the automation rules are re-read, backing the rule pause/resume switches. |
+| `TALK_METRICS_POLL_INTERVAL_SECONDS` | see `const.py` | How often the bridge's talkdown counters are re-read, backing the talkdown status and failure sensors. |
 
 Deliberately slow, and the one knob here worth understanding before changing.
 Unlike the camera-list poll — a local read of an in-memory dict on the bridge —

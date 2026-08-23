@@ -118,6 +118,13 @@
       },
       "camera_device_status": {
         "name": "Camera status"
+      },
+      "camera_solar_panel": {
+        "name": "Solar panel",
+        "state": {
+          "connected": "Connected",
+          "not_connected": "Not connected"
+        }
       }
     },
     "number": {
@@ -152,6 +159,9 @@
       },
       "arming_device_disarming": {
         "name": "Disarm alarm on arrival"
+      },
+      "panel_bluetooth_pairing": {
+        "name": "Panel Bluetooth pairing"
       }
     },
     "select": {
@@ -163,6 +173,12 @@
       },
       "camera_live_resolution": {
         "name": "Live video resolution"
+      },
+      "arming_device_enrolled_partition": {
+        "name": "Disarms partition"
+      },
+      "panel_bluetooth_timeout": {
+        "name": "Bluetooth disarm window"
       }
     },
     "button": {

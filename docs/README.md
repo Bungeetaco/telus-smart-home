@@ -52,5 +52,4 @@ own deployment.
 | --- | --- |
 | [talkdown-fullduplex-protocol.md](talkdown-fullduplex-protocol.md) | Implementation-grade reference for the ADC-VDB750 full-duplex HTTP-PUT talk path, confirmed against a real capture. |
 | [talkdown-DEPLOY.md](talkdown-DEPLOY.md) | Manual, human-run steps to enable and validate talkdown against a live doorbell. |
-| [talkdown-NOTES.md](talkdown-NOTES.md) | Working notes for the `feature/doorbell-talkdown` branch — status, decisions, and open questions. |
 | [talkdown-automation.yaml](talkdown-automation.yaml) | A reference Home Assistant automation (a Frigate-zone dwell deterrent) that drives the talkdown service. |

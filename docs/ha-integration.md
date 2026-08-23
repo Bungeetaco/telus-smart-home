@@ -168,6 +168,22 @@ These are covered in detail under [The update model](#the-update-model) and
     **ten seconds** to reach the sensor — so the post-write refresh is delayed
     past that window rather than firing immediately and reading the old state.
 
+15. **Unpair service.** Register `telus_smarthome.unpair_arming_device`, which
+    removes one phone from the panel's Bluetooth disarming so it can no longer
+    disarm on approach. **It cannot be undone from Home Assistant** — re-pairing
+    needs physical access to both the phone and the panel — which is the whole
+    reason it is a service and not a button: a button sits on a dashboard beside
+    controls that are all trivially reversible and gets pressed by accident, a
+    service call has to be written deliberately.
+
+    It takes exactly one entity — the "Disarm alarm on arrival" switch belonging
+    to the phone to remove — never a list, because a list invites "unpair these
+    three" written once and re-run later against a household that has changed.
+    The entity is resolved through the entity registry and anything uncertain is
+    refused: an unknown entity, one belonging to another integration, or one that
+    is not an arming-device switch. The vendor's own unpair-all is not exposed at
+    any level.
+
 ### Controller initialization
 
 `AlarmIntegrationController.initialize()` (in `controller.py`):
@@ -703,17 +719,23 @@ Three entity kinds:
 A second family of bridge-dependent entities sits on top of the bridge's
 camera-settings routes (see
 [control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)):
-a speaker-volume **Number**, a privacy-mode **Switch**, two siren **Buttons**, and
-up to three diagnostic **Sensors**. They exist because the useful half of the
-camera's own configuration — how loud talkdown is heard, whether the chime rings,
-whether the Wi-Fi is degrading — was previously reachable only through TELUS's own
-app or portal.
+a speaker-volume **Number**, a privacy-mode **Switch**, two siren **Buttons**, the
+chime, LED and notification controls, and up to four diagnostic **Sensors**. They
+exist because the useful half of the camera's own configuration — how loud
+talkdown is heard, whether the chime rings, whether the Wi-Fi is degrading — was
+previously reachable only through TELUS's own app or portal.
 
-All of them attach to the **camera device** the [camera platform](#camera-platform)
-already creates (identical `DeviceInfo` identifiers), so they appear as extra
-entities on "Front Door" rather than under the synthetic integration device that
-holds Auth Health and the talkdown sensors. A camera the bridge no longer reports
-takes its settings entities with it.
+The camera entities attach to the **camera device** the
+[camera platform](#camera-platform) already creates (identical `DeviceInfo`
+identifiers), so they appear as extra entities on "Front Door" rather than under
+the synthetic integration device that holds Auth Health and the talkdown sensors.
+A camera the bridge no longer reports takes its settings entities with it.
+
+The table below also covers the **alarm-side** entities that share this family's
+machinery but no camera: the per-phone Bluetooth disarming controls, which live on
+a device per paired phone, and the panel-wide Bluetooth settings, which live on
+the integration's own service device. Those have their own coordinators and
+routes — see [The Bluetooth disarming entities](#the-bluetooth-disarming-entities).
 
 ### The settings coordinator
 
@@ -721,9 +743,11 @@ One `CameraSettingsCoordinator`, shared by all four platforms, polls
 `/control/cameras/{id}/settings` and `/control/cameras/{id}/diagnostics` per
 bridge-reported camera every **120 s**.
 
-That interval is deliberately slow. Each cycle is two bridge requests per camera and
-six upstream TELUS reads behind them (three settings objects, plus signal,
-battery and status). These values only change when a person changes them, and Alarm.com's rate limits are undocumented
+That interval is deliberately slow. Each cycle is two bridge requests per camera
+and nine upstream TELUS reads behind them: four website settings documents
+(audio, image, video, and the `generalSettings` document that carries the LED,
+notification and solar sections together), two mobile reads for the siren and
+privacy records, and three more for signal, battery and status. These values only change when a person changes them, and Alarm.com's rate limits are undocumented
 and can lock an account — so there is nothing to win by polling faster and a real
 account-level risk in trying. Nothing in this path touches the always-warm video
 pipeline.
@@ -779,6 +803,10 @@ requires.
 | **TELUS app notification format** | `select` | The camera reports `notifications.supports_format` | Whether TELUS's push carries just text or a thumbnail. Two options only — the upstream enum has four members and the other two are a null state and a legacy value alarm.com rewrites away |
 | **Live video resolution** | `select` | The camera reports `video.supports_live_resolution` | The **live** stream's resolution, labelled the way TELUS labels it. Changing it changes what the bridge restreams — verified live, despite the bridge asking TELUS for the "highest resolution" source. Takes effect on the next stream renegotiation, not immediately |
 | **Disarm alarm on arrival** | `switch` | One per paired phone reporting `supports_disarming_toggle` | Whether that phone disarms the panel when it comes within range. Each phone is its own device in the registry, named as TELUS names it, so it is clear *whose* phone opens the house. Polled every 15 minutes — nothing but a person changes it |
+| **Enrolled partition** | `select` | One per paired phone reporting `supports_enrolled_partition` — **and only on an account with two or more partitions** | Which partition that phone disarms. Options come from the record's `enrolled_partition_choices`; selecting one POSTs `/arming-devices/{id}/enrolled-partition` with the partition **number**. See below for why a single-partition account gets no entity |
+| **Panel Bluetooth pairing** | `switch` | The panel reports `supports_pairing_enabled` | Whether the panel accepts Bluetooth pairing at all — i.e. whether a phone that is not already enrolled can be added. On the integration's **service device**, not a camera and not a phone. **Not a master switch** over the per-phone toggles — see below |
+| **Bluetooth disarm window** | `select` | The panel reports `supports_timeout` | How long the panel stays disarmable after a paired phone is seen. Also on the service device. A select rather than a number: the vendor offers exactly five windows — 1, 5, 10, 20 and 30 minutes — and the bridge reports both the unit and the set, so the options are labelled "5 minutes" rather than a bare `5` |
+| **Solar panel** | `sensor` | The camera reports `solar.supports_connected` | Whether a solar panel is attached, as an enum sensor reading *Connected* / *Not connected*, entity category *diagnostic*. **Both cameras on the reference account report the feature unsupported, so neither gets one** |
 | **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
 | **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
 | **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
@@ -893,6 +921,91 @@ audible hardware in a home — see the caution in
 [control-api.md](control-api.md#post-controlcamerascamera_idsiren) before pressing
 it the first time on a new device.
 
+### The Bluetooth disarming entities
+
+Three settings, all the same class of thing — who may walk up to a house and have
+the alarm turn itself off — spread across two coordinators, both polling every
+**15 minutes** because these are configuration records that only move when a
+person moves them, and every cycle is a live Alarm.com round trip on an account
+whose rate limits are undocumented. Neither poll is the feedback path for a change
+made here: every write adopts the record the bridge answers with.
+
+- **Per phone** (`ArmingDevicesCoordinator`, `GET /control/arming-devices`): the
+  "Disarm alarm on arrival" switch and the "Enrolled partition" select. Each phone
+  is its own device in the registry, named as TELUS names it, so it is clear
+  *whose* phone opens the house.
+- **Per system** (`PanelBluetoothCoordinator`, `GET /control/bluetooth-disarming`):
+  the "Panel Bluetooth pairing" switch and the "Bluetooth disarm window" select.
+  Both sit on the integration's **service device**, alongside Auth Health and the
+  talkdown sensors — they belong to no phone and no camera, and the alarm panel's
+  own device comes from the `pyalarmdotcomajax` device model, which these
+  bridge-served entities have no handle on and which is not guaranteed to exist.
+
+Three things about them are load-bearing:
+
+**The panel pairing switch is not a master switch.** Whatever it looks like
+sitting beside the per-phone toggles, turning it off is not established to stop an
+already-paired phone from disarming. The TELUS portal's per-device page never
+consults that document, and what the panel *firmware* does with the flag is
+unresolved — "the portal does not read it" is evidence about the portal. What it
+is definitely for is taking the panel out of pairing mode, so a phone that is not
+already enrolled cannot be added. A user who wants to be sure a particular phone
+cannot disarm must turn that phone's own switch off.
+
+**The disarm window is a select, not a number.** The panel does not take a free
+range: the vendor offers exactly five windows — 1, 5, 10, 20 and 30 minutes — and
+the bridge reports both the unit and the set, because the upstream document
+publishes neither and no client could derive them. The options are labelled from
+the unit the bridge reports rather than from a hardcoded word, and read "5
+minutes" rather than a bare "5". A panel reporting a window the vendor no longer
+offers reads as unknown rather than being snapped to the nearest option, which
+would misreport it and make the next write look like a no-op.
+
+**The enrolled-partition select is only created on an account with two or more
+partitions.** That is a judgement about what to put in front of a user, not a
+technical limit — the bridge accepts the write on a single-partition account
+either way. An entity offering exactly one option, already selected, cannot
+express anything: the only interaction it permits is re-selecting what is already
+true, which is a whole-record `PUT` to a live alarm panel that changes nothing and
+carries every risk such a write carries. It would also appear on the majority of
+installs, since most homes have one partition, as a permanently inert control. The
+information is not lost — the disarming switch publishes `enrolled_partition_id`
+as an attribute either way — and the select appears by itself if a second
+partition is ever added, because the builder is re-offered on every poll until it
+yields something. An empty choices list (the bridge failing to read the partition
+list) lands on the same "no entity" answer, and is likewise retried next poll.
+
+One caveat applies to both panel-level entities: **the bridge's write shape for
+`/control/bluetooth-disarming` is inferred from the sibling per-device endpoint
+rather than captured.** If one of these writes fails, suspect the reconstruction
+at least as readily as the panel.
+
+The pairing switch also publishes the paired phones as `enrolled_device_ids` —
+opaque ids and not descriptions, because those are household members' names and an
+entity attribute is recorded, shown in the UI, and included in diagnostics
+downloads. The switch entities are already named after the phones for anyone who
+needs to tell which is which.
+
+### The solar-panel sensor is a sensor, not a binary sensor
+
+The underlying field is a plain boolean, so `binary_sensor` is the reflexive
+choice — and the wrong one. Home Assistant renders a binary sensor's two states
+through its device class, and there is no device class for "is a solar accessory
+attached"; without one it reads as a bare On/Off, which for a wiring fact says the
+wrong thing, since *On* suggests something is powered up or generating when all
+the camera has said is that an accessory is present. An enum sensor reading
+*Connected* / *Not connected* says exactly and only what the flag means. The
+device classes that come closest (`plug`, `power`, `connectivity`) all describe a
+live electrical or network condition rather than an installation.
+
+There is no state class and no statistics: this does not change unless someone
+physically installs or removes a panel. And it produces **no entity at all on
+hardware that reports no solar support**, which is the case on both cameras this
+was built against — a camera with no solar hardware reporting a permanent "not
+connected" is noise dressed up as diagnostics. The gate is the support flag, never
+the value: a camera that cannot answer the question sends the same
+`connected: false` as one that answered "no".
+
 ### Absent versus unavailable
 
 The two are used deliberately and differently:
@@ -954,13 +1067,15 @@ From `const.py` (timing and identity):
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | 30 | Video-clip / activity poll |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | 300 | Automation-rule poll |
 | `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 120 | Camera settings + diagnostics poll |
+| `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | 900 | Bluetooth arming devices **and** the panel-wide Bluetooth settings poll |
 | `CLIP_LINK_TTL_SECONDS` | 90 days | Signed clip-link lifetime |
 
 Bridge control endpoints all live on `http://127.0.0.1:8199/control/…` (both
 containers run `--network host`, so loopback reaches the bridge). The shared
 directory is HA's `/share/telus_cam_bridge` (mounted into the bridge at
 `/shared`). `hass.data` keys: `DATA_CONTROLLER`, `DATA_CAMERA_COORDINATOR`,
-`DATA_ACTIVITY_COORDINATOR`, `DATA_CAMERA_SETTINGS_COORDINATOR`.
+`DATA_ACTIVITY_COORDINATOR`, `DATA_CAMERA_SETTINGS_COORDINATOR`,
+`DATA_ARMING_DEVICES_COORDINATOR`, `DATA_PANEL_BLUETOOTH_COORDINATOR`.
 
 The blacklisted sensor subtypes (`SENSOR_SUBTYPE_BLACKLIST`) — mobile phone,
 panel image sensor, fixed panic — are excluded from entity creation everywhere.

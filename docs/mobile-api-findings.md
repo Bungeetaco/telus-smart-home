@@ -139,10 +139,8 @@ Constructors in the app are `(customerId, deviceId)` and
 | `GetAllSirenDevices` **[implemented]** | `{"AllCameraSirenInfo": [ {"DeviceId": …, "isActive": …, "timestampEnd": …, "canManuallyTriggerSiren": …}, … ]}` |
 | `GetAllCameraPrivacyModeInfo` **[implemented]** | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
 
-> **Corrected 2026-08-23 by a live call: these two reads answer in XML, not
-> JSON.** The app models them as JSON, so the first implementation was JSON-only
-> and every call failed with "non-JSON body". What the account actually returns
-> is:
+> **These two reads answer in XML, not JSON**, despite the app modelling them as
+> JSON. What the account returns is:
 >
 > ```xml
 > <GetAllSirenDevicesResponse ts="0" dsl="false" s="true">
@@ -188,8 +186,7 @@ Constructors in the app are `(customerId, deviceId)` and
 
 ## `GetCurrentDoorbellSettings` — the doorbell's own settings document **[implemented, partially]**
 
-Added 2026-08-23 while implementing the chime controls (backlog E26/E27). This one
-action returns a large settings document for a single doorbell. Request shape is
+One action returning a large settings document for a single doorbell. Request shape is
 the standard token envelope plus `DeviceId` (the bare numeric MWS id), from the
 decompiled `GetCurrentDoorbellSettingsRequest`. It answers in **XML** (root
 `<gcdsr>`), like the other reads — see the correction above.
@@ -228,7 +225,7 @@ work, all read-only here):
 | --- | --- |
 | `csic` / `ic` | can-set / current indoor chime — the mobile twin of `isIndoorChimeOn` |
 | `supportsoutdoorchime`, `csocl`, `ocl`, `<ocll>` | outdoor chime: supported, can-set-level, current level, and the offered levels |
-| `canturnonoffdeviceled`, `ledi`, `ledo`, `ledmn`/`ledmx` | the doorbell's status LED — brightness and on/off. **There IS a website equivalent** (`generalSettings` → `ledLightSetting`), which is what the implementation uses; an earlier version of this table wrongly said there was none |
+| `canturnonoffdeviceled`, `ledi`, `ledo`, `ledmn`/`ledmx` | the doorbell's status LED — brightness and on/off. The website carries the same control in `generalSettings` → `ledLightSetting`, which is what the implementation uses |
 | `cancontrolirleds`, `irledenabled` | IR LEDs (the website's `infraredSetting` covers this) |
 | `cswt`, `wt`, `wsn`, `<wtol>` | mounting wedge type, e.g. "Downward Wedge Installed" |
 | `CanSetResolutionAndQuality`, `ResolutionAndQuality`, `<ResolutionAndQualityOptionList>` | live-video resolution/quality |

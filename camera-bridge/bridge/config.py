@@ -269,6 +269,26 @@ TALK_PREFER_FULL_DUPLEX = True
 # ?camera_id= routing token) are WAN fallbacks. Values are
 # parse_doorbell_camera_list put_urls keys.
 TALK_PUT_ENDPOINT_ORDER = ("direct", "local", "public", "cloud")
+# E10 -- runtime reachability instead of a blind walk down that order.
+# The order above is a PREFERENCE, not a reachability claim: `direct`/`local` are
+# LAN addresses that simply do not answer when the bridge is off the doorbell's
+# LAN, and on this install `public` is the site's OWN WAN address (hairpin NAT
+# may or may not loop it back). Walking the list blindly still "works" on-LAN --
+# the first entry is the right one -- but off-LAN it stalls on a TCP connect to
+# an unreachable RFC1918 address for however long the OS takes to give up, with
+# the talk request (and the per-camera lock) held the whole time.
+#
+# So: probe the candidates CONCURRENTLY with a plain TCP connect and take the
+# first one in preference order that answers. A probe is a bare connect --
+# no TLS, no HTTP, nothing written -- so it cannot disturb the audio path.
+# Set to 0 to disable probing and restore the pure static walk.
+TALK_ENDPOINT_PROBE_TIMEOUT_S = float(os.environ.get("TALK_ENDPOINT_PROBE_TIMEOUT_S", "1.0"))
+# Static override for when detection is wrong (a firewall that drops the probe
+# but passes the real PUT, an endpoint that answers but cannot carry audio).
+# One of the TALK_PUT_ENDPOINT_ORDER keys; empty = auto-detect. An override that
+# the doorbell record does not carry a URL for is IGNORED with a warning rather
+# than failing the talk -- a bad env var must not silence the doorbell.
+TALK_PUT_ENDPOINT = os.environ.get("TALK_PUT_ENDPOINT", "").strip().lower()
 # Audio codec for the full-duplex PUT path.
 # On THIS doorbell (ADC-VDB750, fw 02091) the PUT path is mu-law ONLY: L16
 # (16-bit linear, skyL16pay/pt97) was tested over the PUT endpoint in both
@@ -323,6 +343,100 @@ TALK_MAX_RENEGOTIATIONS = 2
 # costs one silent gap of a few hundred ms instead of a failed chunk plus a
 # teardown/setup round trip.
 TALK_RENEGOTIATE_MARGIN_S = 20
+# E7 + E11 -- cheap local recovery, tried BEFORE a full renegotiation.
+# Renegotiation (above) is the heavy hammer: it tears down the MWS session,
+# re-runs GetDoorbellCameraList and re-arms the mic path -- three round trips of
+# dead air -- and it is bounded, so spending one on a problem that did not need
+# it can cost the talk later. Two failures do NOT need new credentials:
+#   * a dropped keep-alive connection (E11) -- the socket died, the session did
+#     not; a new socket fixes it;
+#   * a 401 the Digest middleware could not recover (E7) -- e.g. a rotated nonce
+#     the middleware's own single retry did not clear, or a 401 carrying no
+#     WWW-Authenticate for it to re-challenge from. A fresh HTTP session means a
+#     fresh Digest handshake (and an `nc` counter restarting at 1) on the SAME
+#     per-session password.
+# Both are retried in place, keeping the credentials, before escalating. The
+# counter is CONSECUTIVE -- any successful chunk resets it -- and the safety
+# deadline is deliberately NOT extended for a reconnect (unlike a renegotiation),
+# so a link that blips forever still terminates. 0 disables and every failure
+# escalates straight to renegotiation, exactly as before this existed.
+TALK_MAX_RECONNECTS = 2
+# --- E5: streaming encode --------------------------------------------------
+# Feed the PUT loop from ffmpeg's stdout as it decodes, instead of waiting for
+# the whole clip to be encoded into RAM first. Cuts latency-to-first-audio (the
+# doorbell starts speaking after one chunk is ready, not after the entire file
+# is transcoded) and bounds encoded-audio memory at the lookahead below rather
+# than at the whole clip.
+#
+# Kept as a switch because it restructures the loop that drives a LIVE audio
+# path: if it ever misbehaves in the field, TALK_STREAMING_ENCODE=false in the
+# bridge .env restores the buffer-then-send behaviour with no code change. Both
+# modes run the same send/pacing loop and are covered by the same tests.
+TALK_STREAMING_ENCODE = os.environ.get("TALK_STREAMING_ENCODE", "true").strip().lower() in (
+    "1", "true", "yes", "on")
+# How far ahead of the send schedule the encoder is allowed to run. This is what
+# makes streaming safe: ffmpeg decodes ~100x faster than real time, so without a
+# bound it would just re-buffer the whole clip; with it, ffmpeg fills the pipe,
+# blocks, and is drained at playback rate. It also absorbs decode jitter, so a
+# hiccup in ffmpeg never starves the send schedule (which WOULD be audible).
+# Approximate -- the OS pipe buffer sits underneath it and adds a little more.
+# Anything at or under this length is fully encoded before playback ends, so the
+# clip's true duration is known and reported exactly as in buffered mode.
+TALK_ENCODE_LOOKAHEAD_S = 30
+# A read from the encoder that takes longer than this means ffmpeg is wedged
+# (not merely slow -- it is normally hundreds of chunks ahead). Fails the talk
+# rather than letting the doorbell run dry with the session held open.
+TALK_ENCODE_READ_TIMEOUT_S = 15
+# --- E6: prebuffer measurement / adaptation --------------------------------
+# TALK_PREBUFFER_MS above was tuned BY EAR against the real speaker, so it is
+# not adjusted automatically by default. What is always on is the MEASUREMENT:
+# every talk reports observed PUT round-trip latency (p50/p95/max) and how many
+# chunks missed their scheduled slot, so a future tuning has data instead of a
+# guess. See the result dict / GET /control/metrics.
+#
+# The adaptation itself is opt-in and deliberately one-directional: it may only
+# RAISE the lead, never lower it below the tuned value. A larger lead cannot
+# cause an underrun -- it only delays how quickly a stop is heard and how much
+# audio sits buffered at the doorbell -- whereas a smaller one can, and nothing
+# available offline justifies going below what was tuned by ear.
+TALK_PREBUFFER_ADAPTIVE = os.environ.get("TALK_PREBUFFER_ADAPTIVE", "false").strip().lower() in (
+    "1", "true", "yes", "on")
+# Ceiling on the adaptive lead. Also the ceiling on how much audio the doorbell
+# may be holding when a stop arrives, which is why it is not larger.
+TALK_PREBUFFER_MAX_MS = 2000
+# --- E12: pin the doorbell's self-signed TLS certificate --------------------
+# The doorbell serves the PUT endpoint over HTTPS with a SELF-SIGNED cert, so
+# ordinary CA verification cannot apply and the transport historically ran with
+# verification off entirely. Pinning the certificate itself restores an identity
+# check without a CA.
+#
+# The value below is the SHA-256 of the DER certificate OBSERVED ON ONE DEVICE
+# (an ADC-VDB750 on this install). It is NOT a vendor-wide constant: a firmware
+# update, a factory reset or a replacement unit can all legitimately present a
+# different certificate. That is exactly why the default mode is "warn".
+TALK_DEVICE_CERT_SHA256 = os.environ.get(
+    "TALK_DEVICE_CERT_SHA256",
+    "1ac386f7d20abbf824e25a4e0fee2a2b8472e9f5fd2d5ace6c565fac672a89ad").strip().lower()
+# How a certificate mismatch is handled:
+#   "warn"    (default) -- connect exactly as before and LOG loudly, with both
+#                fingerprints, if the device's certificate is not the pinned one.
+#               Detection with no chance of silencing a working doorbell: a
+#               firmware update cannot break talkdown, it just prints the new
+#               fingerprint to paste into TALK_DEVICE_CERT_SHA256.
+#   "enforce" -- a mismatch aborts the connection. Use once the pin is known
+#               good for YOUR device; re-pin after any firmware update.
+#   "off"     -- no certificate check at all.
+# With no pin configured (TALK_DEVICE_CERT_SHA256=""), "warn" and "enforce" both
+# degrade to learn-and-report: the observed fingerprint is logged once so it can
+# be adopted, and the talk proceeds.
+TALK_TLS_PIN_MODE = os.environ.get("TALK_TLS_PIN_MODE", "warn").strip().lower()
+# Which endpoint kinds the pin applies to. The device's own certificate is what
+# was fingerprinted, so the pin is only meaningful on endpoints that terminate AT
+# the device -- direct/local (LAN) and public (the same device via the site's WAN
+# address). The "cloud" endpoint is the VENDOR RELAY on a different host with its
+# own, CA-signed certificate; pinning the doorbell's fingerprint there would
+# break WAN talkdown outright.
+TALK_TLS_PIN_ENDPOINT_KINDS = ("direct", "local", "public")
 TALK_AUDIO_FILTER = ("highpass=f=250,lowpass=f=2800,"
                      "acompressor=threshold=-18dB:ratio=3:attack=5:release=150:makeup=2,"
                      "alimiter=level_out=0.5:limit=0.6")

@@ -216,11 +216,19 @@ Contract (as implemented -- this is what callers must match):
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
 
     Response: 200 {"audio": {...}, "image": {...}, "video": {...},
+                    "led": {...}, "notifications": {...},
+                    "solar": {"supports_connected": <bool>,
+                              "connected": <bool>, "raw": {...}},
                     "siren": {"can_manually_trigger": <bool>, "active": <bool>,
                               "timestamp_end": <value or null>} | null,
                     "privacy": {"supported": <bool>, "active": <bool>} | null}
-      The camera's three website settings objects, each carrying its own
-      supports_* flags. Those flags are not decoration: every website settings
+      The camera's website settings objects, each carrying its own
+      supports_* flags. The last three come from ONE generalSettings read:
+      the status LED, the TELUS-app notification toggles, and the read-only
+      solar-panel status (backlog E39 -- there is no write route for it, and
+      supports_connected is false on every camera that is not a battery+solar
+      model, which is the expected answer rather than a gap).
+      Those flags are not decoration: every website settings
       field is paired with a "<name>FeatureSupport" enum (0 = unsupported,
       2 = editable) and the SAME payload shape comes back for a device that
       CANNOT do the thing, so a caller must read the flag before offering a
@@ -237,7 +245,7 @@ Contract (as implemented -- this is what callers must match):
       string-bool trap, and get it wrong. Both sections are best-effort and
       degrade to null (never a 502) when the talk manager was not constructed or
       the MWS read fails, so an MWS outage still returns the website settings.
-      Three website GETs per call plus AT MOST two MWS POSTs: those two actions
+      Four website GETs per call plus AT MOST two MWS POSTs: those two actions
       are account-wide, so they are read once per _MWS_ACCOUNT_READ_TTL_S and
       shared by every camera rather than re-issued per camera. Poll this SLOWLY
       regardless -- alarm.com's rate limits are undocumented and can lock the
@@ -351,6 +359,10 @@ Contract (as implemented -- this is what callers must match):
                                 "disarming_enabled": <bool>,
                                 "enrolled_partition_id": <str>,
                                 "supports_disarming_toggle": <bool>,
+                                "supports_enrolled_partition": <bool>,
+                                "enrolled_partition_choices": [
+                                    {"value": "<partition number>",
+                                     "label": <str>}, ...],
                                 "raw": {...}}, ...]}
       One upstream request for the whole list -- it comes from the manage-devices
       catalog, which inlines each device's full record. An account with no paired
@@ -359,6 +371,30 @@ Contract (as implemented -- this is what callers must match):
       written reports the same "disarming_enabled" a writable one does, so a
       caller reading the value as permission would offer a control that silently
       does nothing. See arming_devices._supports_toggle for what it is built from.
+      "enrolled_partition_choices" is the account's partitions, folded into every
+      record (the same value on each) rather than offered as a sibling key: a
+      caller building a picker for enrolled_partition_id needs the record and its
+      choices together, and it is what the write route below validates against.
+      It costs ONE extra upstream request per call, and only when the account has
+      at least one paired phone. Best effort -- an empty list means the partition
+      read failed, not that the account has no partitions, and a caller must then
+      offer no picker rather than a picker with nothing in it.
+
+    POST .../control/arming-devices/<device_id>/enrolled-partition
+    Body: {"partition_id": "<partition number>"}
+
+      Moves ONE paired phone to a different partition -- i.e. changes WHICH
+      partition that phone disarms (backlog E43). Same class of setting as the
+      disarming toggle and refused in the same four places: the body must carry a
+      non-empty JSON string (the partition NUMBER as the record reports it, e.g.
+      "1" -- not the "<unit>-127" device id the alarm panel entity uses),
+      <device_id> must be in the list above (404), the record's own
+      supports_enrolled_partition must be true (422), and the partition must be
+      one this account actually has (400). That last check re-reads the partition
+      list and FAILS CLOSED: if it cannot be read, the write does not happen
+      (502), because "which partition disarms" is not a field to write against an
+      unverified id.
+      Response: 200 <one element of the array GET /control/arming-devices returns>
 
     POST http://127.0.0.1:<CONTROL_PORT>/control/arming-devices/<device_id>/disarming
     Body: {"enabled": <bool>}
@@ -376,6 +412,34 @@ Contract (as implemented -- this is what callers must match):
       The read-modify-write a device PUT requires (it replaces the WHOLE record)
       is arming_devices' job, not this module's.
       Response: 200 <one element of the array GET /control/arming-devices returns>
+
+    GET  http://127.0.0.1:<CONTROL_PORT>/control/bluetooth-disarming
+    POST http://127.0.0.1:<CONTROL_PORT>/control/bluetooth-disarming
+    Body: {"pairing_enabled": <bool>?, "timeout": <int>?}   (any non-empty subset)
+
+    Response: 200 {"id": "<system id>", "pairing_enabled": <bool>,
+                   "supports_pairing_enabled": <bool>, "timeout": <int|null>,
+                   "supports_timeout": <bool>, "timeout_unit": null,
+                   "enrolled_device_ids": ["<unit>-<did>", ...], "raw": {...}}
+
+      The PANEL-level Bluetooth disarming settings (backlog E41) -- system-wide,
+      not per phone. Two things a caller must not misread:
+
+      * This is NOT the capability gate for the per-device toggle above. The
+        portal's per-device page never consults it, and whether the panel
+        firmware treats a system-wide false as a veto over a per-device true is
+        UNRESOLVED. Do not tell a user that one disables the other.
+      * "timeout" has NO ESTABLISHED UNIT. The document publishes no unit, no
+        bounds and no options; the backlog's "minutes" was never verified, which
+        is why "timeout_unit" is null rather than a string. A caller that needs a
+        range has to choose one and own the choice.
+
+      THE WRITE SHAPE IS INFERRED, NOT CAPTURED -- no PUT to this endpoint was
+      ever observed. See arming_devices.set_bluetooth_disarming_settings for
+      exactly which parts are deductions and which are guesses. Unlike the
+      per-device write there is no membership pre-read here: the document is the
+      session's own system, so there is nothing to check it against, and the
+      setter's own read-modify-write carries the capability gate.
 """
 import asyncio
 import logging
@@ -500,6 +564,18 @@ _NOTIFICATION_FIELDS: dict[str, type | tuple[type, ...]] = {
     # lists in format_choices. camera_settings enforces that set, because the
     # device publishes no options of its own for this field.
     "format": int,
+}
+# The PANEL-level bluetooth disarming document (backlog E41). System-wide, not
+# per phone, and nothing to do with a camera despite sharing this validator.
+#
+# `timeout` is an int with NO declared unit and no bounds, here or anywhere else
+# in this codebase: the document publishes none and the backlog's "minutes" was
+# never verified. It is listed as a plain int on purpose -- _validate_fields'
+# int branch also rejects a bool, which matters because bool is an int subclass
+# and {"timeout": true} would otherwise reach a live panel as 1.
+_BLUETOOTH_DISARMING_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "pairing_enabled": bool,
+    "timeout": int,
 }
 _CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
     "indoor_on": bool,
@@ -979,8 +1055,9 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         if (err := _check_auth(request)) is not None:
             return err
 
-        # Off by default -- the wiring ships inert until someone opts in, so a
-        # deployed-but-unconfigured talk path can never be triggered.
+        # Enabled by default: the route plays only what a caller asks it to, so
+        # a deployed talk path never speaks on its own. TALKDOWN_ENABLED=false
+        # turns the endpoint off entirely for a deployment that does not want it.
         if not c.TALKDOWN_ENABLED:
             return web.json_response({"error": "talkdown_disabled"}, status=403)
         if talk_manager is None:
@@ -1475,6 +1552,13 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             "video": video,
             "led": general.get("led"),
             "notifications": general.get("notifications"),
+            # Third section off the SAME generalSettings read, at no extra
+            # upstream cost (backlog E39). Read-only -- there is no write route
+            # for it, because whether a solar panel is bolted to a camera is not
+            # a preference. Expect supports_connected FALSE on every camera that
+            # is not a battery+solar model, which is both cameras on the
+            # reference account; a caller must create nothing in that case.
+            "solar": general.get("solar"),
             "siren": await _mws_camera_record(get_siren_devices, camera_id,
                                               _MWS_SIREN_READ, _normalize_siren),
             "privacy": await _mws_camera_record(get_privacy_mode_info, camera_id,
@@ -1765,6 +1849,62 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
     # ---- bluetooth arming devices (website API) -----------------------------
 
+    async def _partition_choices() -> list:
+        """The account's partitions as [{"value", "label"}], or [] if unreadable.
+
+        `value` is the partition NUMBER as a string, because that is what an
+        arming device's enrolledPartitionId holds ("1") -- NOT the "<unit>-127"
+        alarm.com device id the same partition record also carries and the alarm
+        panel entity uses as its unique id. Mixing the two would build a picker
+        whose every option is refused by the write route.
+
+        `label` is the partition's own description, passed through as text: it is
+        whatever the account holder called it and may contain a name or a curly
+        apostrophe, so it is never parsed, sliced or used to build an identifier.
+
+        Best-effort, like _chime_type_choices: [] on any failure, logged at
+        warning. That is the right degradation for the READ (a caller shows no
+        picker rather than an empty one), and deliberately NOT what the write
+        route does with the same failure -- see handle_set_enrolled_partition.
+        """
+        try:
+            found = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, _unused: partitions_mod.get_partitions(telus), "")
+        except Exception:
+            log.warning("Control endpoint: partition list unavailable; arming "
+                        "devices will carry no partition choices", exc_info=True)
+            return []
+        choices = []
+        for partition in found:
+            number = partition.get("partition_id")
+            if number is None:
+                continue
+            choices.append({"value": str(number),
+                            "label": partition.get("description") or str(number)})
+        return choices
+
+    async def _with_partition_choices(records: list) -> list:
+        """Stamp the account's partition choices onto every arming device record.
+
+        Called on EVERY response carrying an arming device, the list route and
+        both write routes alike, because the record is a single contract and a
+        caller must not get a different shape depending on how it asked. That is
+        not cosmetic: the HA side folds a write's echoed record straight back
+        into what its entities read, so a reply missing the choices would empty
+        the picker it had just been used from -- the same bug _augment_audio
+        exists to prevent on the camera settings sections.
+
+        One upstream read for the whole batch, and none at all when there are no
+        records to stamp.
+        """
+        if not records:
+            return records
+        choices = await _partition_choices()
+        for record in records:
+            record["enrolled_partition_choices"] = choices
+        return records
+
     async def handle_arming_devices(request: web.Request) -> web.Response:
         """List the phones paired to the panel for bluetooth disarming.
 
@@ -1788,7 +1928,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         except Exception:
             log.exception("Control endpoint: arming device list failed")
             return web.json_response({"error": "telus_error"}, status=502)
-        return web.json_response({"devices": devices})
+        return web.json_response(
+            {"devices": await _with_partition_choices(devices)})
 
     async def handle_set_disarming(request: web.Request) -> web.Response:
         """Turn bluetooth disarming on or off for one paired phone.
@@ -1856,7 +1997,177 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
                           device_id)
             return web.json_response({"error": "telus_error"}, status=502)
 
-        return web.json_response(result)
+        return web.json_response((await _with_partition_choices([result]))[0])
+
+    async def handle_set_enrolled_partition(request: web.Request) -> web.Response:
+        """Move one paired phone to a different partition (backlog E43).
+
+        Which partition a phone disarms is the same class of setting as whether
+        it may disarm at all, so this follows handle_set_disarming exactly --
+        cheapest and most certain refusals first, so a bad request never costs a
+        round trip against an account that can be rate-limited -- with one extra
+        gate that the disarming toggle has no equivalent of.
+
+        That gate is the partition itself, and it FAILS CLOSED. The requested
+        partition must appear in the account's own partition list, and if that
+        list cannot be read the write does not happen. Refusing is the whole
+        point: a PUT here replaces the record, `enrolledPartitionId` is a bare
+        panel-side number ("1", "2") with no way to tell a valid one from a
+        typo by looking at it, and writing an id nothing confirmed exists to the
+        field that decides which partition a phone opens is exactly the mistake
+        this endpoint should be incapable of making.
+        """
+        if (err := _check_auth(request)) is not None:
+            return err
+        device_id = request.match_info["device_id"]
+
+        try:
+            partition_id = (await request.json())["partition_id"]
+        except Exception:
+            log.warning("Control endpoint: malformed enrolled-partition request "
+                        "for %s", device_id, exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        # A non-empty JSON string, never a coercion: this is an identifier that
+        # goes back onto a whole-record PUT exactly as it arrived, and str(1)
+        # would change its type on the wire without anyone noticing.
+        if not isinstance(partition_id, str) or not partition_id.strip():
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            devices = await _fetch_with_relogin(
+                telus_session, login_lock, arming_devices.get_arming_devices)
+        except RateLimited as err:
+            return _rate_limited(err, "arming device pre-read", device_id)
+        except Exception:
+            log.exception("Control endpoint: arming device pre-read failed for %s",
+                          device_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        current = next((dev for dev in devices if dev["id"] == device_id), None)
+        if current is None:
+            log.warning("Control endpoint: no bluetooth arming device %s on this system",
+                        device_id)
+            return web.json_response({"error": "unknown_device"}, status=404)
+        if not current.get("supports_enrolled_partition"):
+            log.info("Control endpoint: %s reports no writable enrolled partition",
+                     device_id)
+            return web.json_response({"error": "unsupported"}, status=422)
+
+        # Not _partition_choices(): that one degrades an unreadable partition
+        # list to [], which is right for a read and wrong here. An empty list
+        # from a failed read and an empty list from an account with no partitions
+        # are indistinguishable, and both must stop the write rather than let it
+        # through unvalidated.
+        try:
+            offered = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, _unused: partitions_mod.get_partitions(telus), "")
+        except RateLimited as err:
+            return _rate_limited(err, "partition list", device_id)
+        except Exception:
+            log.exception("Control endpoint: partition list failed; refusing to "
+                          "enroll %s on an unverified partition", device_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        numbers = {str(p.get("partition_id")) for p in offered
+                   if p.get("partition_id") is not None}
+        if partition_id not in numbers:
+            log.warning("Control endpoint: partition %r is not one of this "
+                        "account's (%s); refusing to enroll %s on it",
+                        partition_id, ", ".join(sorted(numbers)) or "none", device_id)
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            result = await _fetch_with_relogin(
+                telus_session, login_lock,
+                _bound(arming_devices.set_enrolled_partition,
+                       partition_id=partition_id),
+                device_id)
+        except RateLimited as err:
+            return _rate_limited(err, "enrolled partition write", device_id)
+        except arming_devices.ArmingDeviceError as err:
+            return _settings_error(err, device_id, "set_enrolled_partition")
+        except Exception:
+            log.exception("Control endpoint: enrolled partition write failed for %s",
+                          device_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response((await _with_partition_choices([result]))[0])
+
+    # ---- panel-level bluetooth disarming (website API) ----------------------
+
+    async def handle_bluetooth_disarming(request: web.Request) -> web.Response:
+        """The system-wide Bluetooth disarming settings (backlog E41).
+
+        A pure read. Like handle_arming_devices it takes no caller input, so an
+        ArmingDeviceError is NOT routed through _settings_error -- that helper's
+        non-`unsupported` branch is 400 "you asked for something wrong", and
+        there is nothing here for a caller to have asked wrong.
+        """
+        if (err := _check_auth(request)) is not None:
+            return err
+        try:
+            settings = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, _unused: arming_devices
+                .get_bluetooth_disarming_settings(telus), "")
+        except RateLimited as err:
+            return _rate_limited(err, "bluetooth disarming read", "bluetooth-disarming")
+        except Exception:
+            log.exception("Control endpoint: bluetooth disarming read failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+        return web.json_response(settings)
+
+    async def handle_set_bluetooth_disarming(request: web.Request) -> web.Response:
+        """Change the system-wide Bluetooth disarming settings (backlog E41).
+
+        **The write shape this reaches is INFERRED, not captured** -- see
+        arming_devices.set_bluetooth_disarming_settings. That is a reason to be
+        stricter here, not looser, so the body is validated to the letter:
+        _validate_fields refuses an unknown key, a wrong type, and (its whole
+        reason for existing) a bool where an int is wanted, since bool is an int
+        subclass in Python and {"timeout": true} would otherwise be written to a
+        real panel as 1.
+
+        No pre-read gate, unlike handle_set_disarming. That route pre-reads for
+        MEMBERSHIP -- to keep a typo'd device id from reaching a PUT at an
+        arbitrary device -- and there is no membership question here: the
+        document is the session's own system, addressed by its Context-Id. The
+        setter's own read-modify-write carries the capability gate, and adding a
+        second read would double this route's upstream cost to check nothing.
+        """
+        if (err := _check_auth(request)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            log.warning("Control endpoint: malformed bluetooth disarming body",
+                        exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+
+        fields = _validate_fields(body, _BLUETOOTH_DISARMING_FIELDS)
+        if fields is None:
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            settings = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, _unused: arming_devices
+                .set_bluetooth_disarming_settings(telus, **fields), "")
+        except RateLimited as err:
+            return _rate_limited(err, "bluetooth disarming write", "bluetooth-disarming")
+        except arming_devices.ArmingDeviceError as err:
+            # Same contract as CameraSettingsError, so the same mapping: 422 when
+            # the panel reports no such setting, 400 when the caller asked wrong.
+            return _settings_error(err, "bluetooth-disarming",
+                                   "set_bluetooth_disarming_settings")
+        except Exception:
+            log.exception("Control endpoint: bluetooth disarming write failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        log.info("Control endpoint: panel bluetooth disarming settings applied (%s)",
+                 ", ".join(sorted(fields)))
+        return web.json_response(settings)
 
     async def handle_partitions(request: web.Request) -> web.Response:
         """List the alarm partitions and the two flags that gate a bypass."""
@@ -1920,6 +2231,37 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
                  partition_id, wanted["bypass"], wanted["unbypass"])
         return web.json_response({"status": "applied", "partition": partition})
 
+    async def handle_unpair_arming_device(request: web.Request) -> web.Response:
+        """Unpair one Bluetooth arming device. NOT undoable from this side.
+
+        DELETE rather than POST, because that is what it is. Re-pairing needs
+        physical access to the phone and the panel, so an unknown device id is a
+        404 rather than a delete aimed at whatever that id addresses."""
+        if (err := _check_auth(request)) is not None:
+            return err
+        device_id = request.match_info["device_id"]
+        try:
+            result = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, did: arming_devices.unpair_arming_device(telus, did),
+                device_id)
+        except arming_devices.ArmingDeviceError as err:
+            # An id the catalog does not know is a 404, not the 400 the shared
+            # mapper would give: the caller named a device, and the answer is
+            # that it does not exist.
+            if err.field == "device_id":
+                log.info("Control endpoint: unpair refused, %s unknown", device_id)
+                return web.json_response({"error": "unknown_device"}, status=404)
+            return _settings_error(err, device_id, "unpair")
+        except RateLimited as err:
+            return _rate_limited(err, "unpair", device_id)
+        except Exception:
+            log.exception("Control endpoint: unpair failed for %s", device_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        log.info("Control endpoint: unpaired arming device %s", device_id)
+        return web.json_response({"status": "unpaired", **result})
+
     app = web.Application()
     app[APP_CURRENT_SECRET] = current_secret
 
@@ -1971,9 +2313,15 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_post("/control/cameras/{camera_id}/privacy", handle_privacy)
     app.router.add_get("/control/partitions", handle_partitions)
     app.router.add_post("/control/partitions/{partition_id}/bypass", handle_bypass)
+    app.router.add_delete("/control/arming-devices/{device_id}",
+                          handle_unpair_arming_device)
     app.router.add_get("/control/arming-devices", handle_arming_devices)
     app.router.add_post("/control/arming-devices/{device_id}/disarming",
                         handle_set_disarming)
+    app.router.add_post("/control/arming-devices/{device_id}/enrolled-partition",
+                        handle_set_enrolled_partition)
+    app.router.add_get("/control/bluetooth-disarming", handle_bluetooth_disarming)
+    app.router.add_post("/control/bluetooth-disarming", handle_set_bluetooth_disarming)
     return app
 
 
