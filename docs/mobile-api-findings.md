@@ -100,15 +100,56 @@ the account tested), `POST adc-vid-rstats.devicetask.com/api/v1/RecordMobileStre
 integration drives locks through the website API today, whereas this works off the
 mobile session the bridge already mints for talkdown. Worth knowing as a fallback.
 
-## Not resolved by this survey
+## Camera siren and privacy mode — resolved from the app binary
 
-`GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo` are called by the app on
-every camera screen, but the account tested has **no UI for either**, so no
-command action for them was captured — only the reads. The `<cli>` element for the
-doorbell does advertise `srn="true"`, and `GetDashboard`'s response carries
-siren-shaped attributes, so the capability may exist without a UI surface.
-Determining the command names/parameters needs a static read of the decompiled
-app rather than another capture.
+The app calls `GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo` on every
+camera screen, but the account tested exposes no UI for either, so no command
+could be captured live. Reading the decompiled APK settles it: **both commands
+exist**, and they are ordinary MWS actions.
+
+They differ from the XML actions in one respect: **the response is JSON**, parsed
+with Moshi, though the envelope carries the same fields as the XML one
+(`isSuccess`, `ErrorMessage`, `DidSeamlesslyLogin`). Requests are the usual
+form-urlencoded POST with the standard token envelope.
+
+### Commands
+
+| Action | Extra parameters | Response |
+| --- | --- | --- |
+| `ManualSirenStart` | `DeviceId` | `StartSirenResponse` (JSON) |
+| `ManualSirenStop` | `DeviceId` | `StopSirenResponse` (JSON) |
+| `SetCameraPrivacyModeState` | `DeviceId`, `IsActive` (`true`/`false` as a string) | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
+
+Constructors in the app are `(customerId, deviceId)` and
+`(customerId, deviceId, isActive)`; `customerId` rides in the standard envelope
+(`CustomerId`) and `deviceId` is emitted by the shared base class as `DeviceId`.
+
+### Reads
+
+| Action | Response shape |
+| --- | --- |
+| `GetAllSirenDevices` | `{"AllCameraSirenInfo": [ {"DeviceId": …, "isActive": …, "timestampEnd": …, "canManuallyTriggerSiren": …}, … ]}` |
+| `GetAllCameraPrivacyModeInfo` | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
+
+### Before implementing, note these caveats
+
+- **`canManuallyTriggerSiren` is a per-camera permission**, and the app has a
+  dedicated `ManualCameraSirenPermissionChecker`. A device advertising a siren is
+  not the same as this account being allowed to trigger it — read
+  `GetAllSirenDevices` first and honour that flag rather than firing blind.
+- The siren is **time-bounded**: `CameraSirenInfoDTO` carries `timestampEnd`, and
+  the app has an error path for "isActive:true but received null or empty
+  timestampEnd". Expect a server-chosen duration, and use `ManualSirenStop` to end
+  it early rather than assuming it stops on its own.
+- The doorbell's `<cli>` advertises `srn="true"` and `GetDashboard` carries
+  siren-shaped attributes, but **no live command was ever observed on this
+  account** — the UI is absent. Treat a first invocation as an experiment, on a
+  device where an unexpected siren is acceptable.
+- Privacy mode is also gated by `SupportsPrivacyMode`, which is **false** for the
+  cameras on the account tested — so `SetCameraPrivacyModeState` would likely be
+  refused there even though the action exists.
+
+## Not resolved by this survey
 
 Sections backed by the webview (Users/access codes, account, support) were not
 captured: they are the alarm.com web portal, whose API the integration already
