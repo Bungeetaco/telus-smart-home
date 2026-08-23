@@ -5,10 +5,15 @@ Run from the camera-bridge directory:
     TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_mws_json_actions.py
 
 These actions are the odd ones out in mws_client: ordinary form-urlencoded MWS
-POSTs carrying the standard token envelope, but the reply is JSON rather than XML
-(recovered from the decompiled app -- no live command was ever captured on the
-account, see docs/mobile-api-findings.md). Two things are worth pinning because
-nothing else can catch them:
+POSTs carrying the standard token envelope, but the decompiled app models the
+replies as JSON rather than XML (no live command was ever captured on the
+account, see docs/mobile-api-findings.md).
+
+That model turned out to be only half right, which is why this file covers BOTH
+encodings despite its name: the live server answers the two READ actions in XML.
+The client is JSON-first with an XML path, and _parse_mws_ack dispatches on the
+body itself. Three things are worth pinning because nothing else can catch
+them:
 
   * the JSON envelope (``isSuccess`` / ``ErrorMessage``) has to map onto the same
     ok/error contract the XML acks produce, or every caller needs to know which
@@ -138,6 +143,56 @@ def test_json_ack_mapping():
           "isn't an error, missing isSuccess isn't a success")
 
 
+def test_xml_ack_mapping():
+    """The live server answers several of these actions in XML, not JSON.
+
+    This is the exact body the account returns for GetAllSirenDevices -- captured
+    from the deployed bridge, not constructed. The decompiled app modelled these
+    actions as JSON, so the client shipped JSON-only and every call raised
+    "non-JSON body"; both encodings have to work.
+    """
+    real = ('<GetAllSirenDevicesResponse ts="0" dsl="false" s="true">\r\n'
+            '  <AllCameraSirenInfo />\r\n'
+            '</GetAllSirenDevicesResponse>')
+    ack = mws_client._parse_mws_ack(real)
+    # s="true" with an EMPTY list means "answered: no siren-capable devices".
+    # Reading that as a failure would make callers retry a question already
+    # answered -- and, worse, look like a transient fault rather than a fact
+    # about the account.
+    assert ack["ok"] is True, ack
+    assert ack["data"]["AllCameraSirenInfo"] == [], ack
+    assert ack["token_status"] == 0, ack
+    assert ack["error"] is None, ack
+
+    # A populated container: attribute names survive exactly as the server spells
+    # them, so the same consumer code matches XML and JSON records alike. Note
+    # the booleans arrive as the STRINGS "true"/"false" here too.
+    populated = ('<GetAllSirenDevicesResponse ts="0" s="true"><AllCameraSirenInfo>'
+                 '<CameraSirenInfo DeviceId="2048" canManuallyTriggerSiren="false"/>'
+                 '</AllCameraSirenInfo></GetAllSirenDevicesResponse>')
+    entry = mws_client._parse_mws_ack(populated)["data"]["AllCameraSirenInfo"][0]
+    assert entry["DeviceId"] == "2048", entry
+    assert entry["canManuallyTriggerSiren"] == "false", entry
+    assert mws_client._json_bool(entry["canManuallyTriggerSiren"]) is False
+
+    # A failed action, and the envelope's error message.
+    refused = mws_client._parse_mws_ack(
+        '<ManualSirenStartResponse ts="0" s="false" em="Not permitted" />')
+    assert refused["ok"] is False, refused
+    assert refused["error"] == "Not permitted", refused
+
+    # A logged-out token is not a success however the body is spelled.
+    assert mws_client._parse_mws_ack(
+        '<GetAllSirenDevicesResponse ts="1" s="true" />')["ok"] is False
+
+    # JSON still works, and anything that is neither fails closed.
+    assert mws_client._parse_mws_ack('{"isSuccess": true}')["ok"] is True
+    for junk in ("", "not xml or json", "<unclosed", "null"):
+        assert mws_client._parse_mws_ack(junk)["ok"] is False, junk
+    print("  ok  xml ack: empty container is an answered 'none', attributes keep "
+          "their spelling, ts/s/em map to the JSON shape, junk fails closed")
+
+
 async def test_privacy_mode_sends_string_bool():
     """IsActive is the string "true"/"false" -- never Python's "True"/"False"."""
     replies = {"SetCameraPrivacyModeState": {
@@ -237,7 +292,7 @@ async def main():
     async_tests = (test_privacy_mode_sends_string_bool,
                    test_siren_commands_carry_the_token_envelope,
                    test_reads_preserve_the_device_payload)
-    for test in (test_json_ack_mapping,) + async_tests:
+    for test in (test_json_ack_mapping, test_xml_ack_mapping) + async_tests:
         try:
             result = test()
             if asyncio.iscoroutine(result):

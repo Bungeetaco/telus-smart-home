@@ -37,6 +37,7 @@ from .camera import CameraBridgeCoordinator
 from .const import (
     CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE,
     CAMERA_BRIDGE_CAMERA_SETTINGS_URL_TEMPLATE,
+    CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS,
     CAMERA_SETTINGS_POLL_INTERVAL_SECONDS,
     DATA_CAMERA_COORDINATOR,
     DATA_CAMERA_SETTINGS_COORDINATOR,
@@ -89,27 +90,63 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
             return self.data or {}
 
         data: dict[str, dict[str, Any]] = {}
+        failures: list[str] = []
+        previous = self.data or {}
         for camera_id in camera_ids:
             # Sequential, not asyncio.gather: gathering would fire two live
             # TELUS requests per camera in the same instant on every cycle.
             # Nothing here is latency-sensitive, and a synchronized burst is
             # exactly what the rate-limit discipline in docs/troubleshooting.md
             # warns against.
-            entry = await self._async_fetch_camera(camera_id)
+            try:
+                entry = await self._async_fetch_camera(camera_id)
+            except UpdateFailed as err:
+                # ONE camera's failure must not blank the others. This used to
+                # propagate, so a single slow camera failed the whole sweep and
+                # every camera's entities went unavailable -- and on a cold start,
+                # where entities are created from the first successful poll, none
+                # were ever created at all. Observed live: one camera's
+                # /diagnostics took 25s against a 10s client timeout, and no
+                # camera in the account got a single entity.
+                LOGGER.warning("Camera settings poll failed for %s: %s", camera_id, err)
+                failures.append(camera_id)
+                # Keep whatever that camera last reported rather than dropping it:
+                # capability flags do not change minute to minute, and a stale
+                # supports_* is a better answer than "this camera can do nothing".
+                if camera_id in previous:
+                    data[camera_id] = previous[camera_id]
+                continue
             if entry is not None:
                 data[camera_id] = entry
+
+        # Only a total failure is worth marking the coordinator failed -- that is
+        # the bridge being down, which the entities should reflect. A partial
+        # failure has already been logged and degraded per camera above.
+        if failures and len(failures) == len(camera_ids):
+            raise UpdateFailed(
+                f"Camera settings poll failed for every camera ({', '.join(failures)})")
         return data
 
     async def _async_fetch_camera(self, camera_id: str) -> dict[str, Any] | None:
         """Return one camera's settings+diagnostics, or None if the bridge has neither."""
 
         settings = await self._async_get(CAMERA_BRIDGE_CAMERA_SETTINGS_URL_TEMPLATE, camera_id)
-        diagnostics = await self._async_get(CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE, camera_id)
+
+        # Diagnostics gets a longer timeout than the shared default because it is
+        # not one upstream request: the bridge fans it out to three sequential
+        # alarm.com reads (signal, battery, device status), and alarm.com appears
+        # to query the camera live for the signal figure. Measured at 1.6s on one
+        # camera and 25s on another in the same account, so the default 10s is not
+        # a slow-bridge signal here, it is normal for some models.
+        diagnostics = await self._async_get(
+            CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE, camera_id,
+            timeout=CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS)
         if settings is None and diagnostics is None:
             return None
         return {"settings": settings or {}, "diagnostics": diagnostics or {}}
 
-    async def _async_get(self, url_template: str, camera_id: str) -> dict[str, Any] | None:
+    async def _async_get(self, url_template: str, camera_id: str, *,
+                         timeout: int = 10) -> dict[str, Any] | None:
         """GET one bridge route for one camera.
 
         Returns None when the bridge answers 404 -- either it doesn't know this
@@ -120,7 +157,8 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
         raises UpdateFailed.
         """
         try:
-            return await bridge_get(self.hass, url_template.format(camera_id=camera_id))
+            return await bridge_get(
+                self.hass, url_template.format(camera_id=camera_id), timeout=timeout)
         except aiohttp.ClientResponseError as err:
             if err.status == 404:
                 LOGGER.debug("Camera bridge has no %s for %s", url_template.rsplit("/", 1)[-1], camera_id)

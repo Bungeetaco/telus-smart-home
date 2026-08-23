@@ -19,7 +19,8 @@ Pass the token in; this module does not mint it.
 
 Most MWS actions reply in XML, but the newer camera siren / privacy-mode
 ones reply in JSON with an equivalent envelope; they get their own
-_post_mws_json/_parse_json_ack pair at the bottom of this module.
+_parse_mws_ack dispatcher at the bottom of this module -- which also
+copes with the several of them that answer in XML anyway.
 """
 import base64
 import json
@@ -599,7 +600,8 @@ async def end_full_duplex(session, session_token, device_id=DOORBELL_DEVICE_ID, 
 # Same form-urlencoded BaseTokenRequest POST as everything above -- only the
 # RESPONSE differs: these actions reply in JSON (the app parses them with Moshi)
 # with an envelope that means what the XML ts/s pair means: isSuccess,
-# ErrorMessage, DidSeamlesslyLogin. Hence the separate _post_mws_json/
+# ErrorMessage, DidSeamlesslyLogin -- and several of them answer in XML
+# regardless of what the app's models say. Hence the separate _parse_mws_ack/
 # _parse_json_ack pair rather than bending the XML parser at them.
 #
 # Provenance and caveats: docs/mobile-api-findings.md. The app issues
@@ -714,25 +716,108 @@ def _parse_json_ack(payload: dict) -> dict:
     }
 
 
-async def _post_mws_json(session: aiohttp.ClientSession, form: dict) -> dict:
-    """POST a form-urlencoded MWS action whose response is JSON and return the
-    decoded object.
+def _el_to_dict(el) -> dict:
+    """One XML element as a dict: its attributes, plus nested children by tag.
 
-    Identical transport to _post_mws (the gzip-without-Content-Encoding fix and
-    the 429 -> telus_auth.RateLimited funnel); only the decode differs.
+    Attribute names are kept EXACTLY as the server spells them, so a record
+    parsed out of XML carries the same keys as the JSON form the decompiled app
+    implied (``DeviceId``, ``canManuallyTriggerSiren``) and the same consumer
+    code matches either.
+    """
+    out = dict(el.attrib)
+    for child in el:
+        tag = _local(child.tag)
+        value = _el_to_dict(child)
+        if tag in out:
+            existing = out[tag]
+            out[tag] = existing + [value] if isinstance(existing, list) else [existing, value]
+        else:
+            out[tag] = value
+    if not out and (el.text or "").strip():
+        return {"value": el.text.strip()}
+    return out
 
-    Raises ValueError when the body is not JSON, so an HTML error page or an XML
-    fault from the Cloudflare edge cannot be mistaken for a well-formed "not ok"
-    ack. The message quotes only a short prefix of the RESPONSE -- never the
-    form, which carries SessionToken/slt/Haiku; the actions routed through here
-    return no tokens of their own (the login actions that do are posted through
-    mobile_auth, not this helper)."""
-    body = await _post_mws(session, form)
+
+def _parse_xml_ack(body: str) -> dict:
+    """Parse an MWS action response that came back as XML into the JSON ack shape.
+
+    The actions routed through here were recovered from the decompiled app, which
+    modelled them as JSON. The live server answers several of them in XML
+    instead::
+
+        <GetAllSirenDevicesResponse ts="0" dsl="false" s="true">
+          <AllCameraSirenInfo />
+        </GetAllSirenDevicesResponse>
+
+    so both encodings have to be handled and neither can be assumed. The root's
+    attributes are the envelope -- ``s`` (success), ``ts`` (TokenStatus), ``dsl``
+    (DidSeamlesslyLogin), ``em``/``e`` (error message) -- exactly as in
+    _parse_action_ack. Every child element becomes a member of ``data``.
+
+    A container element becomes a LIST of its children, so an empty
+    ``<AllCameraSirenInfo />`` reads as "no siren-capable devices" -- which is
+    what this account actually reports -- rather than as a failure. That
+    distinction matters: ok=True with an empty list means the question was
+    answered, and callers must not retry it as though the read had failed.
+
+    Only the empty-container case has been observed live. A populated one is
+    modelled from the JSON shape the app implied, so treat a non-empty result as
+    unverified.
+    """
     try:
-        return json.loads(body)
+        root = _parse_xml(body)
+    except Exception as exc:  # noqa: BLE001 - any malformed body is just "not an ack"
+        return {"ok": False, "data": {}, "token_status": None,
+                "error": f"unparsable MWS XML response ({exc})"}
+
+    ts = _int(root, "ts", _int(root, "TokenStatus", None))
+    success = _attr(root, "s", "false") == "true"
+    if _attr(root, "dsl", "false") == "true":
+        log.debug("MWS XML action reports DidSeamlesslyLogin")
+
+    data = {}
+    for child in root:
+        tag = _local(child.tag)
+        grandchildren = list(child)
+        if grandchildren:
+            data[tag] = [_el_to_dict(g) for g in grandchildren]
+        elif child.attrib:
+            data[tag] = _el_to_dict(child)
+        else:
+            # A childless, attribute-less container is an EMPTY collection, not a
+            # missing one: the server answered "none".
+            data[tag] = []
+
+    return {
+        "ok": success and (ts is None or ts == TOKEN_STATUS_OK),
+        "error": (_attr(root, "em") or _attr(root, "e") or None),
+        "token_status": ts,
+        "data": data,
+    }
+
+
+def _parse_mws_ack(body: str) -> dict:
+    """Parse an MWS action response in whichever encoding it arrived in.
+
+    Returns the same ``{"ok", "error", "data", "token_status"}`` shape either
+    way, so callers never branch on encoding. Dispatches on the first
+    non-whitespace byte rather than on Content-Type, because this endpoint's
+    headers are not trustworthy -- it already serves gzip without announcing it
+    (see _post_mws).
+
+    Fails CLOSED on anything that is neither: an HTML error page from the edge
+    must not read as success.
+    """
+    text = (body or "").lstrip()
+    if text.startswith("<"):
+        return _parse_xml_ack(body)
+    try:
+        payload = json.loads(body)
     except ValueError as exc:
-        raise ValueError(
-            f"MWS action returned a non-JSON body ({exc}): {body[:120]!r}") from exc
+        return {"ok": False, "data": {}, "token_status": None,
+                "error": f"MWS action returned an unrecognised body ({exc}): "
+                         f"{body[:120]!r}"}
+    return _parse_json_ack(payload)
 
 
 def _mws_device_id(device_id) -> str:
@@ -776,7 +861,7 @@ async def get_siren_devices(session: aiohttp.ClientSession, session_token: str, 
         "GetAllSirenDevices", session_token, customer_id=customer_id,
         mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token)
     log.debug("GetAllSirenDevices (SessionToken/slt/Haiku redacted)")
-    return _parse_json_ack(await _post_mws_json(session, form))
+    return _parse_mws_ack(await _post_mws(session, form))
 
 
 async def start_siren(session: aiohttp.ClientSession, session_token: str,
@@ -812,7 +897,7 @@ async def start_siren(session: aiohttp.ClientSession, session_token: str,
         mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
         DeviceId=did)
     log.info("ManualSirenStart DeviceId=%s (SessionToken/slt/Haiku redacted)", did)
-    return _parse_json_ack(await _post_mws_json(session, form))
+    return _parse_mws_ack(await _post_mws(session, form))
 
 
 async def stop_siren(session: aiohttp.ClientSession, session_token: str,
@@ -837,7 +922,7 @@ async def stop_siren(session: aiohttp.ClientSession, session_token: str,
         mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token,
         DeviceId=did)
     log.info("ManualSirenStop DeviceId=%s (SessionToken/slt/Haiku redacted)", did)
-    return _parse_json_ack(await _post_mws_json(session, form))
+    return _parse_mws_ack(await _post_mws(session, form))
 
 
 async def get_privacy_mode_info(session: aiohttp.ClientSession, session_token: str, *,
@@ -858,7 +943,7 @@ async def get_privacy_mode_info(session: aiohttp.ClientSession, session_token: s
         "GetAllCameraPrivacyModeInfo", session_token, customer_id=customer_id,
         mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token)
     log.debug("GetAllCameraPrivacyModeInfo (SessionToken/slt/Haiku redacted)")
-    return _parse_json_ack(await _post_mws_json(session, form))
+    return _parse_mws_ack(await _post_mws(session, form))
 
 
 async def set_privacy_mode(session: aiohttp.ClientSession, session_token: str,
@@ -887,7 +972,7 @@ async def set_privacy_mode(session: aiohttp.ClientSession, session_token: str,
         DeviceId=did, IsActive=("true" if active else "false"))
     log.info("SetCameraPrivacyModeState DeviceId=%s IsActive=%s "
              "(SessionToken/slt/Haiku redacted)", did, bool(active))
-    return _parse_json_ack(await _post_mws_json(session, form))
+    return _parse_mws_ack(await _post_mws(session, form))
 
 
 def _parse_validate_session(body: str) -> dict:
