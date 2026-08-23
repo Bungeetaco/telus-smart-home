@@ -58,7 +58,7 @@ def async_register_speak_service(hass: HomeAssistant) -> None:
         return
 
     async def _handle_speak(call: ServiceCall) -> None:
-        data = _SPEAK_SCHEMA(call.data)
+        data = _SPEAK_SCHEMA(dict(call.data))
         message = data.get("message")
         media_content_id = data.get("media_content_id")
         if not message and not media_content_id:
