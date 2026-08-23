@@ -14,6 +14,7 @@ from typing import Any
 from homeassistant import core
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components import persistent_notification
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import Entity, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
@@ -147,6 +148,19 @@ class CameraChimeTypeSelect(CameraSettingsEntity, SelectEntity):
         return super().available and bool(self._audio.get("supports_chime_type"))
 
     @property
+    def _device_label(self) -> str:
+        """A name for this camera to put in a notification.
+
+        `device_entry` is populated by HA once the entity is added, but it is not
+        guaranteed at every point in an entity's life, and a notification is not
+        worth an AttributeError -- so the camera id is the fallback.
+        """
+        device = self.device_entry
+        if device is not None:
+            return device.name_by_user or device.name or self._camera_id
+        return self._camera_id
+
+    @property
     def _values_by_label(self) -> dict[str, int]:
         """The selectable chime types as {label shown: value written}, in the camera's order.
 
@@ -202,11 +216,45 @@ class CameraChimeTypeSelect(CameraSettingsEntity, SelectEntity):
             # KeyError trace, or worse, writing a stale number to real hardware.
             raise HomeAssistantError(f"This camera no longer offers the chime type {option}.")
 
+        # Read BEFORE the write: if this option is one the camera flags as
+        # disabling the indoor chime, TELUS turns that chime off as a side effect
+        # and does NOT turn it back on when a real type is selected again
+        # (verified live -- backlog E37). Nothing surfaces that, so the chime just
+        # stops working and the switch quietly reads off.
+        #
+        # Deliberately not worked around by re-enabling the chime: silently
+        # re-arming something the user may have wanted off is the worse failure.
+        # Telling them is not.
+        disables = next(
+            (bool(choice.get("disables_indoor_chime"))
+             for choice in self._audio.get("chime_type_choices") or []
+             if choice.get("value") == values[option]),
+            False,
+        )
+        chime_was_on = bool(self._audio.get("indoor_chime_on"))
+
         audio = await async_bridge_post(
             self.hass,
             CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE.format(camera_id=self._camera_id),
             {"chime_type": values[option]},
         )
+
+        if disables and chime_was_on:
+            persistent_notification.async_create(
+                self.hass,
+                (
+                    f"Selecting **{option}** turned off the indoor chime on "
+                    f"{self._device_label}, because that setting means there is "
+                    "no wired chime to ring.\n\n"
+                    "TELUS does this, and choosing a real chime type again does "
+                    "**not** turn it back on — switch the indoor chime back on by "
+                    "hand if you want it."
+                ),
+                title="Indoor chime turned off",
+                # Per camera, so a second change replaces the first notice rather
+                # than stacking another copy of the same warning.
+                notification_id=f"{DOMAIN}_{self._camera_id}_indoor_chime_disabled",
+            )
         # The route replies with the whole audio section re-read from the camera,
         # so the new type -- and the indoor chime switch's availability, which
         # depends on it -- both update without a poll. See the same trade in

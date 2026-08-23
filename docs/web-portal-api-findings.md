@@ -95,7 +95,7 @@ ASP.NET web-service style, not JSON:API.
 
 | Endpoint | What it does |
 | --- | --- |
-| `POST /web/api/devices/partitions/{id}/bypassSensors` | bypass sensors — **already covered in substance, see below**; would only add *selective* bypass |
+| `POST /web/api/devices/partitions/{id}/bypassSensors` | **Selective** sensor bypass — a standalone partition action, NOT an arm-time option: the body carries `bypass` and `unbypass` as pipe-separated device-id strings, applied immediately. Gated by the partition's own `canBypassSensorWhenArmed` / `hasPermissionToChangeState`. **Implemented** as the manual `telus_smarthome.bypass_sensors` service; the integration's existing `CONF_FORCE_BYPASS` arm flag is a different mechanism and is untouched |
 | `PUT /web/api/devices/bluetoothArmingDevices/{id}` | Bluetooth arming device config (the phone-proximity auto-disarm path) — **genuinely unimplemented, see below** |
 | `POST /web/api/systems/systems/{id}/connectPanelToWifi`, `GET /web/api/settings/panelWifi/wifiSettings/{id}`, `…/wifiNetworks` | panel Wi-Fi |
 | `POST …/DeviceCommands.asmx/SetStaticNetworkConfig`, `SetToFindIpAddressAutomatically` | camera IP configuration |

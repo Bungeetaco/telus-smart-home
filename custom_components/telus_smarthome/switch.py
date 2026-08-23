@@ -30,6 +30,12 @@ from pyalarmdotcomajax.extensions import (
     ConfigurationOptionType as libConfigurationOptionType,
 )
 
+from .arming_devices_coordinator import (
+    ArmingDevicesCoordinator,
+    async_add_arming_device_entities,
+    async_get_arming_devices_coordinator,
+    async_set_disarming_enabled,
+)
 from .base_device import ConfigBaseDevice
 from .bridge_client import bridge_get, read_control_secret
 from .camera_settings_coordinator import (
@@ -175,6 +181,27 @@ async def async_setup_entry(
 
     async_add_camera_entities(
         config_entry, settings_coordinator, async_add_entities, _build_app_notifications)
+
+    # Bluetooth arming devices: whether a paired phone may disarm the panel on
+    # approach. Nothing to do with cameras -- its own bridge route, its own
+    # coordinator, its own device per phone.
+    arming_coordinator = await async_get_arming_devices_coordinator(hass, config_entry)
+
+    @core.callback
+    def _build_arming_device(device_id: str, record: dict[str, Any]) -> list[Entity]:
+        """One disarming switch per paired phone that reports it can be written.
+
+        Gated, never unconditional: `disarming_enabled` reads identically on a
+        record that cannot be saved, so offering the switch on the value would
+        give someone a control over whether their alarm auto-disarms that does
+        nothing at all when they use it. No entity is the honest answer.
+        """
+        if not record.get("supports_disarming_toggle"):
+            return []
+        return [ArmingDeviceDisarmingSwitch(arming_coordinator, config_entry, device_id)]
+
+    async_add_arming_device_entities(
+        config_entry, arming_coordinator, async_add_entities, _build_arming_device)
 
 
 class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -612,6 +639,155 @@ class CameraSmartChimeAppNotificationSwitch(_CameraNotificationToggle):
 
     _field = "smart_chime"
     _attr_icon = "mdi:bell-alert-outline"
+
+
+class ArmingDeviceDisarmingSwitch(CoordinatorEntity[ArmingDevicesCoordinator], SwitchEntity):
+    """Whether one paired phone disarms the alarm when it arrives.
+
+    On means that phone walking up to the house disarms the panel over
+    Bluetooth. This is the most consequential switch in the integration -- the
+    siren buttons are only loud, this one decides whether the alarm is on at all
+    when someone approaches -- and alarm.com is the configuration authority for
+    it (the panel's Control4 endpoint is local-access-only and independent), so
+    there is no second place a mistake here gets corrected from.
+
+    It deliberately does NOT extend _CameraSettingToggle above, despite being
+    another "one boolean of one bridge record" switch. That base is not merely
+    camera-flavoured, it is camera-shaped in four places that all have to be
+    true at once: it is a CameraSettingsEntity, so it takes the camera settings
+    coordinator and attaches to a camera's device; it reads its value out of a
+    named SECTION of a /settings body, where this record is flat; it writes
+    through async_bridge_post, whose 422 wording is about cameras; and it folds
+    the reply back with async_apply_settings_section. Fitting this to it would
+    mean either parameterizing all four onto a base that four camera platforms
+    depend on -- a file this change does not own -- or subclassing it and
+    overriding every one, which is the same code with a misleading ancestor.
+    What the two actually share is the CoordinatorEntity + SwitchEntity pair
+    below and roughly ten lines, so this carries them itself.
+
+    The device it belongs to is the phone; see _attr_device_info below.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    # Configuration, like the camera setting toggles: this is how the alarm
+    # system is set up, not a control a dashboard should present alongside
+    # arm/disarm. Being in the config bucket does not make it minor -- it makes
+    # it something a user finds where they went looking for it.
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "arming_device_disarming"
+    _attr_icon = "mdi:cellphone-key"
+
+    def __init__(
+        self,
+        coordinator: ArmingDevicesCoordinator,
+        config_entry: ConfigEntry,
+        device_id: str,
+    ) -> None:
+        """Initialize the disarming switch for one paired phone."""
+        super().__init__(coordinator)
+
+        self._device_id = device_id
+        self._attr_unique_id = f"{device_id}_bluetooth_disarming"
+
+        # Its OWN device, not a camera's and not the integration service device.
+        # A paired phone is a real thing the panel knows about, with an
+        # alarm.com device id in the same namespace as every other device here,
+        # so it is registered the way camera.py and base_device.py register
+        # theirs: identified by that id, named by what the account calls it.
+        # Hanging these off the service device instead (as the automation rule
+        # switches do, having no device of their own to name) would pile one
+        # switch per household phone onto a single "TELUS Smart Home
+        # Integration" entry and read as "<the integration> <someone>'s iPhone",
+        # which says nothing about whose phone opens the house.
+        #
+        # via_device points at that service device, which sensor.py's auth
+        # health sensor creates unconditionally at setup -- so unlike the
+        # dangling link base_device.py warns about, it always resolves.
+        #
+        # `name` is the phone's description exactly as the account holder typed
+        # it, passed straight through: it may contain a curly apostrophe
+        # (U+2019) and it is never parsed or reshaped. The bridge already falls
+        # back to the device id when the record has no description.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device_id)},
+            name=(coordinator.data or {}).get(device_id, {}).get("description") or device_id,
+            model="Bluetooth arming device",
+            via_device=(DOMAIN, f"{config_entry.entry_id}_integration"),
+        )
+
+    @property
+    def _record(self) -> dict[str, Any]:
+        """This phone's whole coordinator record, or {} once the bridge drops it."""
+        return (self.coordinator.data or {}).get(self._device_id) or {}
+
+    @property
+    def available(self) -> bool:
+        """Unavailable unless the bridge currently reports this phone as writable.
+
+        Fails closed on every unknown: a failed poll, a bridge that no longer
+        lists this phone (unpaired, or a system it can't see), and a record that
+        stops advertising the toggle all land here. Showing a position for a
+        switch that decides whether the alarm auto-disarms, while not actually
+        knowing it, is worse than showing nothing.
+        """
+        return (
+            super().available
+            and bool(self._record)
+            and bool(self._record.get("supports_disarming_toggle"))
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """True while this phone may disarm the panel; None if it isn't known."""
+        # `is not None`, not truthiness: False is a real answer ("this phone
+        # cannot disarm") and must not read as "unknown" the way a bridge too old
+        # to send the field does.
+        value = self._record.get("disarming_enabled")
+        return bool(value) if value is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """The partition this phone is enrolled on, which the panel decides.
+
+        Read-only here on purpose (backlog E43): the bridge reports it and does
+        not write it, and re-enrolling a phone on a different partition is not
+        something to do as a side effect of a switch.
+        """
+        partition_id = self._record.get("enrolled_partition_id")
+        return {"enrolled_partition_id": partition_id} if partition_id is not None else {}
+
+    async def _async_set(self, enabled: bool) -> None:
+        """Write the flag and adopt the record that comes back.
+
+        Only ever reached from a user toggling this entity.
+        """
+        # Deliberately the opaque device id, never the description: at INFO this
+        # would otherwise put a household member's name in the log of every
+        # install. The description is debug-only (see arming_devices_coordinator).
+        LOGGER.info(
+            "Setting Bluetooth disarming %s for arming device %s",
+            "on" if enabled else "off", self._device_id,
+        )
+        record = await async_set_disarming_enabled(self.hass, self._device_id, enabled)
+        # The route answers with the record as the server has it after the write,
+        # so adopting it beats a poll -- which would cost live Alarm.com round
+        # trips to learn what is already in hand, on a coordinator that
+        # deliberately polls every 15 minutes. An unreadable or mismatched reply
+        # falls through to a real re-read rather than to an assumption that the
+        # requested value took.
+        if record.get("id") == self._device_id:
+            self.coordinator.async_apply_device(self._device_id, record)
+        else:
+            await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Let this phone disarm the panel when it arrives."""
+        await self._async_set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop this phone disarming the panel when it arrives."""
+        await self._async_set(False)
 
 
 class ConfigOptionSwitch(ConfigBaseDevice, SwitchEntity):  # type: ignore

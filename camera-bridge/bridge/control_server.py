@@ -319,6 +319,63 @@ Contract (as implemented -- this is what callers must match):
       a running siren has to stay possible even when the capability read fails.
       The siren is also time-bounded server-side (timestampEnd), so it stops on
       its own eventually; "stop" is how a caller ends it early.
+
+    ---- bluetooth arming devices -------------------------------------------
+
+    The phones paired to the panel for BLUETOOTH DISARMING (backlog E24). These
+    speak the website API through bridge.arming_devices and, like the settings
+    routes, are independent of TALKDOWN_ENABLED. Same error bodies as above --
+    400 {"error": "malformed"}, 422 {"error": "unsupported"},
+    502 {"error": "telus_error"} -- plus 404 {"error": "unknown_device"} and,
+    since these hit an account whose rate limits are undocumented,
+    429 {"error": "rate_limited", "retry_after": <int>} with a Retry-After header.
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/partitions
+      The alarm partitions, each with the two flags that decide whether a bypass
+      is allowed right now: has_permission_to_change_state, and
+      can_bypass_when_armed alongside is_disarmed.
+
+    POST .../control/partitions/<partition_id>/bypass
+    Body: {"bypass": [<sensor id>, ...], "unbypass": [...]}  (>=1 id total)
+      A BYPASSED SENSOR DOES NOT TRIGGER THE ALARM until it is un-bypassed. The
+      partition is re-read before the write and the operation is refused (422)
+      when it says no -- notably when the partition is armed and reports
+      canBypassSensorWhenArmed false. This is NOT the integration's force_bypass
+      arming option and must never become an automatic second one; see
+      partitions.py. Response: 200 {"status": "applied", "partition": {...}}
+
+    GET http://127.0.0.1:<CONTROL_PORT>/control/arming-devices
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+    Response: 200 {"devices": [{"id": "<unit>-<did>", "description": <str>,
+                                "disarming_enabled": <bool>,
+                                "enrolled_partition_id": <str>,
+                                "supports_disarming_toggle": <bool>,
+                                "raw": {...}}, ...]}
+      One upstream request for the whole list -- it comes from the manage-devices
+      catalog, which inlines each device's full record. An account with no paired
+      phones returns an empty list, not a 404.
+      "supports_disarming_toggle" is not decoration: a record that cannot be
+      written reports the same "disarming_enabled" a writable one does, so a
+      caller reading the value as permission would offer a control that silently
+      does nothing. See arming_devices._supports_toggle for what it is built from.
+
+    POST http://127.0.0.1:<CONTROL_PORT>/control/arming-devices/<device_id>/disarming
+    Body: {"enabled": <bool>}
+
+      Turns bluetooth disarming on or off for ONE paired phone -- i.e. whether
+      that phone walking up to the house disarms the alarm. Treated with the same
+      caution as the siren route, and refusing in three places before it writes:
+      the body must carry a real JSON boolean (a truthy string is a 400, never
+      coerced), <device_id> must be in the list GET /control/arming-devices
+      returns (a 404 rather than a blind PUT to an arbitrary device id on a live
+      panel), and the device's own supports_disarming_toggle must be true (422).
+      alarm.com is the CONFIGURATION AUTHORITY for this setting -- the panel's
+      Control4 endpoint is local-access-only and independent -- so there is no
+      second place a mistake here can be corrected from.
+      The read-modify-write a device PUT requires (it replaces the WHOLE record)
+      is arming_devices' job, not this module's.
+      Response: 200 <one element of the array GET /control/arming-devices returns>
 """
 import asyncio
 import logging
@@ -334,7 +391,9 @@ from aiohttp import web
 APP_CURRENT_SECRET = web.AppKey("current_secret", dict)
 APP_SECRET_ROTATION_TASK = web.AppKey("secret_rotation_task", asyncio.Task)
 
+from . import arming_devices
 from . import camera_settings
+from . import partitions as partitions_mod
 from . import config as c
 from . import metrics
 from . import talk as talk_mod
@@ -398,6 +457,10 @@ _IMAGE_FIELDS: dict[str, type | tuple[type, ...]] = {
     "saturation": int,
     "sharpness": int,
     "ir_sensitivity": int,
+    # Unsupported on both cameras here (canSetMaxExposure false), so it has never
+    # been exercised against hardware -- routed because camera_settings already
+    # parses it and another model may offer it.
+    "max_exposure": int,
     "is_flipped": bool,
     "hdr_enabled": bool,
     "ir_led_enabled": bool,
@@ -415,6 +478,7 @@ _VIDEO_FIELDS: dict[str, type | tuple[type, ...]] = {
     "pretrigger_enabled": bool,
     "keep_clips_days": int,
     "alarm_clip_duration": int,
+    "camera_triggered_clip_duration": int,
     # The LIVE stream's resolution, not a clip setting. Must be one of the values
     # in live_resolution_options; camera_settings checks it against the device's
     # own webOptions before writing.
@@ -1186,6 +1250,24 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
                         "siren/privacy routes unavailable")
         return mobile
 
+    def _rate_limited(err: RateLimited, what: str, camera_id: str) -> web.Response:
+        """Turn an edge rate-limit into a 429 that carries the server's own wait.
+
+        These routes used to answer 502 for this, which tells a caller "upstream
+        broke" when the truth is "come back in N seconds" -- so Home Assistant
+        retried on its own schedule and walked straight back into the limiter.
+        The header is the server's number, not ours; a caller that honours it
+        backs off exactly as far as TELUS asked and no further.
+
+        Retry-After is emitted as an integer number of seconds, which is the form
+        every HTTP client understands (RFC 9110 also allows a date; nothing here
+        needs one)."""
+        wait = max(1, int(err.retry_after_s or 1))
+        log.warning("Control endpoint: %s for %s rate limited by the edge; "
+                    "answering 429 Retry-After=%ss", what, camera_id, wait)
+        return web.json_response({"error": "rate_limited", "retry_after": wait},
+                                 status=429, headers={"Retry-After": str(wait)})
+
     async def _mws_call(action_fn, *args) -> dict:
         """Run one mws_client action with a live MWS SessionToken, re-minting
         exactly once if the server reports the token logged out.
@@ -1571,6 +1653,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             # explicit user action, never a poll, so it adds no steady-state load.
             try:
                 info = await _mws_call(get_siren_devices)
+            except RateLimited as err:
+                return _rate_limited(err, "siren capability read", camera_id)
             except Exception:
                 log.exception("Control endpoint: siren capability read failed for %s", camera_id)
                 return web.json_response({"error": "telus_error"}, status=502)
@@ -1593,6 +1677,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         try:
             result = await _mws_call(start_siren if action == "start" else stop_siren,
                                      camera_id)
+        except RateLimited as err:
+            return _rate_limited(err, f"siren {action}", camera_id)
         except Exception:
             log.exception("Control endpoint: siren %s failed for %s", action, camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1628,6 +1714,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         # write reaches a camera, and it runs only when a caller asked for one.
         try:
             info = await _mws_call(get_privacy_mode_info)
+        except RateLimited as err:
+            return _rate_limited(err, "privacy support read", camera_id)
         except Exception:
             log.exception("Control endpoint: privacy support read failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1657,6 +1745,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         try:
             result = await _mws_call(set_privacy_mode, camera_id, active)
+        except RateLimited as err:
+            return _rate_limited(err, "privacy mode write", camera_id)
         except Exception:
             log.exception("Control endpoint: privacy mode write failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1672,6 +1762,163 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         log.info("Control endpoint: privacy mode %s for %s",
                  "on" if active else "off", camera_id)
         return web.json_response({"status": "applied"})
+
+    # ---- bluetooth arming devices (website API) -----------------------------
+
+    async def handle_arming_devices(request: web.Request) -> web.Response:
+        """List the phones paired to the panel for bluetooth disarming.
+
+        No camera is involved, so there is no _camera_guard here and the
+        _rate_limited/_settings_error "camera_id" argument is filled with the
+        route name -- those two helpers only ever put it in a log line and this
+        keeps one implementation of each rather than a second copy that drifts.
+
+        An ArmingDeviceError is deliberately NOT routed through _settings_error
+        here: that helper maps a non-`unsupported` error to 400 "the caller asked
+        for something wrong", and this route takes no caller input at all, so
+        anything that fails is upstream and 502 is the truthful answer.
+        """
+        if (err := _check_auth(request)) is not None:
+            return err
+        try:
+            devices = await _fetch_with_relogin(
+                telus_session, login_lock, arming_devices.get_arming_devices)
+        except RateLimited as err:
+            return _rate_limited(err, "arming device list", "arming-devices")
+        except Exception:
+            log.exception("Control endpoint: arming device list failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+        return web.json_response({"devices": devices})
+
+    async def handle_set_disarming(request: web.Request) -> web.Response:
+        """Turn bluetooth disarming on or off for one paired phone.
+
+        This decides whether that phone walking up to the house disarms the
+        alarm, so it refuses in three places before it writes, and the order
+        matters: the cheapest, most certain refusals run first so a bad request
+        never costs a round trip against an account that can be rate-limited.
+
+        The pre-read is NOT just the capability gate the settings writes use --
+        it is also the membership check. Without it a typo'd id would be PUT
+        straight at an arbitrary device on a live panel, and this endpoint's PUT
+        replaces the whole record.
+        """
+        if (err := _check_auth(request)) is not None:
+            return err
+        device_id = request.match_info["device_id"]
+
+        try:
+            enabled = (await request.json())["enabled"]
+        except Exception:
+            log.warning("Control endpoint: malformed disarming request for %s",
+                        device_id, exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        # A real JSON boolean, never a coercion: bool("false") is True, and this
+        # is the last field in this API to be generous with.
+        if not isinstance(enabled, bool):
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            devices = await _fetch_with_relogin(
+                telus_session, login_lock, arming_devices.get_arming_devices)
+        except RateLimited as err:
+            return _rate_limited(err, "arming device pre-read", device_id)
+        except Exception:
+            log.exception("Control endpoint: arming device pre-read failed for %s",
+                          device_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        current = next((dev for dev in devices if dev["id"] == device_id), None)
+        if current is None:
+            log.warning("Control endpoint: no bluetooth arming device %s on this system",
+                        device_id)
+            return web.json_response({"error": "unknown_device"}, status=404)
+        if not current["supports_disarming_toggle"]:
+            log.info("Control endpoint: %s reports no bluetooth disarming toggle",
+                     device_id)
+            return web.json_response({"error": "unsupported"}, status=422)
+
+        try:
+            result = await _fetch_with_relogin(
+                telus_session, login_lock,
+                _bound(arming_devices.set_disarming_enabled, enabled=enabled),
+                device_id)
+        except RateLimited as err:
+            return _rate_limited(err, "bluetooth disarming write", device_id)
+        except arming_devices.ArmingDeviceError as err:
+            # Same contract as CameraSettingsError, so the same mapping: 422 when
+            # the record itself says it cannot, 400 when the caller asked wrong.
+            # Folding it into the generic handler would report an explicit "I
+            # cannot do this" as a 502, the one status that says "retry".
+            return _settings_error(err, device_id, "set_disarming_enabled")
+        except Exception:
+            log.exception("Control endpoint: bluetooth disarming write failed for %s",
+                          device_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response(result)
+
+    async def handle_partitions(request: web.Request) -> web.Response:
+        """List the alarm partitions and the two flags that gate a bypass."""
+        if (err := _check_auth(request)) is not None:
+            return err
+        try:
+            found = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, _unused: partitions_mod.get_partitions(telus), "")
+        except RateLimited as err:
+            return _rate_limited(err, "partition list", "partitions")
+        except Exception:
+            log.exception("Control endpoint: partition list failed")
+            return web.json_response({"error": "telus_error"}, status=502)
+        return web.json_response({"partitions": found})
+
+    async def handle_bypass(request: web.Request) -> web.Response:
+        """Bypass and/or un-bypass named sensors on one partition.
+
+        A bypassed sensor stops triggering the alarm until it is un-bypassed, so
+        this refuses everything it is not sure about: the body must be two lists
+        of strings, at least one non-empty, and the partition itself must report
+        that it permits the operation right now (partitions.bypass_sensors
+        re-reads it before writing)."""
+        if (err := _check_auth(request)) is not None:
+            return err
+        partition_id = request.match_info["partition_id"]
+
+        try:
+            body = await request.json()
+        except Exception:
+            log.warning("Control endpoint: malformed bypass body for %s",
+                        partition_id, exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "malformed"}, status=400)
+        wanted = {}
+        for key in ("bypass", "unbypass"):
+            value = body.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                return web.json_response({"error": "malformed"}, status=400)
+            wanted[key] = value
+        if not wanted["bypass"] and not wanted["unbypass"]:
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            partition = await _fetch_with_relogin(
+                telus_session, login_lock,
+                lambda telus, pid: partitions_mod.bypass_sensors(
+                    telus, pid, bypass=wanted["bypass"], unbypass=wanted["unbypass"]),
+                partition_id)
+        except partitions_mod.PartitionError as err:
+            return _settings_error(err, partition_id, "bypass")
+        except RateLimited as err:
+            return _rate_limited(err, "bypass", partition_id)
+        except Exception:
+            log.exception("Control endpoint: bypass failed for %s", partition_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        log.info("Control endpoint: bypass applied on %s (bypass=%s unbypass=%s)",
+                 partition_id, wanted["bypass"], wanted["unbypass"])
+        return web.json_response({"status": "applied", "partition": partition})
 
     app = web.Application()
     app[APP_CURRENT_SECRET] = current_secret
@@ -1722,6 +1969,11 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_post("/control/cameras/{camera_id}/settings/video", handle_set_video)
     app.router.add_post("/control/cameras/{camera_id}/siren", handle_siren)
     app.router.add_post("/control/cameras/{camera_id}/privacy", handle_privacy)
+    app.router.add_get("/control/partitions", handle_partitions)
+    app.router.add_post("/control/partitions/{partition_id}/bypass", handle_bypass)
+    app.router.add_get("/control/arming-devices", handle_arming_devices)
+    app.router.add_post("/control/arming-devices/{device_id}/disarming",
+                        handle_set_disarming)
     return app
 
 

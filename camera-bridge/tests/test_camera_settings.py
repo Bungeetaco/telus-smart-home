@@ -135,6 +135,20 @@ def test_flatten_stubs_a_relationship_with_no_included_resource():
                                     "id": "100000000-2048"}
 
 
+def test_flatten_survives_a_relationship_with_no_usable_type():
+    """A relationship ref whose `type` is null used to raise AttributeError from
+    inside _write_type, failing the whole settings read on a document that was
+    merely odd rather than broken. Such members exist on the sibling
+    arming-devices documents, so this is not hypothetical."""
+    doc = fixture("audio_settings_get")
+    doc["data"]["relationships"]["brokenRef"] = {"data": {"type": None, "id": "x"}}
+    doc["data"]["relationships"]["alsoBroken"] = {"data": {"id": "y"}}
+    flat = cs._flatten(doc)
+    assert "brokenRef" not in flat and "alsoBroken" not in flat, flat
+    # ...and the rest of the document still parses.
+    assert cs._parse_audio(flat)["call_volume"] == 10
+
+
 def test_audio_is_parsed_off_the_real_document():
     """The capture's own values, including the one that motivated all of this:
     call volume IS supported and settable 0-10 on this doorbell, contradicting
@@ -148,6 +162,53 @@ def test_audio_is_parsed_off_the_real_document():
     # nothing.
     assert audio["supports_outdoor_tone"] is True
     assert audio["supports_outdoor_tone_volume"] is False
+
+
+def test_an_unsettable_volume_is_reported_as_unknown_not_as_zero():
+    """E35. The website reports outdoorToneVolumeValue 0 on a doorbell whose
+    outdoor tone is audibly ON, while the mobile API reports level 3 for the same
+    setting on the same device at the same moment -- so the website's number is a
+    placeholder for a field it does not manage, not a reading.
+
+    What makes that diagnostic rather than a guess: the two APIs agree exactly on
+    the volume that IS settable (call volume 10 on both). Only the unsettable one
+    disagrees.
+
+    So it is reported as None. A caller that showed "volume 0" for an unmuted
+    tone would be stating something false.
+    """
+    audio = cs._parse_audio(cs._flatten(fixture("audio_settings_get")))
+    assert audio["supports_outdoor_tone_volume"] is False, audio
+    assert audio["outdoor_tone_volume"] is None, audio
+    # The tone itself is on -- which is the contradiction that gave it away.
+    assert audio["outdoor_tone_on"] is True, audio
+    # The bounds still come through, so a model that CAN set it has its range.
+    assert audio["outdoor_tone_volume_max"] == 3, audio
+
+    # ...and where the device does manage the field, the number is reported.
+    doc = fixture("audio_settings_get")
+    for res in doc["included"]:
+        attrs = res.get("attributes") or {}
+        if "outdoorToneVolumeFeatureSupport" in attrs:
+            attrs["outdoorToneVolumeFeatureSupport"] = 2
+            attrs["outdoorToneVolumeValue"] = 2
+    audio = cs._parse_audio(cs._flatten(doc))
+    assert audio["supports_outdoor_tone_volume"] is True and audio["outdoor_tone_volume"] == 2
+
+
+def test_diagnostics_says_which_signal_key_it_read():
+    """E31. The keys are not the same unit: normalizedSignalStrength is a 0-100
+    score, while the spellings kept for untested models may be real dBm. Home
+    Assistant records long-term statistics against the declared unit, so a caller
+    has to know which one answered rather than guess a label."""
+    assert cs._resolve({"normalizedSignalStrength": 76}, cs._SIGNAL_KEYS) == \
+        "normalizedSignalStrength"
+    assert cs._resolve({"signalStrength": -58}, cs._SIGNAL_KEYS) == "signalStrength"
+    assert cs._resolve({"somethingElse": 1}, cs._SIGNAL_KEYS) is None
+    # The normalized key must be preferred when a device reports both, since it
+    # is the one whose unit is known.
+    assert cs._resolve({"signalStrength": -58, "normalizedSignalStrength": 76},
+                       cs._SIGNAL_KEYS) == "normalizedSignalStrength"
 
 
 def test_capability_flags_read_both_spellings():
@@ -204,6 +265,14 @@ def test_battery_is_none_on_a_mains_powered_camera():
     assert cs._battery({"shouldDisplayBatteryLevel": False, "batteryLevel": 0}) is None
     assert cs._battery({"shouldDisplayBatteryLevel": True, "batteryLevel": 82}) == 82
     assert cs._battery({"batteryLevel": 82}) == 82
+    # A NEGATIVE level is this API family's "not applicable" rather than a
+    # reading: the mobile document says BatteryLevel="-1" with
+    # IsBatteryPowered="false" for the same device the website reports 0 for. This
+    # covers a model that omits the display flag but still answers -1 (E33).
+    assert cs._battery({"batteryLevel": -1}) is None
+    assert cs._battery({"shouldDisplayBatteryLevel": True, "batteryLevel": -1}) is None
+    # 0 with the flag present-and-true is a flat battery, which IS a reading.
+    assert cs._battery({"shouldDisplayBatteryLevel": True, "batteryLevel": 0}) == 0
 
 
 # --- fake portal ------------------------------------------------------------

@@ -382,7 +382,13 @@ def _flatten(doc: dict | None) -> dict:
 
     for name, body in (data.get("relationships") or {}).items():
         ref = (body or {}).get("data")
-        if not isinstance(ref, dict) or "type" not in ref or "id" not in ref:
+        # `type` must be a STRING, not merely present: a relationship whose ref
+        # carries a null type walked straight into _write_type(None) and raised
+        # AttributeError mid-parse, turning a slightly odd document into a failed
+        # settings read. Found by the sibling arming_devices module, whose
+        # documents do contain such members.
+        if (not isinstance(ref, dict) or not isinstance(ref.get("type"), str)
+                or "id" not in ref):
             continue
         res = included.get((ref["type"], ref["id"]))
         if res is None:
@@ -735,6 +741,7 @@ def _parse_audio(attrs: dict) -> dict:
     """
     mic = attrs.get("microphoneSpeakerSetting") or {}
     chime = attrs.get("chimeToneSetting") or {}
+    volume_supported = _supported(chime, ("outdoorToneVolumeFeatureSupport",))
     return {
         "supports_call_volume": _supported(mic, ("callVolumeFeatureSupport",)),
         "call_volume": _as_int(mic.get("callVolumeValue"), 0),
@@ -752,9 +759,19 @@ def _parse_audio(attrs: dict) -> dict:
         "supports_outdoor_tone": _supported(
             chime, ("outdoorToneEnableDisableFeatureSupport",)),
         "outdoor_tone_on": bool(chime.get("isOutdoorToneOn")),
-        "supports_outdoor_tone_volume": _supported(
-            chime, ("outdoorToneVolumeFeatureSupport",)),
-        "outdoor_tone_volume": _as_int(chime.get("outdoorToneVolumeValue"), 0),
+        "supports_outdoor_tone_volume": volume_supported,
+        # None, not the number, when the device says it cannot set this. The
+        # website reports 0 here on a doorbell whose outdoor tone is audibly ON,
+        # while the mobile API reports level 3 for the same setting on the same
+        # device at the same moment -- so the website's value is a placeholder for
+        # a field it does not manage, not a reading (backlog E35). Reporting it
+        # anyway invites a caller to show "volume 0" for a tone that is not muted.
+        #
+        # The two APIs agree exactly on the volume that IS settable (call volume
+        # 10 on both), which is what makes the disagreement on this one diagnostic
+        # rather than a coin toss.
+        "outdoor_tone_volume": (_as_int(chime.get("outdoorToneVolumeValue"), 0)
+                                if volume_supported else None),
         "outdoor_tone_volume_min": _as_int(chime.get("outdoorToneVolumeMin"), 0),
         "outdoor_tone_volume_max": _as_int(chime.get("outdoorToneVolumeMax"),
                                            _OUTDOOR_TONE_MAX_FALLBACK),
@@ -1130,7 +1147,15 @@ def _battery(attrs: dict) -> Any:
     """
     if attrs.get("shouldDisplayBatteryLevel") is False:
         return None
-    return _pick(attrs, _BATTERY_KEYS)
+    level = _pick(attrs, _BATTERY_KEYS)
+    # A negative level is this API family's "not applicable", not a reading: the
+    # mobile document reports BatteryLevel="-1" alongside IsBatteryPowered="false"
+    # for the same mains-powered device the website reports 0 for. Belt and braces
+    # for a model that omits shouldDisplayBatteryLevel but still says -1, which is
+    # the case neither camera here can exercise (backlog E33).
+    if isinstance(level, (int, float)) and not isinstance(level, bool) and level < 0:
+        return None
+    return level
 
 
 async def get_diagnostics(telus: TelusSession, camera_id: str) -> dict:
@@ -1161,8 +1186,16 @@ async def get_diagnostics(telus: TelusSession, camera_id: str) -> dict:
         url = template.format(base=c.TELUS_BASE, cid=camera_id)
         parts[name] = _flatten(await _get_doc(telus, url, missing_ok=True))
 
+    signal_key = _resolve(parts["signal_strength"], _SIGNAL_KEYS)
     return {
         "signal_strength": _pick(parts["signal_strength"], _SIGNAL_KEYS),
+        # WHICH key the number came from, because they are not the same unit.
+        # normalizedSignalStrength is a 0-100 score; the fallback spellings kept
+        # for untested models are the ones that might be real dBm. A caller can
+        # label the first as a percentage and must not label the others at all --
+        # guessing wrong writes a bogus unit into Home Assistant's long-term
+        # statistics, which is not something a later fix undoes (backlog E31).
+        "signal_strength_key": signal_key,
         "battery": _battery(parts["battery"]),
         "device_status": _pick(parts["device_status"], _STATUS_KEYS),
         "raw": parts,

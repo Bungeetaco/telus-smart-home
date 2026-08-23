@@ -153,6 +153,21 @@ These are covered in detail under [The update model](#the-update-model) and
 13. **Debug event listener.** Register a listener for `DEBUG_REQ_EVENT` that dumps
     a device's `debug_data` to the log, wrapped in `async_on_unload`.
 
+14. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
+    or un-bypasses named sensors on the alarm partition. **A bypassed zone does
+    not trigger the alarm until it is put back**, which is why this is a service
+    rather than a switch on every sensor row — a stray tap should not be able to
+    stop a zone protecting the house. It is deliberately separate from the
+    `force_bypass` arming option and does not touch the arm path: `force_bypass`
+    is automatic at arm time, this is manual, and only one of them being
+    automatic is what keeps them from disagreeing.
+
+    Two live-verified details it accounts for: the partition itself is re-read
+    before every write and refuses when it says no (notably when armed, on a
+    panel reporting `canBypassSensorWhenArmed` false), and the change takes about
+    **ten seconds** to reach the sensor — so the post-write refresh is delayed
+    past that window rather than firing immediately and reading the old state.
+
 ### Controller initialization
 
 `AlarmIntegrationController.initialize()` (in `controller.py`):
@@ -302,14 +317,14 @@ wrap idempotent.
 Wraps the library's `_async_handle_message` to fix two defects that sat between a
 device changing and HA showing it:
 
-1. **A library crash killed the connection.** The library's message handler
+14. **A library crash killed the connection.** The library's message handler
    could hit an `UnboundLocalError` on an unrecognized device (one absent from
    its registry — e.g. a bridge-served doorbell camera, id like
    `<unit>-<device>`). The exception propagated out of the read loop and dropped
    the socket. Because such a device emits events regularly, real-time updates
    were dead much of the time. The wrapper **swallows per-message errors** so one
    unprocessable message can never end the connection.
-2. **Nothing refreshed HA after a push.** The library applied each message to its
+15. **Nothing refreshed HA after a push.** The library applied each message to its
    in-memory objects (which entities read live), but no listener was notified, so
    even a successfully-processed push was invisible until the next poll. The
    wrapper **notifies every registered coordinator's listeners** after each
@@ -331,10 +346,10 @@ Alarm.com's; only the login handshake differs. The replacement
 1. Clears the session cookie jar (TELUS rejects a login if stale session cookies
    are present — important for re-login on session expiry; the dedicated session
    makes wiping safe).
-2. **POST** `smarthome_login_v1` — submit credentials.
-3. **POST** `flows/login?acr=…` — complete the login flow (must send an explicit
+16. **POST** `smarthome_login_v1` — submit credentials.
+17. **POST** `flows/login?acr=…` — complete the login flow (must send an explicit
    empty JSON body; a bodiless POST 415s).
-4. **GET** the OAuth2 authorization endpoint with `allow_redirects=True` and
+18. **GET** the OAuth2 authorization endpoint with `allow_redirects=True` and
    follow the full redirect chain, which lands on the page that sets the real
    dealer-portal session cookie.
 5. Extract the anti-forgery (`afg`) cookie, then (unchanged from upstream) fetch
@@ -763,6 +778,7 @@ requires.
 | **TELUS motion / button press / smart chime notifications** | `switch` | Each gated on its own `notifications.supports_*` | What TELUS pushes to its **own app** — nothing to do with Home Assistant's notifications. Via `/settings/notifications`, entity category *config*. A camera that is not a doorbell reports every flag false and gets none |
 | **TELUS app notification format** | `select` | The camera reports `notifications.supports_format` | Whether TELUS's push carries just text or a thumbnail. Two options only — the upstream enum has four members and the other two are a null state and a legacy value alarm.com rewrites away |
 | **Live video resolution** | `select` | The camera reports `video.supports_live_resolution` | The **live** stream's resolution, labelled the way TELUS labels it. Changing it changes what the bridge restreams — verified live, despite the bridge asking TELUS for the "highest resolution" source. Takes effect on the next stream renegotiation, not immediately |
+| **Disarm alarm on arrival** | `switch` | One per paired phone reporting `supports_disarming_toggle` | Whether that phone disarms the panel when it comes within range. Each phone is its own device in the registry, named as TELUS names it, so it is clear *whose* phone opens the house. Polled every 15 minutes — nothing but a person changes it |
 | **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
 | **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
 | **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
@@ -772,6 +788,21 @@ requires.
 The volume Number and the diagnostic Sensors gate on fields the settings and
 diagnostics responses document directly (`supports_call_volume`; a non-null
 `signal_strength` / `battery` / `device_status`).
+
+### Two small behaviours worth knowing
+
+**Signal strength is labelled per camera, not globally.** The bridge says which
+upstream key a reading came from, and the sensor declares a percentage only for
+`normalizedSignalStrength`, alarm.com's 0-100 score. Other key spellings — kept
+for camera models this was never tested against, and possibly real dBm — stay
+unlabelled. Home Assistant records long-term statistics against the declared
+unit, so a wrong label is not something a later fix undoes.
+
+**Changing the wired chime type to "none" raises a notification.** That setting
+turns the indoor chime off at TELUS and choosing a real type again does not turn
+it back on. The integration does not silently re-enable it — re-arming something
+someone may have wanted off is the worse failure — so instead it says what
+happened, naming the camera, once per camera rather than once per change.
 
 ### The notification switches are TELUS's notifications, not yours
 

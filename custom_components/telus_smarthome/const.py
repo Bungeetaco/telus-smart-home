@@ -97,6 +97,13 @@ DATA_ACTIVITY_COORDINATOR = "activity_coordinator"
 # stores it here. __init__.py pops this whole per-entry dict on unload, so it
 # needs no teardown of its own.
 DATA_CAMERA_SETTINGS_COORDINATOR = "camera_settings_coordinator"
+# Shared ArmingDevicesCoordinator instance, created on first use by
+# arming_devices_coordinator.async_get_arming_devices_coordinator() exactly like
+# the one above. Only switch.py needs it today; it is stored (rather than being a
+# local in that platform) so that a second platform -- the system-wide pairing
+# switch and disarm-timeout number of backlog E41 are the obvious candidates --
+# cannot silently double the poll rate against a rate-limited account.
+DATA_ARMING_DEVICES_COORDINATOR = "arming_devices_coordinator"
 
 ATTRIB_BATTERY_NORMAL = "Normal"
 ATTRIB_BATTERY_LOW = "Low"
@@ -168,9 +175,65 @@ CAMERA_BRIDGE_TALK_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{camera
 CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE = (
     "http://127.0.0.1:8199/control/cameras/{camera_id}/talk/stop")
 
-# telus_smarthome service names (registered in __init__.py via speak_service.py).
+# Read-only list of the account's alarm partitions, with the flags that decide
+# whether a selective sensor bypass is possible at all
+# (has_permission_to_change_state, can_bypass_when_armed,
+# has_open_bypassable_sensors) -- see camera-bridge/bridge/control_server.py for
+# the response shape. Read on demand by bypass_service.py, NOT polled: every call
+# is a live Alarm.com round trip and nothing in HA renders these.
+CAMERA_BRIDGE_PARTITIONS_URL = "http://127.0.0.1:8199/control/partitions"
+
+# Selective sensor bypass on one partition -- {partition_id} is str.format()'d
+# in, and is the partition's Alarm.com device id (the same id the alarm panel
+# entity uses as its unique_id, e.g. "<unit>-127"), not the panel's internal
+# partition number. POST; body is JSON {"bypass": [<device id>, ...],
+# "unbypass": [...]}, both optional but not both empty (400 otherwise).
+#
+# This changes what a LIVE alarm panel will and will not trigger on: a bypassed
+# zone does not sound the alarm until it is un-bypassed. Only ever call it from
+# the explicit telus_smarthome.bypass_sensors service, never from a poll, an arm
+# path, or any automatic reaction to state. The separate CONF_FORCE_BYPASS arm
+# flag above is a different mechanism and does not go through here.
+#
+# The bridge pre-reads the partition and answers 422 when the panel's own gates
+# refuse (no permission, or armed with canBypassSensorWhenArmed false), 429 with
+# a Retry-After header when rate-limited, 404 for an unknown partition and 502
+# for an upstream failure.
+CAMERA_BRIDGE_PARTITION_BYPASS_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/partitions/{partition_id}/bypass")
+
+# Read-only list of the phones paired to the panel for Bluetooth disarming, each
+# with the flag deciding whether its toggle may be written at all
+# (supports_disarming_toggle) -- see camera-bridge/bridge/control_server.py for
+# the response shape. An account with no paired phones answers an empty list,
+# never a 404, so an empty list really does mean "nothing is paired".
+CAMERA_BRIDGE_ARMING_DEVICES_URL = "http://127.0.0.1:8199/control/arming-devices"
+
+# Turns Bluetooth disarming on or off for ONE paired phone -- {device_id} is
+# str.format()'d in, and is the arming device's Alarm.com device id
+# ("<unit>-<did>"). POST; body is JSON {"enabled": <bool>}, a real JSON boolean
+# (the bridge answers 400 rather than coercing a truthy string). Answers with the
+# refreshed record, i.e. one element of the list above.
+#
+# This decides whether a paired phone walking up to the house DISARMS THE ALARM.
+# Alarm.com is the configuration authority for it -- the panel's Control4
+# endpoint is local-access-only and wired independently -- so there is no second
+# place a mistake here gets corrected from. Only ever call it from an explicit
+# user action on the switch entity, never from a poll or any reaction to state.
+#
+# The bridge refuses in three places before it writes: a non-boolean body is 400,
+# a device id that is not in the list above is 404 (rather than a blind PUT at an
+# arbitrary device on a live panel), and a record whose own
+# supports_disarming_toggle is false is 422. It also answers 429 with a
+# Retry-After header when rate-limited and 502 for an upstream failure.
+CAMERA_BRIDGE_ARMING_DEVICE_DISARMING_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/arming-devices/{device_id}/disarming")
+
+# telus_smarthome service names (registered in __init__.py via speak_service.py
+# and bypass_service.py).
 SERVICE_SPEAK = "speak"
 SERVICE_STOP_SPEAKING = "stop_speaking"
+SERVICE_BYPASS_SENSORS = "bypass_sensors"
 
 # Talkdown counters (attempts/outcomes/failure reasons/durations) -- see
 # camera-bridge/bridge/metrics.py. Surfaced as the two diagnostic sensors in
@@ -320,6 +383,28 @@ CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS = 60
 # camera list poll since this is what determines how quickly a "person
 # detected" event shows up in HA after it actually happens.
 VIDEO_EVENTS_POLL_INTERVAL_SECONDS = 30
+
+# How often arming_devices_coordinator.py re-reads the Bluetooth arming device
+# list. Fifteen minutes, an order of magnitude slower than the camera settings'
+# 120s, and the difference is deliberate rather than copied:
+#  * What it watches barely moves. A paired phone's disarming flag is a
+#    configuration record that changes only when a person changes it -- here, in
+#    the TELUS app, or in the portal. Camera settings at least track a device
+#    that can also be touched by a chime or an LED command; this cannot.
+#  * The poll is not the feedback path for the one change this integration makes.
+#    A write through the switch adopts the record the POST route answers with, so
+#    a user toggling it sees the new state immediately at any interval.
+#  * Every cycle is a live Alarm.com round trip on an account whose rate limits
+#    are undocumented and can lock it (AGENTS.md). This is one request per cycle
+#    rather than two per camera, but it is competing for the same budget as the
+#    5-minute panel poll and the 30s video-event poll, which watch things that
+#    genuinely change -- spending it here would buy responsiveness to an
+#    out-of-band edit nobody is waiting on.
+# The cost of the slow interval: an edit made in the TELUS app takes up to this
+# long to show here, and a newly paired phone takes up to this long to get its
+# switch (entities are created from a poll -- see async_add_arming_device_entities).
+# Both are acceptable for a record whose value changes on the order of years.
+ARMING_DEVICES_POLL_INTERVAL_SECONDS = 900  # 15 minutes
 
 # How often binary_sensor.py polls automation rule pause/active state.
 # Infrequent -- these change rarely (a user manually pausing/resuming a

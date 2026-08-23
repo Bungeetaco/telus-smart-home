@@ -50,6 +50,42 @@ speak:
       selector:
         text:
 
+bypass_sensors:
+  name: Bypass sensors
+  description: >-
+    Bypass or un-bypass specific alarm sensors on the security panel, right now.
+    A BYPASSED SENSOR WILL NOT TRIGGER THE ALARM until it is un-bypassed --
+    opening that door or window while the system is armed does nothing at all.
+    Bypasses stay in place until you remove them here or in the TELUS app. This
+    is a manual action and is separate from the "Force Bypass" arming option,
+    which bypasses whatever happens to be open at the moment you arm. Give at
+    least one sensor in either field. Many panels refuse to change a bypass
+    while the partition is armed; the service says so rather than half-applying.
+  fields:
+    bypass:
+      name: Bypass
+      description: >-
+        Sensors to bypass. Each will stop triggering the alarm until it is
+        un-bypassed.
+      required: false
+      example: "binary_sensor.back_door"
+      selector:
+        entity:
+          multiple: true
+          integration: telus_smarthome
+          domain: binary_sensor
+    unbypass:
+      name: Un-bypass
+      description: >-
+        Sensors to return to normal, so that they trigger the alarm again.
+      required: false
+      example: "binary_sensor.back_door"
+      selector:
+        entity:
+          multiple: true
+          integration: telus_smarthome
+          domain: binary_sensor
+
 stop_speaking:
   name: Stop speaking through camera
   description: >-
