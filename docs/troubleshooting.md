@@ -368,3 +368,19 @@ certainly sending non-mu-law audio, or raw audio the device is misinterpreting â
 switch to mu-law. If you hear *intelligible but harsh/clipping* audio, adjust or
 re-enable conditioning. If it's simply *lo-fi*, that's the 8 kHz mono speaker
 ceiling.
+
+## Checking whether talkdown has been failing
+
+A failed talk surfaces as a single HTTP error to whoever triggered it, so a
+pattern is easy to miss. The bridge keeps counters:
+
+```bash
+curl -s -H "Authorization: Bearer $SECRET" http://127.0.0.1:8199/control/metrics
+```
+
+`failures_by_reason` tells you which way it is failing (`no_upstream_audio`
+suggests the device stopped advertising a talk path; `transport_error` or
+`network_error` point at the doorbell or the LAN; `media_error` means the audio
+you supplied could not be fetched or decoded), and `recent` shows the last 20
+talks with their outcomes. The counters are in-memory and reset when the bridge
+restarts â€” see [control-api.md](control-api.md).
