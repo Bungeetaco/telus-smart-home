@@ -2,7 +2,8 @@
 
 Reverse-engineered end-to-end (see the research memory): the doorbell's own
 HTTP endpoint accepts upstream audio via chunked HTTP PUT, authenticated with
-HTTP Digest (user "vieweruser", realm "Alarm.com", MD5, qop=auth). On-LAN the
+HTTP Digest (user "vieweruser", realm "Alarm.com", MD5, qop=auth; handled by
+aiohttp's DigestAuthMiddleware). On-LAN the
 target is the doorbell directly (the `duae`/`luae` URL); off-LAN it is the public
 IP (`puae`) or the cloud relay (`uae`, which carries a ?camera_id= token).
 
@@ -24,11 +25,8 @@ selection/fallback, and URL/credential discovery live in mws_client / talk.py.
 Nothing here logs secrets (Digest password, tokens) -- only non-sensitive shape.
 """
 import asyncio
-import hashlib
 import logging
-import re
 import time
-import uuid
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -63,56 +61,6 @@ DEFAULT_CODEC = "mulaw"
 
 class TalkdownError(RuntimeError):
     pass
-
-
-def _h(*parts: str) -> str:
-    return hashlib.md5(":".join(parts).encode("utf-8")).hexdigest()
-
-
-def _parse_challenge(header: str) -> dict:
-    """Parse a WWW-Authenticate: Digest ... header into a dict of params."""
-    if not header:
-        return {}
-    scheme, _, rest = header.partition(" ")
-    if scheme.lower() != "digest":
-        return {}
-    out = {}
-    for m in re.finditer(r'(\w+)=(?:"([^"]*)"|([^,]+))', rest):
-        out[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3).strip()
-    return out
-
-
-class _Digest:
-    """Minimal RFC 2617 Digest (MD5, qop=auth) client state for one nonce."""
-
-    def __init__(self, username: str, password: str, method: str, uri: str, ch: dict):
-        self.username = username
-        self.password = password
-        self.method = method
-        self.uri = uri
-        self.realm = ch.get("realm", "")
-        self.nonce = ch.get("nonce", "")
-        self.qop = ch.get("qop", "auth")
-        self.opaque = ch.get("opaque")
-        self.algorithm = ch.get("algorithm", "MD5")
-        self.cnonce = uuid.uuid4().hex[:16]
-        self.nc = 0
-
-    def header(self) -> str:
-        self.nc += 1
-        nc = f"{self.nc:08x}"
-        ha1 = _h(self.username, self.realm, self.password)
-        ha2 = _h(self.method, self.uri)
-        resp = _h(ha1, self.nonce, nc, self.cnonce, self.qop, ha2)
-        parts = [
-            f'username="{self.username}"', f'realm="{self.realm}"',
-            f'nonce="{self.nonce}"', f'uri="{self.uri}"',
-            f'algorithm={self.algorithm}', f'response="{resp}"',
-            f'qop={self.qop}', f'nc={nc}', f'cnonce="{self.cnonce}"',
-        ]
-        if self.opaque:
-            parts.append(f'opaque="{self.opaque}"')
-        return "Digest " + ", ".join(parts)
 
 
 async def _encode(audio_source: str, ffmpeg_fmt: str, audio_filter: str) -> bytes:
@@ -173,39 +121,40 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
     deadline = time.monotonic() + (timeout_s or (expected_s + max(30.0, 0.5 * expected_s)))
     # Doorbell serves a self-signed cert -> no verification. Keep-alive one host.
     conn = aiohttp.TCPConnector(ssl=False, limit=1, force_close=False)
+    # Per-socket timeouts: the deadline below is only checked BETWEEN chunks,
+    # so without these a single wedged PUT would pin the per-camera talk lock
+    # for aiohttp's 300s default. A 40ms audio chunk never needs seconds.
+    sock_timeout = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=5)
     sent = 0
     chunks = 0
-    dig: _Digest | None = None
     headers_base = {
         "User-Agent": "GStreamer souphttpclientsink libsoup/3.6.0",
         "Content-Type": spec["content_type"],
     }
-    async with aiohttp.ClientSession(connector=conn) as s:
-        sp = urlsplit(put_url)
-        digest_uri = sp.path + (("?" + sp.query) if sp.query else "")
+    # HTTP Digest is handled by aiohttp's DigestAuthMiddleware (added in 3.12):
+    # it answers the doorbell's 401 challenge, then -- with preemptive=True, the
+    # default -- signs every subsequent request from the cached challenge with an
+    # incrementing nc, which is exactly what this chunk loop needs. This replaced
+    # a hand-rolled RFC 2617 implementation; aiohttp 3.14 additionally fixed the
+    # middleware to sign the ENCODED request-target, which matters for the cloud
+    # relay endpoint whose URL carries a ?camera_id= token.
+    digest = aiohttp.DigestAuthMiddleware(login=username, password=password)
+    async with aiohttp.ClientSession(connector=conn, timeout=sock_timeout,
+                                     middlewares=(digest,)) as s:
 
         async def put_chunk(body: bytes) -> None:
-            nonlocal dig, chunks, sent
-            for attempt in (1, 2):  # 2nd attempt after a (re)challenge
-                headers = dict(headers_base)
-                if dig is not None:
-                    headers["Authorization"] = dig.header()
-                async with s.put(put_url, data=body, headers=headers) as r:
-                    if r.status == 401:
-                        ch = _parse_challenge(r.headers.get("WWW-Authenticate", ""))
-                        if not ch.get("nonce"):
-                            raise TalkdownError("401 without a Digest challenge")
-                        dig = _Digest(username, password, "PUT", digest_uri, ch)
-                        await r.read()
-                        continue  # retry this chunk with auth
-                    if r.status // 100 != 2:
-                        txt = (await r.read())[:120]
-                        raise TalkdownError(f"PUT -> HTTP {r.status}: {txt!r}")
-                    await r.read()
-                    chunks += 1
-                    sent += len(body)
-                    return
-            raise TalkdownError("PUT still unauthorized after challenge")
+            nonlocal chunks, sent
+            async with s.put(put_url, data=body, headers=dict(headers_base)) as r:
+                if r.status == 401:
+                    raise TalkdownError(
+                        "PUT rejected with 401 after Digest authentication -- "
+                        "check the per-session stream password")
+                if r.status // 100 != 2:
+                    txt = (await r.read())[:120]
+                    raise TalkdownError(f"PUT -> HTTP {r.status}: {txt!r}")
+                await r.read()
+                chunks += 1
+                sent += len(body)
 
         total_chunks = (total + chunk_bytes - 1) // chunk_bytes
         start = time.monotonic()

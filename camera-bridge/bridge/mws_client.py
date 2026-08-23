@@ -28,6 +28,7 @@ import aiohttp
 # envelope (HAIKU/APP_BUILD/_device_fields) and its Cloudflare-429 type so the
 # stream path funnels into the identical Retry-After backoff as the auth path.
 from .mobile_auth import HAIKU, APP_BUILD, _device_fields, _read_body_text
+from . import config as c
 from .telus_auth import RateLimited
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,18 @@ TOKEN_STATUS_SERVER_ERROR = 3  # transient server error -> back off and retry
 # Fixed in the app code for every SRTP endpoint.
 SRTP_CRYPTO_SUITE = "AES_CM_128_HMAC_SHA1_80"
 
+
+
+def _parse_xml(body):
+    """Parse an MWS XML response, preferring defusedxml so a hostile/oversized
+    response can't drive an XML attack; falls back to stdlib ElementTree when
+    defusedxml isn't installed. Mirrors mobile_auth._parse_login_xml's pattern
+    (this module parses responses from the same server)."""
+    try:
+        import defusedxml.ElementTree as DET
+        return DET.fromstring(body)
+    except ImportError:
+        return ET.fromstring(body)
 
 def _local(tag: str) -> str:
     """Local (namespace-stripped) name of an ElementTree tag.
@@ -115,11 +128,7 @@ def _raise_if_rate_limited(resp: aiohttp.ClientResponse) -> None:
     against the same edge. Mirrors mobile_auth.MobileSession._raise_if_rate_limited.
     """
     if resp.status == 429:
-        try:
-            retry_after_s = float(resp.headers.get("Retry-After"))
-        except (TypeError, ValueError):
-            retry_after_s = 60.0
-        raise RateLimited(retry_after_s)
+        raise RateLimited(c.parse_retry_after(resp.headers.get("Retry-After")))
 
 
 async def get_live_video_stream(session: aiohttp.ClientSession,
@@ -242,7 +251,7 @@ def parse_live_video_stream(xml: str) -> dict:
           </vsel>
         </lvsr>
     """
-    root = ET.fromstring(xml)
+    root = _parse_xml(xml)
     lvsr = root if _local(root.tag) == "lvsr" else None
     if lvsr is None:
         for el in root.iter():
@@ -423,7 +432,7 @@ def parse_doorbell_camera_list(xml):
 
     Blank ("") URL/credential attributes normalise to None. Namespace-tolerant.
     """
-    root = ET.fromstring(xml)
+    root = _parse_xml(xml)
     gdclr = root if _local(root.tag) == "gdclr" else None
     if gdclr is None:
         for el in root.iter():
@@ -489,7 +498,7 @@ def _parse_action_ack(xml, root_name):
     "true"/"false"). Returns {"token_status", "ok", "success", "error"}; ok means
     ts==0 AND s==true. A missing root is reported (ok False) rather than raised so
     a best-effort teardown never masks the real error with a parse crash."""
-    root = ET.fromstring(xml)
+    root = _parse_xml(xml)
     el = root if _local(root.tag) == root_name else None
     if el is None:
         for x in root.iter():

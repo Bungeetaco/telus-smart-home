@@ -46,6 +46,16 @@ def register_coordinator(coordinator) -> None:
     _coordinators.add(coordinator)
 
 
+# Compatibility guard -- see telus_ws_heartbeat_patch for the rationale. This
+# patch wraps a PRIVATE coroutine; a rename must fail loudly at import, not as a
+# bare AttributeError during HA startup.
+if not hasattr(WebSocketClient, "_async_handle_message"):
+    raise RuntimeError(
+        "Websocket push patch is incompatible with the installed "
+        "pyalarmdotcomajax: WebSocketClient._async_handle_message is missing. "
+        "Review the upstream changes before bumping (see AGENTS.md)."
+    )
+
 _orig_handle_message = WebSocketClient._async_handle_message
 
 

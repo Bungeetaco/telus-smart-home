@@ -25,7 +25,7 @@ class JanusCameraSession:
         self.camera = camera
         self.vs = video_source
         self._txn = itertools.count()
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: websockets.asyncio.client.ClientConnection | None = None
         self._session_id = None
         self._handle_id = None
         self.pc: RTCPeerConnection | None = None

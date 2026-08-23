@@ -195,6 +195,11 @@ import time
 import aiohttp
 from aiohttp import web
 
+# Typed application keys. aiohttp warns (NotAppKeyWarning) on plain-str
+# Application keys and web.AppKey has been the supported form since 3.9.
+APP_CURRENT_SECRET = web.AppKey("current_secret", dict)
+APP_SECRET_ROTATION_TASK = web.AppKey("secret_rotation_task", asyncio.Task)
+
 from . import config as c
 from . import talk as talk_mod
 from . import talk_fullduplex
@@ -581,7 +586,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         return web.json_response({"status": "applied"})
 
     app = web.Application()
-    app["current_secret"] = current_secret
+    app[APP_CURRENT_SECRET] = current_secret
     app.router.add_post("/control/credentials", handle_credentials)
     app.router.add_get("/control/health", handle_health)
     app.router.add_get("/control/cameras", handle_cameras)
@@ -615,6 +620,6 @@ async def start_control_server(
     # __slots__ escape hatch) rather than a bare fire-and-forget ensure_future,
     # so main.py can cancel it in its shutdown path and asyncio has a live
     # reference to it for its full (month-plus) lifetime.
-    app["secret_rotation_task"] = asyncio.ensure_future(
-        _rotate_secret_periodically(app["current_secret"]))
+    app[APP_SECRET_ROTATION_TASK] = asyncio.ensure_future(
+        _rotate_secret_periodically(app[APP_CURRENT_SECRET]))
     return runner

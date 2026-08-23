@@ -43,6 +43,27 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 - **Talkdown opens a real device audio session** and is off by default (`TALKDOWN_ENABLED`). It's device-specific (confirmed on the ADC-VDB750). Don't enable or fire it without intent.
 - **Two auth stacks, on purpose.** The website AJAX API (state + video) and the legacy mobile "MWS" XML API (two-way audio) are separate flows with separate quirks — see `docs/alarm-com-api.md` before changing either.
 
+## Deliberate designs -- do not "simplify" these
+
+Each of these looks like something to clean up and is not. See
+`docs/development.md` ("Dependency hardening") for the full reasoning.
+
+- **`clip_view.py` signs its own clip links** rather than using HA's
+  `async_sign_path`. HA's signatures are bound to a refresh token and break when it
+  is revoked; these links live inside already-delivered phone notifications and must
+  keep working, so the expiry is embedded in the MAC instead.
+- **`climate.py` deletes `_attr_max_temp`/`_attr_min_temp` from `__dict__`** instead
+  of assigning them. HA's `ClimateEntity.max_temp` default is a property that converts
+  the default into the entity's unit; assigning a value (or the property object) breaks
+  non-Celsius setups. The attribute must be ABSENT for the default to apply.
+- **`aiortc.sdp.candidate_from_sdp` is imported from a private module** because aiortc
+  exposes no public equivalent. It is deliberately kept under the CI import job + the
+  Renovate review-required gate rather than vendored.
+- **The three `pyalarmdotcomajax` monkeypatches each carry an import-time compatibility
+  guard.** If you change what a patch touches, update that module's guard AND
+  `.github/scripts/check_patch.py` (which also asserts the private *instance*
+  attributes the replaced `async_login` depends on).
+
 ## Where to read more
 
 Start at [`docs/README.md`](docs/README.md). For a change in a given area: `docs/ha-integration.md`, `docs/camera-bridge.md`, `docs/control-api.md`, `docs/alarm-com-api.md`, `docs/configuration.md`, `docs/troubleshooting.md`. Each component also has its own README (`custom_components/telus_smarthome/README.md`, `camera-bridge/README.md`).

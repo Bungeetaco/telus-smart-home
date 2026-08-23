@@ -24,20 +24,53 @@ log = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 55
 
+# Compatibility guard -- this patch replaces a PRIVATE coroutine on the library's
+# websocket client. Fail loudly (naming what moved) rather than dying with a bare
+# AttributeError at HA startup if a pyalarmdotcomajax bump renames it. Exercised
+# by the CI smoke test in .github/scripts/check_patch.py.
+if not hasattr(WebSocketClient, "_connect"):
+    raise RuntimeError(
+        "Websocket heartbeat patch is incompatible with the installed "
+        "pyalarmdotcomajax: WebSocketClient._connect is missing. Review the "
+        "upstream changes before bumping (see AGENTS.md / docs/development.md)."
+    )
+
 _orig_connect = WebSocketClient._connect
 
 
+class _HeartbeatSession:
+    """Transparent proxy around the aiohttp ClientSession that injects
+    ``heartbeat=`` into ws_connect().
+
+    We deliberately do NOT set attributes on the ClientSession itself: aiohttp's
+    ``ClientSession.__setattr__`` emits a DeprecationWarning for any name outside
+    its ``ATTRS`` (so the previous ``session.ws_connect = ...`` +
+    ``session._telus_hb_patched = True`` produced two warnings per session), and
+    that mutation surface is slated to close in aiohttp 4.0. Proxying instead
+    keeps the change entirely on the library object we already patch.
+
+    Everything except ws_connect delegates to the real session. The library only
+    ever calls methods on it (``self._websession.ws_connect(...)`` /
+    ``.get(...)``) and uses the RESULT as the async context manager, so simple
+    __getattr__ delegation is sufficient.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session):
+        object.__setattr__(self, "_session", session)
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def ws_connect(self, *args, **kwargs):
+        kwargs.setdefault("heartbeat", HEARTBEAT_SECONDS)
+        return self._session.ws_connect(*args, **kwargs)
+
+
 async def _connect_with_heartbeat(self):
-    session = self._websession
-    if not getattr(session, "_telus_hb_patched", False):
-        orig_ws_connect = session.ws_connect
-
-        def ws_connect_with_heartbeat(*args, **kwargs):
-            kwargs.setdefault("heartbeat", HEARTBEAT_SECONDS)
-            return orig_ws_connect(*args, **kwargs)
-
-        session.ws_connect = ws_connect_with_heartbeat
-        session._telus_hb_patched = True
+    if not isinstance(self._websession, _HeartbeatSession):
+        self._websession = _HeartbeatSession(self._websession)
         log.debug("Websocket heartbeat patch applied (%ss)", HEARTBEAT_SECONDS)
     return await _orig_connect(self)
 

@@ -34,9 +34,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import av
 import websockets
-from aiortc import (RTCConfiguration, RTCIceCandidate, RTCIceServer,
-                    RTCPeerConnection, RTCSessionDescription)
-from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
+from aiortc import (MediaStreamError, MediaStreamTrack, RTCConfiguration,
+                    RTCIceCandidate, RTCIceServer, RTCPeerConnection,
+                    RTCSessionDescription)
 from aiortc.sdp import candidate_from_sdp
 
 log = logging.getLogger(__name__)
@@ -226,7 +226,7 @@ class ADCTalkdown:
         self._auth = camera_auth_token
         self._fallback_ice = ice_servers_fallback or []
 
-        self.ws: websockets.WebSocketClientProtocol | None = None
+        self.ws: websockets.asyncio.client.ClientConnection | None = None
         self.pc: RTCPeerConnection | None = None
         self.track = FileTalkTrack()
 

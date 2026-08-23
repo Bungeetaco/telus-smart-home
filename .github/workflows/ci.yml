@@ -34,3 +34,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --only-binary :all: -r camera-bridge/requirements.txt
+
+  bridge-import-smoke:
+    name: Every bridge module imports cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install bridge requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install --only-binary :all: -r camera-bridge/requirements.txt
+      - name: Import every bridge module
+        # py_compile only catches SYNTAX errors. A broken import list (a name
+        # removed from `from x import (...)`) is a runtime NameError that only
+        # appears when the module is loaded -- which, for this service, means a
+        # restart-looping container. Importing each module here catches that in CI.
+        env:
+          TELUS_EMAIL: ci@example.invalid
+          TELUS_PASSWORD: unused
+        run: |
+          cd camera-bridge
+          for f in bridge/*.py; do
+            base=$(basename "$f" .py)
+            if [ "$base" = "__init__" ]; then continue; fi
+            echo "importing bridge.$base"
+            python -c "import importlib, sys; importlib.import_module(sys.argv[1])" "bridge.$base"
+          done
