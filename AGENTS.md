@@ -25,7 +25,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 - **Bridge:** `cd camera-bridge && docker compose up -d --build`. Code is baked into the image, so **any code change needs a rebuild** (`--build`), not just a restart. Health check: `curl -s http://127.0.0.1:8199/control/health` → `{"status":"ok"}`. Requires `--network host` and (for hardware encode) a GPU render node.
 - **Integration:** copy `custom_components/telus_smarthome/` into HA's `config/custom_components/`; **integration code changes require a full Home Assistant restart** to load (a config-entry reload does not re-import modules).
 - **Syntax check** Python before proposing changes: `python3 -m py_compile <file>`.
-- There is no formal test suite; verify by reading the code, compiling, and (for behavior) checking bridge/HA logs.
+- **CI** (`.github/workflows/ci.yml`) runs on PRs: it imports `telus_auth_patch.py` to prove the pyalarmdotcomajax monkeypatch still applies (a compatibility guard fails loudly if an upstream internal moved), and installs the bridge deps wheels-only. There is no broader unit-test suite; otherwise verify by reading the code, compiling, and checking bridge/HA logs.
 
 ## Conventions you MUST follow
 

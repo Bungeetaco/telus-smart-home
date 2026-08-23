@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommitsDisabled"],
+  "labels": ["dependencies"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "pyalarmdotcomajax + beautifulsoup4 pinned in the HA integration manifest.json requirements[]",
+      "managerFilePatterns": ["/^custom_components/telus_smarthome/manifest\\.json$/"],
+      "matchStrings": ["\"(?<depName>[A-Za-z0-9._-]+?)(==|>=)(?<currentValue>[0-9][^\"]*)\""],
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "description": "MediaMTX static binary version pinned as a Dockerfile ARG",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": ["ARG MEDIAMTX_VERSION=(?<currentValue>v[0-9][^\\s]*)"],
+      "depNameTemplate": "bluenviron/mediamtx",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Low-risk: auto-merge minor/patch once CI is green",
+      "matchPackageNames": ["python", "beautifulsoup4"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "High-risk: the SSO monkeypatch targets pyalarmdotcomajax internals; aiortc/av must keep manylinux wheels; MediaMTX config format can change. Never auto-merge -- review with CI.",
+      "matchPackageNames": ["pyalarmdotcomajax", "aiortc", "av", "bluenviron/mediamtx"],
+      "automerge": false,
+      "labels": ["dependencies", "review-required"]
+    }
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2
+}

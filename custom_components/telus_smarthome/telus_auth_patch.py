@@ -30,6 +30,7 @@ from datetime import datetime
 
 import aiohttp
 
+import pyalarmdotcomajax
 import pyalarmdotcomajax.const as c
 from pyalarmdotcomajax import AlarmController, extensions
 from pyalarmdotcomajax.const import OtpType
@@ -310,6 +311,29 @@ async def _telus_async_login(self: AlarmController) -> None:
 
     raise OtpRequired(enabled_2fa_methods)
 
+
+# --- Compatibility guard -------------------------------------------------
+# This patch reaches into pyalarmdotcomajax internals: it REPLACES
+# AlarmController.async_login and reads several class-level attributes below.
+# A new pyalarmdotcomajax version can rename or remove any of them, which would
+# otherwise break login silently. Fail LOUDLY here instead, naming exactly what
+# changed. (The CI smoke test in .github/ imports this module to exercise this
+# guard on every dependency-bump PR -- see docs/development.md / AGENTS.md.)
+_REQUIRED_CONTROLLER_ATTRS = (
+    "async_login",  # the coroutine we replace
+    "SESSION_REFRESH_DEFAULT_INTERVAL_MS",
+    "KEEP_ALIVE_DEFAULT_URL",
+    "LOGIN_2FA_DETAIL_URL_TEMPLATE",
+)
+_missing = [a for a in _REQUIRED_CONTROLLER_ATTRS if not hasattr(AlarmController, a)]
+if _missing:
+    raise RuntimeError(
+        "TELUS SSO patch is incompatible with the installed pyalarmdotcomajax "
+        f"({getattr(pyalarmdotcomajax, '__version__', 'unknown')}): AlarmController "
+        f"is missing {_missing}. The pinned version was changed without updating "
+        "telus_auth_patch.py -- review the upstream changes before bumping "
+        "(see AGENTS.md / docs/development.md)."
+    )
 
 AlarmController.async_login = _telus_async_login
 log.info("TELUS Smart Home SSO patch applied to pyalarmdotcomajax (URL_BASE=%s)", TELUS_BASE)

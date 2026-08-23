@@ -42,3 +42,35 @@ A bridge-only change still rides in the same integration version bump — note i
 ## Anonymization note for docs
 
 The docs in this folder are written to be shareable: they describe the software generically and use placeholders (`<ha-host>`, `<doorbell-ip>`, `<unit-id>`, `<did>`, `<mac>`, …) instead of any real deployment's IPs, account/device IDs, hostnames, paths, or secrets. Keep new docs to the same standard.
+
+
+## Dependency updates (automated)
+
+Upstream versions are surfaced automatically, but applied deliberately -- the
+integration **monkeypatches `pyalarmdotcomajax` internals**, so a blind bump can
+break login. The setup:
+
+- **[Renovate](https://docs.renovatebot.com/)** (`renovate.json`) opens update
+  PRs for everything pinned: `pyalarmdotcomajax` + `beautifulsoup4` (custom
+  manager over `manifest.json`), the bridge's `requirements.txt`, the Dockerfile
+  base image, and the `MEDIAMTX_VERSION` Dockerfile `ARG` (GitHub releases).
+  *Enable it by installing the Renovate GitHub App on the repo* -- the config
+  alone does nothing without it. (Dependabot is a zero-install fallback but can't
+  cover the `manifest.json` pin or the MediaMTX `ARG`.)
+- **Auto-merge policy** (in `renovate.json`): low-risk updates (`python` base
+  image, `beautifulsoup4`) auto-merge once CI is green; **high-risk ones
+  (`pyalarmdotcomajax`, `aiortc`, `av`, `mediamtx`) never auto-merge** -- they get
+  a `review-required` label.
+- **CI smoke test** (`.github/workflows/ci.yml`) runs on every PR:
+  1. installs the integration requirements and imports `telus_auth_patch.py`,
+     which runs its compatibility guard -- so a `pyalarmdotcomajax` bump that
+     moves an internal the patch depends on **fails the PR loudly** instead of
+     breaking login at runtime;
+  2. installs the bridge `requirements.txt` with `--only-binary :all:`, catching
+     an `aiortc`/`av` bump that has no manylinux wheel (which would otherwise try
+     to build from source in the image).
+
+**When a `pyalarmdotcomajax` bump PR appears:** if CI is red, the guard caught a
+moved internal -- update `_telus_async_login` / the patched attributes in
+`telus_auth_patch.py` to match the new version, then bump. If CI is green, the
+patch still applies, but still skim the upstream changelog before merging.
