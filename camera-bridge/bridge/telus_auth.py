@@ -93,11 +93,7 @@ class TelusSession:
         misreported as a generic step failure (or, for step 3, as a
         possible-MFA landing-page mismatch)."""
         if resp.status == 429:
-            try:
-                retry_after_s = float(resp.headers.get("Retry-After"))
-            except (TypeError, ValueError):
-                retry_after_s = 60.0
-            raise RateLimited(retry_after_s)
+            raise RateLimited(c.parse_retry_after(resp.headers.get("Retry-After")))
 
     async def login(self) -> None:
         """Idempotent -- clears cookies first, safe to call again to re-login."""

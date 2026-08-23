@@ -320,11 +320,7 @@ class MobileSession:
         rather than a fixed short schedule. See telus_auth.RateLimited for why a
         fixed retry turned one bad night into a multi-hour outage."""
         if resp.status == 429:
-            try:
-                retry_after_s = float(resp.headers.get("Retry-After"))
-            except (TypeError, ValueError):
-                retry_after_s = 60.0
-            raise RateLimited(retry_after_s)
+            raise RateLimited(c.parse_retry_after(resp.headers.get("Retry-After")))
 
     async def _post_mws(self, form: dict) -> str:
         async with self._http.post(

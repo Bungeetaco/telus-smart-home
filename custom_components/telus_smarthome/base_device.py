@@ -14,7 +14,12 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
 )
 from pyalarmdotcomajax.devices.registry import AllDevices_t
-from pyalarmdotcomajax.exceptions import UnkonwnDevice
+# NOTE: "UnkonwnDevice" is a MISSPELLING in pyalarmdotcomajax. Tolerate a future
+# upstream spelling fix so it can't turn into an ImportError at integration load.
+try:  # pragma: no cover - depends on the installed library version
+    from pyalarmdotcomajax.exceptions import UnkonwnDevice
+except ImportError:  # upstream fixed the typo
+    from pyalarmdotcomajax.exceptions import UnknownDevice as UnkonwnDevice
 from pyalarmdotcomajax.extensions import ConfigurationOption as libConfigurationOption
 
 from . import const as c

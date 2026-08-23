@@ -26,8 +26,7 @@
     {
       "description": "Low-risk: auto-merge minor/patch once CI is green",
       "matchPackageNames": [
-        "python",
-        "beautifulsoup4"
+        "python"
       ],
       "matchUpdateTypes": [
         "minor",
@@ -37,12 +36,14 @@
       "automerge": true
     },
     {
-      "description": "High-risk: the SSO monkeypatch targets pyalarmdotcomajax internals; aiortc/av must keep manylinux wheels; MediaMTX config format can change. Never auto-merge -- review with CI.",
+      "description": "High-risk: the SSO monkeypatch targets pyalarmdotcomajax internals; aiortc/av must keep manylinux wheels and aiortc.sdp is a private import; aiohttp/websockets carry the deprecation exposure (ClientSession/AppKey/legacy protocol aliases); MediaMTX config format can change. Never auto-merge -- review with CI.",
       "matchPackageNames": [
         "pyalarmdotcomajax",
         "aiortc",
         "av",
-        "bluenviron/mediamtx"
+        "bluenviron/mediamtx",
+        "aiohttp",
+        "websockets"
       ],
       "automerge": false,
       "labels": [

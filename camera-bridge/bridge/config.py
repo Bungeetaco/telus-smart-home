@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 
@@ -303,3 +304,33 @@ TALK_MEDIA_FETCH_TIMEOUT_S = 10
 # Hard cap on fetched/read audio. A 10-30s TTS clip is well under this; the cap is
 # enforced while streaming so an oversize body is never buffered whole.
 TALK_MEDIA_MAX_BYTES = 64 * 1024 * 1024
+
+
+# --- shared HTTP helpers ----------------------------------------------------
+def parse_retry_after(value, default=60.0):
+    """Seconds to wait from a Retry-After header value.
+
+    RFC 9110 allows BOTH delta-seconds ("120") and an HTTP-date
+    ("Wed, 21 Oct 2015 07:28:00 GMT"). Cloudflare currently sends delta-seconds,
+    but a WAF/edge change to the date form would previously have fallen through
+    to a fixed 60s -- exactly the "fixed short retry re-triggers the same window"
+    behaviour that once turned one bad night into a multi-hour outage. Parse both,
+    and LOG when falling back so it is distinguishable from a missing header.
+    """
+    if value is None:
+        return default
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        when = parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Unparseable Retry-After %r; using %.0fs", value, default)
+        return default

@@ -76,3 +76,72 @@ break login. The setup:
 moved internal -- update `_telus_async_login` / the patched attributes in
 `telus_auth_patch.py` to match the new version, then bump. If CI is green, the
 patch still applies, but still skim the upstream changelog before merging.
+
+
+## Dependency hardening (2026-08 audit)
+
+A dependency-fragility audit of both trees drove the following changes. The theme:
+this project's integration deliberately monkeypatches a library, so the risk is not
+"a bump fails loudly" but "a bump changes an internal and something breaks quietly."
+
+**Applied:**
+
+- **Compatibility guards on all three monkeypatches.** `telus_auth_patch.py` now also
+  guards the private coroutine it calls, the `pyalarmdotcomajax.const` values it
+  rewrites, and the extension class attribute it overwrites;
+  `telus_ws_heartbeat_patch.py` and `telus_ws_push_patch.py` gained guards of their own
+  (they had none, and both wrap private coroutines). The CI smoke test now imports all
+  three and, because the replaced `async_login` populates ~11 PRIVATE INSTANCE
+  attributes that no class-level check can see, constructs a throwaway controller and
+  asserts each one.
+- **Stopped mutating aiohttp's `ClientSession`.** The heartbeat patch used to assign
+  `session.ws_connect = ...` and `session._telus_hb_patched = True`; aiohttp warns on
+  any attribute outside its `ATTRS` and that surface is slated to close in 4.0. It now
+  wraps the session in a small transparent proxy that injects `heartbeat=`, keeping the
+  mutation on the library object we already patch.
+- **`web.AppKey` instead of plain-string `Application` keys** in the bridge's control
+  server (aiohttp emits `NotAppKeyWarning` for str keys; `AppKey` has existed since 3.9).
+- **One `Retry-After` parser** (`config.parse_retry_after`) replacing three copies that
+  understood only delta-seconds. RFC 9110 also permits an HTTP-date, which previously
+  fell through to a fixed 60s -- the exact "fixed short retry re-triggers the same
+  window" behaviour that once caused a multi-hour outage. It now parses both and logs
+  when it falls back.
+- **Socket timeouts on the talkdown PUT session.** The safety deadline is only checked
+  between chunks, so a single wedged PUT could pin the per-camera talk lock for
+  aiohttp's 300s default; now `sock_connect`/`sock_read` are 5s.
+- **`DigestAuthMiddleware`** replaces the hand-rolled RFC 2617 implementation (see E21).
+- **Hardened XML parsing** in `mws_client.py` (defusedxml-first, matching `mobile_auth`),
+  with `defusedxml` and `yarl` (imported directly but previously undeclared) added to
+  `requirements.txt`.
+- **Public aiortc imports** (`MediaStreamError`/`MediaStreamTrack` come from the package
+  root) and corrected `websockets` type annotations (`ClientConnection`; the legacy
+  `WebSocketClientProtocol` alias has not been what `connect()` returns since 14.0).
+- **Typo-proof `UnkonwnDevice` import** -- the name is misspelled upstream, so a future
+  spelling fix would have been an `ImportError` at integration load.
+- **Dropped the unused `beautifulsoup4` requirement** (nothing imports it -- and it was
+  in Renovate's auto-merge group, i.e. auto-merging a dependency nothing uses).
+- **Renovate:** `aiohttp` and `websockets` added to the review-required group; they carry
+  the actual deprecation exposure.
+- **New CI job: every bridge module must import.** `py_compile` only catches syntax
+  errors; a broken import list is a runtime `NameError` that surfaces as a
+  restart-looping container. This was added after exactly that happened during the audit
+  fixes.
+
+**Considered and deliberately NOT changed:**
+
+- **`climate.py`'s `self.__dict__.pop("_attr_max_temp")`.** The audit suggested assigning
+  the default explicitly, but `ClimateEntity.max_temp` is a *property object*, not a
+  value, and HA's default converts `DEFAULT_MAX_TEMP` into the entity's temperature unit.
+  Assigning either would break Fahrenheit setups. Removing the attribute so HA's own
+  default property applies is the correct behaviour and is already documented in place.
+- **`clip_view.py`'s hand-rolled HMAC signing.** HA ships `async_sign_path`, but its
+  signatures are bound to a refresh token and die when it is revoked -- incompatible with
+  the requirement that links inside already-delivered notifications keep working. The
+  local implementation embeds the expiry in the MAC and uses `compare_digest`. Keep it;
+  revisit only if the notification-longevity requirement is dropped.
+
+**Still open (low priority):** entity naming derives from `device.__class__.__name__`, so
+a library class rename would silently change entity IDs rather than raising;
+`mws_client.py` imports two underscore-prefixed helpers from `mobile_auth` (intra-project,
+but they should be renamed public); `pylibsrtp` is pinned though only referenced in a
+commented-out fallback (it arrives transitively via aiortc anyway).

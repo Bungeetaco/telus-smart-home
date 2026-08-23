@@ -339,7 +339,7 @@ async def main():
             # unexpected exception from one itself (see its deactivate()).
             await asyncio.gather(discovery_task, fallback_task)
         finally:
-            control_runner.app["secret_rotation_task"].cancel()
+            control_runner.app[control_server.APP_SECRET_ROTATION_TASK].cancel()
             await control_runner.cleanup()
 
 

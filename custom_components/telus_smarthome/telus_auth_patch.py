@@ -324,8 +324,21 @@ _REQUIRED_CONTROLLER_ATTRS = (
     "SESSION_REFRESH_DEFAULT_INTERVAL_MS",
     "KEEP_ALIVE_DEFAULT_URL",
     "LOGIN_2FA_DETAIL_URL_TEMPLATE",
+    "_async_handle_server_errors",  # private coroutine the replacement calls
 )
+# Module-level constants and the extension class this patch also rewrites. These
+# are NOT AlarmController attributes, so they need their own check.
+_REQUIRED_CONST_ATTRS = ("URL_BASE", "IDENTITIES_URL_TEMPLATE")
+# NOTE: the replacement body additionally populates ~12 private INSTANCE
+# attributes (_websession, _ajax_headers, _user_id, _user_email, _keep_alive_url,
+# _session_refresh_interval_ms, _provider_name, _user_profile, ...). Those only
+# exist after __init__, so they can't be checked here -- the CI smoke test
+# (.github/scripts/check_patch.py) constructs a throwaway controller and asserts
+# them. Keep the two lists in sync when this patch changes.
 _missing = [a for a in _REQUIRED_CONTROLLER_ATTRS if not hasattr(AlarmController, a)]
+_missing += [f"const.{a}" for a in _REQUIRED_CONST_ATTRS if not hasattr(c, a)]
+if not hasattr(getattr(extensions, "CameraSkybellControllerExtension", None), "ENDPOINT"):
+    _missing.append("extensions.CameraSkybellControllerExtension.ENDPOINT")
 if _missing:
     raise RuntimeError(
         "TELUS SSO patch is incompatible with the installed pyalarmdotcomajax "
