@@ -222,8 +222,112 @@ Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
   talk; never persist them.
 - `stream_talkdown` re-challenges (401) and retries a chunk once; if the doorbell
   rotates the nonce mid-stream beyond that, add re-challenge handling.
-- Not yet fired against the live doorbell from the bridge (held for explicit
-  user approval — it plays real audio at the door). Deploy/enable steps in
-  `docs/talkdown-DEPLOY.md`.
+- Live-verified 2026-08-23 (see "Live verification" section below): plays at the
+  door, sustains >=10 min continuous, no renegotiation needed. Deploy/enable
+  steps in `docs/talkdown-DEPLOY.md`.
 - If a future firmware flips the VDB750 to WebRTC/SRTP, the `talk.py` fallback
   path already covers it; `susa`/`SupportsWebRTC` on `<cli>` tell you which.
+
+
+## Live verification 2026-08-23 (fired against the real doorbell)
+
+Deployed inert-then-enabled and tested end to end against the live ADC-VDB750.
+Findings:
+- **It works.** A tone streamed to `duae` (direct/LAN `10.13.38.134:41925`) plays
+  at the doorbell. Response `{"status":"spoken","path":"full_duplex","seconds":N}`.
+- **Login `lr` is not the success signal.** The live `<lalr>`/`<slnr>` returns
+  `lr=0 cvs=0` with a fully valid session (st/slt/dcid present). `mobile_auth`
+  now keys success off the **presence of a SessionToken**, not `lr==2` (the
+  decompiled `il0/h.java R()` predicate was wrong for this account). An
+  AccountSetupUrl (`asu`) still hard-fails.
+- **Session length so far: >=10 min with no server-side limit hit.** A
+  continuous 10-minute talk ran with zero server-side cutoff, 401 re-challenge,
+  or connection drop (`cstet` on `<cli>` did not bite on an active PUT stream),
+  so the current transport already covers typical announcements and music
+  tracks. Longer/robust streaming is a **planned enhancement** -- see
+  **Planned enhancements & known gaps** below (E1).
+- **Pacing must be schedule-based, not sleep-after-each-PUT.** The naive
+  `PUT; sleep(CHUNK_MS)` added the PUT round-trip on top of every sleep and
+  drifted ~10 percent (600s audio took ~660s). Fixed: sleep until each chunk's
+  real-time slot (`start + idx*CHUNK_MS`), which absorbs PUT latency so
+  wall-clock tracks audio time (60s audio -> 59.5s wall).
+- **Prebuffer to avoid choppy playback.** Delivering chunks exactly at playback
+  time can underrun into gaps; a small constant lead (`PREBUFFER_MS=500`) keeps a
+  jitter buffer at the doorbell so playback is continuous. (A "morse code" report
+  during testing was actually an `apulsator` pulsing TEST TONE, not the transport
+  -- a continuous tone plays smoothly.)
+- Audio is 8 kHz mono mu-law = telephone-grade; music plays but is lo-fi. The
+  session bound is now derived from the audio length (clip + margin), not a
+  fixed/env timeout.
+
+## Planned enhancements & known gaps
+
+Standing practice for this feature: **every known gap or potential improvement,
+however minor, is logged here** rather than dropped -- so a future agent (or the
+maintainer) can pick it up. "Not implemented" means "not yet," never "unwanted."
+Add to this list whenever something is deferred, simplified, or noticed in
+passing. Rough priority order; IDs are stable references.
+
+### High value
+- **E1 Session renegotiation (long-duration + resilient streaming).** The `<cli>`
+  port + stream password are PER-SESSION and expire around `cstet`; short clips
+  finish inside that window but an arbitrarily long or interrupted stream will
+  outlive it. Design (resume with no lost audio): keep a running audio byte
+  offset; on an unrecoverable mid-stream PUT failure (connection reset, an auth
+  failure a single 401 re-challenge doesn't fix, or nearing `cstet`) do NOT end
+  the talk -- best-effort `EndLiveStream`, re-`GetDoorbellCameraList` (fresh port/
+  password/URL), re-`StartFullDuplex`, reconnect and resume from the saved
+  offset; bound the number of renegotiations per talk; proactively renegotiate
+  slightly BEFORE `cstet` to avoid an audible seam. Kept out today only because
+  <=10-min clips work without it.
+- **E2 Cancel / stop an in-progress talk.** There is no way to stop a playing
+  clip early -- a long (e.g. 10-min music) talk only ends when the audio finishes
+  or the safety deadline fires. Add a cancel path (control endpoint + a
+  per-camera handle that cancels the transport task and tears the session down).
+- **E3 Deploy + wire the HA integration.** Only the bridge is deployed/tested
+  live. `custom_components/telus_smarthome` (the `telus_smarthome.speak` service,
+  `services.yaml`) and the example automation are NOT yet synced to live HA or
+  tested end to end through HA. Sync + restart HA + verify the service.
+
+### Audio quality / transport
+- **E4 Optional L16 codec** (pt97, 16-bit) instead of G.711 mu-law. The device
+  supports `skyL16pay` @ 8 kHz; L16 avoids mu-law companding loss (still 8 kHz,
+  but better for music).
+- **E5 Streaming encode** -- pipe `ffmpeg` stdout straight into the PUT loop
+  instead of buffering the whole mu-law clip in RAM and spooling a temp file.
+  Lowers memory + latency-to-first-audio for long/large files and removes the
+  `TALK_MEDIA_MAX_BYTES` ceiling concern.
+- **E6 Tune/auto-tune `CHUNK_MS`** (larger chunks = fewer PUT round-trips/less
+  overhead) and **`PREBUFFER_MS`** (adaptive to observed jitter) instead of the
+  fixed 40 ms / 500 ms.
+- **E7 Explicit Digest `stale=true` handling / nonce refresh** without a full
+  re-challenge, plus `nc` rollover safety, for very long streams.
+- **E8 Confirm playback from the ack** -- parse the doorbell's per-chunk JSON ack
+  body, not just the HTTP 2xx, so a silently-dropped-but-200 case is caught.
+- **E9 Volume control** -- investigate `duav` (v/min/max, `SupportsVolumeAdjustment`
+  observed false); confirm whether talkdown volume can be set at all.
+
+### Robustness / networking
+- **E10 Auto-detect LAN vs WAN reachability** to choose the PutAudioStream
+  endpoint at runtime, instead of the static `TALK_PUT_ENDPOINT_ORDER`.
+- **E11 Reconnect on a dropped keep-alive connection** (a subset of E1).
+- **E12 Pin the doorbell's self-signed cert** (fingerprint) instead of disabling
+  TLS verification entirely for the PUT.
+
+### Fallback path (other ADC cameras)
+- **E13 Validate the webrtc/srtp fallback.** `talk_webrtc.py` / `talk_srtp.py`
+  were built on the pre-capture hypothesis and have NOT been verified against a
+  real webrtc/srtp-capable ADC camera; validate when such a device exists.
+
+### Testing / observability
+- **E14 Repo unit tests** for the transport (`_Digest` header correctness,
+  schedule-based pacing, prebuffer) and for `parse_doorbell_camera_list` (the
+  parser was verified ad hoc against a capture but no test is committed).
+- **E15 Metrics** -- emit talk success/failure counts + durations for observability.
+
+### Minor
+- **E16 Cache `GetDoorbellCameraList`** within the `cstet` window to save a round
+  trip on rapid repeat talks.
+- **E17 Also send `EndFullDuplex`** (we use `EndLiveStream`, which the app used);
+  send both for symmetry if a session is ever seen lingering.
+- **E18 Document `CHUNK_MS` / `PREBUFFER_MS`** as tunables in config comments.

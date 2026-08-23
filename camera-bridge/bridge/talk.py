@@ -120,10 +120,13 @@ class TalkManager:
             if c.TALK_PREFER_FULL_DUPLEX:
                 doorbell = await self._resolve_doorbell(camera_id)
                 if doorbell is not None:
-                    return await asyncio.wait_for(
-                        self._run_full_duplex(doorbell, audio_bytes),
-                        timeout=c.TALK_SESSION_TIMEOUT_S,
-                    )
+                    # No fixed session cap for the full-duplex path: the
+                    # transport bounds itself by the AUDIO length (see
+                    # talk_fullduplex), so a 10-min clip plays in full. The MWS
+                    # auth/start/end steps are each bounded inside
+                    # _run_full_duplex; the doorbell imposes no session limit
+                    # we've observed.
+                    return await self._run_full_duplex(doorbell, audio_bytes)
             endpoint = await self._resolve_endpoint(camera_id)
             return await asyncio.wait_for(
                 self._run_talk(endpoint, audio_bytes),

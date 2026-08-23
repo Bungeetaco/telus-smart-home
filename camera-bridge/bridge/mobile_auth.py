@@ -355,8 +355,8 @@ class MobileSession:
 
 def _parse_login_xml(body: str, root_tag: str) -> dict:
     """Return the SessionToken/slt/CustomerId from the <root_tag .../> element's
-    attributes, enforcing the success predicate lr==2 && cvs in {0,1}
-    (il0/h.java R()). Parsed with a defused XML parser rather than
+    attributes. Success = a SessionToken (st) is present; lr/cvs are diagnostics
+    only (the live account returns lr=0 with a valid session -- see below). Parsed with a defused XML parser rather than
     ElementTree.fromstring so a hostile MWS response can't drive an XML attack."""
     try:
         import defusedxml.ElementTree as DET
@@ -372,22 +372,34 @@ def _parse_login_xml(body: str, root_tag: str) -> dict:
     if el is None:
         raise MobileLoginError(f"MWS response missing <{root_tag}> (len={len(body)})")
     a = el.attrib
+    # Success predicate is the PRESENCE OF A SessionToken (st), not lr==2. The
+    # decompiled il0/h.java R() checks lr==2, but the live TELUS account returns
+    # lr=0 with a full, working session (st/slt/dcid all present) -- confirmed
+    # end-to-end against a real capture. Gating on lr==2 rejected valid logins
+    # (observed: "login failed lr=0 cvs=0" on a session that was actually fine).
+    # Trust the token alarm.com actually returned; treat lr/cvs as diagnostics
+    # only. An AccountSetupUrl still hard-fails (no mobile provisioning).
     try:
         lr = int(a.get("lr", "-1"))
         cvs = int(a.get("cvs", "-1"))
     except ValueError:
-        raise MobileLoginError(f"MWS <{root_tag}> has non-numeric lr/cvs")
+        lr = cvs = -1
     if a.get("asu"):
         raise MobileLoginError(f"MWS <{root_tag}> returned an AccountSetupUrl "
                                "(account not provisioned for mobile)")
+    session_token = a.get("st")
+    if not session_token:
+        raise MobileLoginError(
+            f"MWS <{root_tag}> returned no SessionToken (lr={lr} cvs={cvs})")
     if lr != 2 or cvs not in (0, 1):
-        raise MobileLoginError(f"MWS <{root_tag}> login failed lr={lr} cvs={cvs}")
+        log.info("MWS <%s> login ok with non-canonical lr=%s cvs=%s "
+                 "(SessionToken present; proceeding)", root_tag, lr, cvs)
     try:
         customer_id = int(a.get("dcid", "-1"))
     except ValueError:
         customer_id = -1
     return {
-        "session_token": a.get("st"),
+        "session_token": session_token,
         "seamless_login_token": a.get("slt"),
         "customer_id": customer_id,
     }

@@ -31,6 +31,12 @@ MULAW_RATE = 8000
 CHUNK_MS = 40
 CHUNK_BYTES = MULAW_RATE * CHUNK_MS // 1000  # 320 bytes / 40 ms
 DIGEST_USER = "vieweruser"
+# How often to log progress during a long talk (seconds of wall clock).
+PROGRESS_LOG_S = 15
+# Stay this far ahead of real time so the doorbell always has a jitter
+# buffer. Delivering chunks exactly at playback time underruns into
+# choppy/"morse" gaps; a small constant lead keeps playback continuous.
+PREBUFFER_MS = 500
 
 
 class TalkdownError(RuntimeError):
@@ -116,10 +122,16 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
     Returns {"chunks": n, "bytes": total, "path": "full_duplex"}.
     Guarantees the ffmpeg process and HTTP session are torn down on every path.
     """
-    timeout_s = timeout_s or c.TALK_SESSION_TIMEOUT_S
-    deadline = time.monotonic() + timeout_s
     audio = await _encode_mulaw(audio_source)
     total = len(audio)
+    # The natural end of a talk is "all chunks sent"; the wall-clock length
+    # equals the audio length. The deadline below is only a backstop against a
+    # wedged connection, so it is DERIVED FROM THE AUDIO (clip length + generous
+    # PUT-overhead room), not a fixed/config cap -- it scales with the clip. The
+    # doorbell imposes no session limit we've observed (a 10-min stream ran end
+    # to end with zero server-side cutoff). An explicit timeout_s still overrides.
+    expected_s = total / MULAW_RATE
+    deadline = time.monotonic() + (timeout_s or (expected_s + max(30.0, 0.5 * expected_s)))
     # Doorbell serves a self-signed cert -> no verification. Keep-alive one host.
     conn = aiohttp.TCPConnector(ssl=False, limit=1, force_close=False)
     sent = 0
@@ -156,12 +168,37 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                     return
             raise TalkdownError("PUT still unauthorized after challenge")
 
+        total_chunks = (total + CHUNK_BYTES - 1) // CHUNK_BYTES
+        start = time.monotonic()
+        next_log = start + PROGRESS_LOG_S
+        idx = 0
         for off in range(0, total, CHUNK_BYTES):
             if time.monotonic() > deadline:
-                raise TalkdownError("talkdown exceeded session timeout")
+                raise TalkdownError(
+                    f"talkdown exceeded safety deadline after {chunks} chunks")
             await put_chunk(audio[off:off + CHUNK_BYTES])
+            idx += 1
             if pace:
-                await asyncio.sleep(CHUNK_MS / 1000.0)
-    log.info("talkdown: streamed %d chunks / %d bytes mu-law to %s",
-             chunks, sent, urlsplit(put_url).netloc)
-    return {"path": "full_duplex", "chunks": chunks, "bytes": sent}
+                # Schedule-based pacing: sleep until THIS chunk's real-time slot
+                # (start + idx*CHUNK_MS), absorbing per-PUT latency so wall-clock
+                # tracks audio time. A fixed sleep-after-each-PUT drifted ~10%
+                # over 10 min (600s audio took ~660s) because the PUT round-trip
+                # was added on top of every sleep. The PREBUFFER_MS lead keeps a
+                # constant jitter buffer at the doorbell (the first ~PREBUFFER
+                # worth of chunks burst out with slack<0) so playback stays
+                # continuous instead of underrunning into gaps.
+                slack = (start + idx * (CHUNK_MS / 1000.0)
+                         - PREBUFFER_MS / 1000.0) - time.monotonic()
+                if slack > 0:
+                    await asyncio.sleep(slack)
+            now = time.monotonic()
+            if now >= next_log:
+                log.info("talkdown: %d/%d chunks, %.0f/%.0fs elapsed to %s",
+                         chunks, total_chunks, now - start, expected_s,
+                         urlsplit(put_url).netloc)
+                next_log = now + PROGRESS_LOG_S
+    log.info("talkdown: streamed %d chunks / %d bytes mu-law in %.1fs "
+             "(audio %.1fs) to %s", chunks, sent, time.monotonic() - start,
+             expected_s, urlsplit(put_url).netloc)
+    return {"path": "full_duplex", "chunks": chunks, "bytes": sent,
+            "seconds": round(expected_s, 1)}

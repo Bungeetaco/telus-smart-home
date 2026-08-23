@@ -280,4 +280,4 @@ TALK_SRTP_TIMEOUT_S = 45
 TALK_MEDIA_FETCH_TIMEOUT_S = 10
 # Hard cap on fetched/read audio. A 10-30s TTS clip is well under this; the cap is
 # enforced while streaming so an oversize body is never buffered whole.
-TALK_MEDIA_MAX_BYTES = 8 * 1024 * 1024
+TALK_MEDIA_MAX_BYTES = 64 * 1024 * 1024
