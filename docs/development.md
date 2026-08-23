@@ -151,6 +151,14 @@ but they should be renamed public); `pylibsrtp` is pinned though only referenced
 commented-out fallback (it arrives transitively via aiortc anyway).
 
 
+
+**Python moves in lockstep.** CI's `setup-python` mirrors the runtime image
+(`camera-bridge/Dockerfile`'s `FROM python:<ver>-slim`) — testing on an
+interpreter the container does not run is worse than not testing. Renovate
+reports both under the dep name `python` and is configured to group them into a
+single reviewed PR, so never bump one alone. A runtime interpreter bump for a
+24/7 service is not auto-merged.
+
 ## Keeping the docs current
 
 Treat documentation as part of the change:
