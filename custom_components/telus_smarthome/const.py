@@ -279,6 +279,13 @@ CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE = (
 # buys responsiveness nobody needs at a real risk. A write through one of the
 # POST routes requests its own immediate refresh rather than waiting for this.
 CAMERA_SETTINGS_POLL_INTERVAL_SECONDS = 120
+# The diagnostics route is three sequential alarm.com reads behind one request,
+# and alarm.com seems to query the camera itself for the signal figure. Measured
+# live at 1.6s on a doorbell and 25s on an indoor camera in the SAME account, so
+# the shared 10s bridge timeout is not a slow-bridge signal here -- it is normal
+# for some models, and enforcing 10s failed the poll for every camera at once.
+# Comfortably inside the 120s poll interval even if two cameras are both slow.
+CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS = 45
 
 # How often camera.py re-polls the bridge for its camera list. This is a
 # cheap local-loopback HTTP GET against a small in-memory dict on the bridge

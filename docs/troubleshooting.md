@@ -21,6 +21,7 @@ the component READMEs.
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
 - [Talkdown audio sounds bad on the doorbell speaker](#talkdown-audio-sounds-bad-on-the-doorbell-speaker)
 - [A camera control is missing, or a settings write returns 422](#a-camera-control-is-missing-or-a-settings-write-returns-422)
+- [No camera settings entities appear at all](#no-camera-settings-entities-appear-at-all)
 
 ---
 
@@ -420,6 +421,55 @@ hardware, and `{"action": "start"}` on the siren is audible in someone's home.
 Nothing polls a write route — if a setting changed, something asked it to.
 
 ---
+
+## No camera settings entities appear at all
+
+Symptom: after a restart there is no speaker-volume slider, no signal-strength
+sensor and no privacy switch for **any** camera, and
+`custom_components.telus_smarthome.camera_settings_coordinator` logs
+`Could not reach camera bridge` even though the bridge answers fine by hand.
+
+These entities are created from the **first successful poll** — the bridge is the
+only thing that knows which camera supports what, so nothing can be created until
+a poll returns. That makes a failing poll fail *visibly as an absence*, which is
+easy to misread as "the feature did not deploy".
+
+Check the poll itself rather than the entities:
+
+```bash
+sudo docker logs --tail 2000 homeassistant 2>&1 | grep -a camera_settings_coordinator | tail -5
+```
+
+`Finished fetching TELUS camera settings data in N seconds (success: False)` is
+the line that matters. If N is around 10 or 20, suspect a **timeout, not an
+unreachable bridge** — the message is the same either way, because both arrive as
+`aiohttp.ClientError`.
+
+Time the routes directly to find which camera is slow:
+
+```bash
+S=$(sudo docker exec telus-cam-bridge cat /shared/control_secret)
+curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" -H "Authorization: Bearer $S" \
+  http://127.0.0.1:8199/control/cameras/<camera-id>/diagnostics
+```
+
+**`/diagnostics` is inherently slow on some models.** It is one request to the
+bridge but three sequential alarm.com reads behind it, and alarm.com appears to
+query the camera itself for the signal figure. Measured live in one account: 1.6s
+on a doorbell and **25s** on an indoor camera. That is normal, not a fault — it is
+why the diagnostics fetch uses `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` (45s) instead
+of the shared 10s bridge timeout.
+
+A single camera failing no longer blanks the others: the poll degrades that
+camera (keeping its previous reading) and logs
+`Camera settings poll failed for <id>`. Only a failure on *every* camera marks the
+coordinator failed. If you see one camera named in that warning repeatedly, that
+camera is slow or unreachable — the rest of the account is unaffected.
+
+Note also that a poll can succeed and still produce no entities for a given
+camera, which is correct: the siren buttons exist only for a camera whose account
+reports the `canManuallyTriggerSiren` permission, and an account with no
+siren-capable devices gets none. See "A camera control is missing" above.
 
 ## Checking whether talkdown has been failing
 

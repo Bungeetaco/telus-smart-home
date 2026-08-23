@@ -134,10 +134,35 @@ Constructors in the app are `(customerId, deviceId)` and
 
 ### Reads
 
-| Action | Response shape |
+| Action | Response shape (as the app models it) |
 | --- | --- |
 | `GetAllSirenDevices` **[implemented]** | `{"AllCameraSirenInfo": [ {"DeviceId": …, "isActive": …, "timestampEnd": …, "canManuallyTriggerSiren": …}, … ]}` |
 | `GetAllCameraPrivacyModeInfo` **[implemented]** | `{"CameraPrivacyModeInfo": {"DeviceId": …, "State": …}}` |
+
+> **Corrected 2026-08-23 by a live call: these two reads answer in XML, not
+> JSON.** The app models them as JSON, so the first implementation was JSON-only
+> and every call failed with "non-JSON body". What the account actually returns
+> is:
+>
+> ```xml
+> <GetAllSirenDevicesResponse ts="0" dsl="false" s="true">
+>   <AllCameraSirenInfo />
+> </GetAllSirenDevicesResponse>
+> ```
+>
+> i.e. the ordinary MWS XML envelope (`s` success, `ts` TokenStatus, `dsl`
+> DidSeamlesslyLogin, `em` error message) wrapping the same member names. Note
+> `s="true"` with an **empty** `<AllCameraSirenInfo />`: the call succeeded and
+> the answer is "this account has no siren-capable devices" — not a failure, and
+> not something to retry. `GetAllCameraPrivacyModeInfo` answers the same way with
+> an empty `<AllCameraPrivacyModeInfo />`.
+>
+> `mws_client._parse_mws_ack` now dispatches on the body's first byte rather than
+> on Content-Type (this endpoint already serves gzip without announcing it) and
+> normalizes both encodings to one ack shape. Only the empty-container case has
+> been seen live; a populated one is still modelled from the app, so treat
+> non-empty results as unverified. The four WRITE actions have never been
+> invoked, so their encoding is unknown — both paths handle either.
 
 ### Caveats — all still true, and all honoured by the implementation
 
