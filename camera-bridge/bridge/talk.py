@@ -40,6 +40,7 @@ import aiohttp
 
 from . import config as c
 from . import talk_srtp
+from . import metrics
 from . import talk_fullduplex
 from . import talk_webrtc
 from .mobile_auth import MobileSession, mint_if_stale
@@ -72,6 +73,33 @@ class TalkMediaError(Exception):
 
 class TalkMediaTooLarge(TalkMediaError):
     """Fetched/read audio exceeded TALK_MEDIA_MAX_BYTES -- caller maps to 413."""
+
+
+
+def _failure_reason(err: BaseException) -> str:
+    """Short, stable label for a failed talk -- the value that gets counted.
+
+    Deliberately coarse: these are for spotting a pattern ("everything is failing
+    with no_upstream_audio since Tuesday"), not for reconstructing a stack trace,
+    which is what the log is for. Never includes the exception message, which can
+    carry a URL or other detail that does not belong in a counter."""
+    if isinstance(err, TalkMediaTooLarge):
+        return "media_too_large"
+    if isinstance(err, TalkMediaError):
+        return "media_error"
+    if isinstance(err, NoUpstreamAudio):
+        return "no_upstream_audio"
+    if isinstance(err, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(err, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(err, talk_fullduplex.TalkdownError):
+        return "transport_error"
+    if isinstance(err, aiohttp.ClientError):
+        return "network_error"
+    if isinstance(err, RuntimeError):
+        return "upstream_error"
+    return type(err).__name__
 
 
 class TalkManager:
@@ -115,15 +143,31 @@ class TalkManager:
         # suspend, so this check-then-acquire cannot interleave two callers -- a
         # second concurrent trigger sees it locked and is rejected immediately.
         if cam_lock.locked():
+            metrics.talk.rejected_in_progress(camera_id)
             raise TalkInProgress(camera_id)
 
         async with cam_lock:
             stop_event = asyncio.Event()
             self._stop_events[camera_id] = stop_event
+            # Outcome accounting for /control/metrics. A talkdown failure is
+            # otherwise invisible after the fact: it surfaces as one HTTP error to
+            # whoever asked and nothing keeps score, so "has this been failing all
+            # week?" needs a log grep. Recorded here, at the single entry point,
+            # so every transport and every failure mode is counted the same way.
+            metrics.talk.attempt()
+            started = time.monotonic()
             try:
-                return await self._speak_locked(
+                result = await self._speak_locked(
                     camera_id, stop_event, audio_url=audio_url,
                     audio_path=audio_path, codec=codec, audio_filter=audio_filter)
+            except BaseException as err:
+                metrics.talk.failure(camera_id, _failure_reason(err),
+                                     wall_s=time.monotonic() - started)
+                raise
+            else:
+                metrics.talk.success(camera_id, wall_s=time.monotonic() - started,
+                                     result=result if isinstance(result, dict) else None)
+                return result
             finally:
                 self._stop_events.pop(camera_id, None)
 
@@ -409,6 +453,7 @@ class TalkManager:
                 f"StartFullDuplex failed: token_status={ack.get('token_status')} "
                 f"success={ack.get('success')} error={ack.get('error')!r}")
 
+        metrics.talk.endpoint_used(kind)
         log.info("talkdown: full-duplex armed for %s via %s endpoint",
                  doorbell.get("global_device_id"), kind)
         # Codec: prefer the configured/ requested one (L16 by default) and fall

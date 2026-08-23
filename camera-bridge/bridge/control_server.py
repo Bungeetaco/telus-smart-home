@@ -76,6 +76,13 @@ Contract (as implemented -- this is what callers must match):
       404 {"error": "unknown_camera"} if camera_id isn't in camera_registry.
       502 {"error": "telus_error"} if the TELUS-side fetch itself fails.
 
+    GET http://127.0.0.1:<CONTROL_PORT>/control/metrics
+
+    Talkdown counters: attempts, succeeded/stopped/failed, failures by reason,
+    endpoint and codec usage, renegotiations, seconds of audio played, and the
+    last 20 talks. In-memory, reset on restart. /control/status carries a short
+    summary of the same data.
+
     POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/talk
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
     Content-Type: application/json
@@ -208,6 +215,7 @@ APP_CURRENT_SECRET = web.AppKey("current_secret", dict)
 APP_SECRET_ROTATION_TASK = web.AppKey("secret_rotation_task", asyncio.Task)
 
 from . import config as c
+from . import metrics
 from . import talk as talk_mod
 from . import talk_fullduplex
 from .telus_auth import relogin_if_stale
@@ -346,7 +354,18 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     async def handle_status(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
             return err
-        return web.json_response({"cameras": camera_status})
+        # "talk" is a small summary; the full counters live at /control/metrics.
+        return web.json_response({"cameras": camera_status,
+                                  "talk": metrics.talk.summary()})
+
+    async def handle_metrics(request: web.Request) -> web.Response:
+        """Counters for the talkdown path: attempts, outcomes, failure reasons,
+        durations, and a rolling window of recent talks. In-memory only -- they
+        reset with the bridge, which is what makes them cheap and what makes the
+        log the durable record."""
+        if (err := _check_auth(request)) is not None:
+            return err
+        return web.json_response({"talk": metrics.talk.snapshot()})
 
     async def handle_snapshot(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
@@ -618,6 +637,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_get("/control/health", handle_health)
     app.router.add_get("/control/cameras", handle_cameras)
     app.router.add_get("/control/status", handle_status)
+    app.router.add_get("/control/metrics", handle_metrics)
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
     app.router.add_post("/control/cameras/{camera_id}/talk", handle_talk)
     app.router.add_post("/control/cameras/{camera_id}/talk/stop", handle_talk_stop)

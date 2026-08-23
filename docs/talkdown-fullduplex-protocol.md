@@ -402,7 +402,15 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   in CI, covering talkdown session renegotiation. Still wanted: for the transport (`_Digest` header correctness,
   schedule-based pacing, prebuffer) and for `parse_doorbell_camera_list` (the
   parser was verified ad hoc against a capture but no test is committed).
-- **E15 Metrics** -- emit talk success/failure counts + durations for observability.
+- **E15 (DONE 2026-08-23) Metrics** -- `GET /control/metrics` exposes talkdown
+  attempts, succeeded/stopped/failed/rejected, failures by stable reason label,
+  endpoint and codec usage, renegotiations, seconds of audio actually played,
+  and the last 20 talks; `/control/status` carries a summary. In-memory (reset
+  on restart) and recorded at the single `speak()` entry point, so every
+  transport and failure mode is counted identically. Reason labels never carry
+  exception text (a URL or token could ride along) -- asserted by a test.
+  Follow-up **E15b**: surface these as Home Assistant sensors, so a failing
+  talkdown can drive a notification instead of needing a curl.
 
 ### Dependency-driven (from the 2026-08 aiortc 1.15 / aiohttp 3.14 upgrade)
 - **E21 (DONE 2026-08-23) Replaced the hand-rolled HTTP Digest with aiohttp's `DigestAuthMiddleware`.**

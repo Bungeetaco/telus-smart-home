@@ -65,6 +65,7 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/status` | bearer | Live per-camera pipeline diagnostics |
 | GET | `/control/cameras` | bearer | In-memory camera registry (metadata) |
 | GET | `/control/cameras/{camera_id}/snapshot` | bearer | Fresh on-demand JPEG still |
+| GET | `/control/metrics` | bearer | Talkdown counters: outcomes, failure reasons, durations |
 | POST | `/control/cameras/{camera_id}/talk` | bearer | Play audio through the camera speaker (talkdown) |
 | POST | `/control/cameras/{camera_id}/talk/stop` | bearer | Stop the talk currently playing on that camera |
 | GET | `/control/events` | bearer | Recent camera video-clip events |
@@ -150,6 +151,56 @@ curl -s -H "Authorization: Bearer $SECRET" $BASE/control/status
 ```
 
 ---
+
+## `GET /control/metrics`
+
+Counters for the talkdown path. A failed talk otherwise leaves no trace beyond
+one HTTP error to whoever asked, which makes "has this been failing all week?" a
+log-grep question; these answer it directly.
+
+```bash
+curl -s -H "Authorization: Bearer $SECRET" $BASE/control/metrics
+```
+
+```json
+{
+  "talk": {
+    "uptime_seconds": 52.5,
+    "attempts": 3,
+    "succeeded": 1,
+    "stopped": 1,
+    "failed": 1,
+    "rejected_in_progress": 1,
+    "failures_by_reason": {"media_error": 1},
+    "by_endpoint": {"direct": 2},
+    "by_codec": {"mulaw": 2},
+    "renegotiations": 0,
+    "audio_seconds_played": 8.3,
+    "talk_seconds": 7.9,
+    "last_failure_reason": "media_error",
+    "recent": [{"at": 1787500402.7, "camera_id": "<unit-id>-<did>",
+                "outcome": "ok", "wall_seconds": 4.89, "played_seconds": 5.0}]
+  }
+}
+```
+
+Notes:
+
+- **In-memory only.** They reset when the bridge restarts, which is what keeps
+  them free; the log remains the durable record.
+- `attempts` counts talks that actually started. A request refused because one was
+  already running is counted separately as `rejected_in_progress`, not as an
+  attempt.
+- `audio_seconds_played` is audio actually pushed to a speaker, so a clip stopped
+  early contributes what it played, not its full length.
+- `failures_by_reason` uses stable labels (`media_error`, `media_too_large`,
+  `no_upstream_audio`, `timeout`, `transport_error`, `network_error`,
+  `upstream_error`, `cancelled`) — never exception text, which could carry a URL
+  or token.
+- `recent` is the last 20 talks, oldest first.
+- `GET /control/status` carries a short summary of the same data alongside the
+  camera states.
+
 
 ## `GET /control/cameras`
 
