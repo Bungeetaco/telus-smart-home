@@ -21,6 +21,8 @@ Scenarios:
                 so callers that don't opt in see no behaviour change.
   4. stop     -- setting the stop event mid-clip ends the stream promptly, at a
                 chunk boundary, reporting partial stats rather than raising.
+  5. conditioning -- the shared small-speaker filter applies (and is skippable),
+                which is what lets every transport get identical treatment.
 """
 import asyncio
 import hashlib
@@ -229,11 +231,34 @@ async def test_stop(tmp):
         await runner.cleanup()
 
 
+async def test_conditioning(tmp):
+    """condition_audio() applies the filter, and "" opts out byte-for-byte."""
+    src = await _make_clip(f"{tmp}/cond.wav", seconds=2)
+    raw = open(src, "rb").read()
+
+    untouched = await tf.condition_audio(raw, "")
+    assert untouched is raw or untouched == raw, "empty filter must not alter the clip"
+
+    quieter = await tf.condition_audio(raw, "volume=-6dB")
+    assert quieter != raw, "an explicit filter should change the audio"
+    assert quieter[:4] == b"RIFF", "conditioned output should be a WAV the transports can decode"
+
+    default = await tf.condition_audio(raw)          # None -> config.TALK_AUDIO_FILTER
+    if (c.TALK_AUDIO_FILTER or "").strip():
+        assert default != raw, "the configured chain should change the audio"
+        assert default[:4] == b"RIFF"
+        print(f"  ok  conditioning: default chain applied ({len(raw)} -> {len(default)} bytes), "
+              'explicit filter applied, "" opts out unchanged')
+    else:
+        print("  ok  conditioning: explicit filter applied; default chain is disabled by config")
+
+
 async def main():
     import tempfile
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
-        for test in (test_resume, test_bounded_and_opt_in, test_stop):
+        for test in (test_resume, test_bounded_and_opt_in, test_stop,
+                     test_conditioning):
             try:
                 await test(tmp)
             except AssertionError as exc:

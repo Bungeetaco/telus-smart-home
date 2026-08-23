@@ -283,10 +283,13 @@ full-range music produced. Applied to EVERY clip on the doorbell (full-duplex)
 path regardless of source/format/URL (runs inside the encode step). Per-request
 control on `POST /control/cameras/{id}/talk`: `"conditioning": false` disables
 it, or `"audio_filter": "<ffmpeg -af chain>"` overrides it; omitted = the
-config default. Remaining (minor): **E19** the webrtc/srtp fallback path (other
-ADC cameras) does NOT yet apply the filter -- apply it there too so ALL talk
-audio is conditioned regardless of path; **E20** the tuned chain is
-VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
+config default. **E19 is DONE (2026-08-23)**: the webrtc/srtp fallback path now
+conditions the clip too, so every talk path gets identical treatment. It is
+applied once in `talk._run_talk` via the shared `talk_fullduplex.condition_audio()`
+helper -- the full-duplex path still folds the filter into its own encode pass,
+and neither unverified transport module had to be touched. Remaining: **E20**
+the tuned chain is VDB750-speaker-specific -- another device may want different
+cutoffs/levels, which is what the per-request `audio_filter` override is for.
 
 - **E1 (DONE 2026-08-23) Session renegotiation -- long-duration + resilient streaming.**
   The PutAudioStream URL, port and password are per-session, so a long clip or a

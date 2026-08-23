@@ -26,6 +26,7 @@ Nothing here logs secrets (Digest password, tokens) -- only non-sensitive shape.
 """
 import asyncio
 import logging
+import os
 import time
 from urllib.parse import urlsplit
 
@@ -94,6 +95,55 @@ class _DeadlineExceeded(TalkdownError):
     """Safety deadline hit. Never retried/renegotiated -- it means the whole talk
     has run too long, not that this session went bad."""
 
+
+
+async def condition_audio(data: bytes, audio_filter: str | None = None) -> bytes:
+    """Apply the small-speaker conditioning chain to an audio clip, as bytes.
+
+    The full-duplex path conditions inside its own encode step (`_encode`), where
+    the filter runs as part of the single ffmpeg pass that also produces mu-law.
+    The webrtc/srtp transports decode the clip themselves, so they need the same
+    treatment applied up front -- that is what this is for (see talk._run_talk).
+    Keeping it here means one definition of "conditioned audio" for every path.
+
+    audio_filter: None -> config.TALK_AUDIO_FILTER; "" -> no conditioning (the
+    bytes are returned untouched, without spawning ffmpeg); any string -> that
+    chain. Output is WAV; the transports re-decode it anyway.
+
+    NOTE: the default chain is tuned for the ADC-VDB750's small speaker (see the
+    E20 backlog item) -- another device may want different cutoffs, which is what
+    the per-request override is for.
+    """
+    af = c.TALK_AUDIO_FILTER if audio_filter is None else audio_filter
+    af = (af or "").strip()
+    if not af or not data:
+        return data
+
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="talkcond-") as tmp:
+        src = os.path.join(tmp, "in")
+        dst = os.path.join(tmp, "out.wav")
+        # Temp files rather than pipes: a WAV written to a non-seekable pipe gets
+        # placeholder sizes in its header, which some decoders handle poorly.
+        with open(src, "wb") as f:
+            f.write(data)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src,
+            "-vn", "-af", af, "-f", "wav", dst,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(),
+                                            timeout=c.TALK_MEDIA_FETCH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise TalkdownError("ffmpeg audio conditioning timed out")
+        if proc.returncode != 0:
+            raise TalkdownError(f"ffmpeg audio conditioning failed: {(err or b'')[:200]!r}")
+        with open(dst, "rb") as f:
+            out = f.read()
+    if not out:
+        raise TalkdownError("ffmpeg audio conditioning produced no audio")
+    return out
 
 async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                           username: str = DIGEST_USER, codec: str = DEFAULT_CODEC,

@@ -165,7 +165,7 @@ class TalkManager:
                     audio_filter=audio_filter, stop_event=stop_event)
         endpoint = await self._resolve_endpoint(camera_id)
         return await asyncio.wait_for(
-            self._run_talk(endpoint, audio_bytes),
+            self._run_talk(endpoint, audio_bytes, audio_filter=audio_filter),
             timeout=c.TALK_SESSION_TIMEOUT_S,
         )
 
@@ -509,10 +509,18 @@ class TalkManager:
                 _unlink_quiet(tmp_path)
 
     # ---- transport ----------------------------------------------------------
-    async def _run_talk(self, endpoint: dict, audio_bytes: bytes) -> dict:
+    async def _run_talk(self, endpoint: dict, audio_bytes: bytes, *,
+                        audio_filter: str | None = None) -> dict:
         """Dispatch to the WebRTC or SRTP client. Both tear themselves down on
         every exit path (normal, error, and the CancelledError a wait_for timeout
-        raises); the SRTP temp file is removed in a finally regardless."""
+        raises); the SRTP temp file is removed in a finally regardless.
+
+        The clip is conditioned here so EVERY talk path gets the same treatment:
+        the full-duplex transport folds the filter into its own encode step, but
+        these two decode the clip themselves, so without this they would push raw
+        full-range audio at a small speaker and clip exactly as the doorbell did
+        before conditioning existed."""
+        audio_bytes = await talk_fullduplex.condition_audio(audio_bytes, audio_filter)
         if endpoint["type"] == "webrtc":
             talk = talk_webrtc.ADCTalkdown(
                 endpoint["signaling_server_url"],
