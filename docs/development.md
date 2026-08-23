@@ -16,9 +16,13 @@ Bump the version on **every** user-visible change — this is easy to forget, so
 
 | Change | Bump |
 | --- | --- |
-| Bug fix, no behavior change | PATCH — `x.y.Z` |
-| New backward-compatible feature (e.g. two-way audio) | MINOR — `x.Y.0` |
+| **Minor change** — bug fix, tuning, tests, docs, internal cleanup, a small addition nobody has to think about | **PATCH** — `x.y.Z` |
+| **Major change** — a new capability, a changed default, anything a user would notice or have to react to | **MINOR** — `x.Y.0` |
 | Breaking change (config/entity removal, incompatible behavior) | MAJOR — `X.0.0` |
+
+Bias towards the patch position. A minor bump (`x.Y.0`) is for changes worth
+announcing — two-way audio, the stop service, talkdown switching on by default —
+not for everything that happens to add a line of code.
 
 Release steps:
 

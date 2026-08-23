@@ -38,14 +38,17 @@ log = logging.getLogger(__name__)
 
 # All doorbell talk audio is 8 kHz mono. CHUNK_MS of audio is streamed per PUT.
 SAMPLE_RATE = 8000
-CHUNK_MS = 40
+# Wire tuning lives in config so it is documented alongside the other knobs
+# (see config.TALK_CHUNK_MS / TALK_PREBUFFER_MS); referenced here under the
+# short names the transport logic reads.
+CHUNK_MS = c.TALK_CHUNK_MS
 DIGEST_USER = "vieweruser"
 # How often to log progress during a long talk (seconds of wall clock).
 PROGRESS_LOG_S = 15
 # Stay this far ahead of real time so the doorbell always has a jitter buffer.
 # Delivering chunks exactly at playback time underruns into choppy gaps; a small
 # constant lead keeps playback continuous.
-PREBUFFER_MS = 500
+PREBUFFER_MS = c.TALK_PREBUFFER_MS
 
 # Per-codec transport spec. bytes_per_s = SAMPLE_RATE * bytes-per-sample; ``fmt``
 # is the ffmpeg raw output format (L16/RTP is big-endian -> s16be).

@@ -41,7 +41,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   `docs/` side. If a change adds a knob, it belongs in `docs/configuration.md`; a
   new failure mode belongs in `docs/troubleshooting.md`; a deferred idea belongs
   in the enhancement backlog rather than being dropped.
-- **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`. Bump it on every user-visible change (semver) and add a matching `git tag vX.Y.Z`. Details in `docs/development.md`.
+- **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes** — fixes, tuning, tests, docs, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes** — a new capability, a changed default, anything a user would notice or react to. Bias towards patch. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)
 
