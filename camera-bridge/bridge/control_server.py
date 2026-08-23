@@ -76,6 +76,29 @@ Contract (as implemented -- this is what callers must match):
       404 {"error": "unknown_camera"} if camera_id isn't in camera_registry.
       502 {"error": "telus_error"} if the TELUS-side fetch itself fails.
 
+    POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/talk
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+    Content-Type: application/json
+    Body: {"audio_url": "<http(s) url the bridge fetches>"}   and/or
+          {"audio_path": "<path readable by the bridge>"}
+      Play a short audio clip (typically HA-rendered TTS) through the camera's
+      speaker via two-way audio (talkdown). audio_url wins if both are given.
+      Off by default: returns 403 until config.TALKDOWN_ENABLED is set, so the
+      route ships inert. Single in-flight talk per camera -- a concurrent
+      trigger for the same camera is rejected (409), never queued. See talk.py.
+
+    Responses:
+      200 {"status": "spoken", "path": "webrtc"|"srtp"}
+      400 {"error": "malformed"}          -- bad JSON / neither audio field / bad audio
+      401 {"error": "bad_secret"}         -- Authorization missing/wrong
+      403 {"error": "talkdown_disabled"}  -- config.TALKDOWN_ENABLED is false
+      404 {"error": "unknown_camera"}     -- camera_id not in camera_registry
+      409 {"error": "talk_in_progress"}   -- a talk is already in flight for THIS camera
+      413 {"error": "media_too_large"}    -- fetched/read audio exceeded the cap
+      422 {"error": "no_upstream_audio"}  -- no webrtc/srtp upstream-audio endpoint
+      502 {"error": "telus_error"}        -- MWS auth / stream lookup / signaling failed
+      504 {"error": "talk_timeout"}       -- session exceeded TALK_SESSION_TIMEOUT_S
+
     GET http://127.0.0.1:<CONTROL_PORT>/control/events?limit=<N>
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
 
@@ -173,6 +196,7 @@ import aiohttp
 from aiohttp import web
 
 from . import config as c
+from . import talk as talk_mod
 from .telus_auth import relogin_if_stale
 from .telus_rest import (
     get_snapshot_url,
@@ -265,7 +289,7 @@ async def _rotate_secret_periodically(current_secret: dict) -> None:
                   c.CONTROL_SECRET_ROTATE_INTERVAL_S)
 
 
-def create_app(telus_session, login_lock, camera_registry: dict, camera_status: dict, lifecycle) -> web.Application:
+def create_app(telus_session, login_lock, camera_registry: dict, camera_status: dict, lifecycle, talk_manager=None) -> web.Application:
     # Held in a dict (not a bare local) so _rotate_secret_periodically can
     # update it in place and every closure below sees the new value -- a bare
     # `secret = ...` reassignment elsewhere wouldn't be visible to these
@@ -329,6 +353,61 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             return web.json_response({"error": "telus_error"}, status=502)
 
         return web.Response(body=jpeg_bytes, content_type="image/jpeg")
+
+    async def handle_talk(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+
+        # Off by default -- the wiring ships inert until someone opts in, so a
+        # deployed-but-unconfigured talk path can never be triggered.
+        if not c.TALKDOWN_ENABLED:
+            return web.json_response({"error": "talkdown_disabled"}, status=403)
+        if talk_manager is None:
+            # Enabled but not constructed (shouldn't happen -- main.py builds it
+            # whenever the flag is on); fail safe rather than 500.
+            return web.json_response({"error": "talkdown_disabled"}, status=403)
+
+        camera_id = request.match_info["camera_id"]
+        if camera_id not in camera_registry:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        try:
+            body = await request.json()
+            audio_url = (body.get("audio_url") or "").strip()
+            audio_path = (body.get("audio_path") or "").strip()
+        except Exception:
+            log.warning("Control endpoint: malformed talk request for %s", camera_id,
+                        exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+
+        if not audio_url and not audio_path:
+            return web.json_response({"error": "malformed"}, status=400)
+        if audio_url and not audio_url.startswith(("http://", "https://")):
+            return web.json_response({"error": "malformed"}, status=400)
+
+        try:
+            result = await talk_manager.speak(
+                camera_id,
+                audio_url=audio_url or None,
+                audio_path=audio_path or None,
+            )
+        except talk_mod.TalkInProgress:
+            return web.json_response({"error": "talk_in_progress"}, status=409)
+        except talk_mod.TalkMediaTooLarge:
+            return web.json_response({"error": "media_too_large"}, status=413)
+        except talk_mod.TalkMediaError:
+            log.warning("Control endpoint: bad talk audio for %s", camera_id, exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        except talk_mod.NoUpstreamAudio:
+            return web.json_response({"error": "no_upstream_audio"}, status=422)
+        except asyncio.TimeoutError:
+            log.warning("Control endpoint: talk timed out for %s", camera_id)
+            return web.json_response({"error": "talk_timeout"}, status=504)
+        except Exception:
+            log.exception("Control endpoint: talk failed for %s", camera_id)
+            return web.json_response({"error": "telus_error"}, status=502)
+
+        return web.json_response({"status": "spoken", **result})
 
     async def handle_events(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
@@ -487,6 +566,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_get("/control/cameras", handle_cameras)
     app.router.add_get("/control/status", handle_status)
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
+    app.router.add_post("/control/cameras/{camera_id}/talk", handle_talk)
     app.router.add_get("/control/events", handle_events)
     app.router.add_get("/control/clip/{video_event_id}", handle_clip)
     app.router.add_get("/control/automations", handle_automations)
@@ -499,9 +579,11 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
 
 async def start_control_server(
-    telus_session, login_lock, camera_registry: dict, camera_status: dict, lifecycle
+    telus_session, login_lock, camera_registry: dict, camera_status: dict, lifecycle,
+    talk_manager=None,
 ) -> web.AppRunner:
-    app = create_app(telus_session, login_lock, camera_registry, camera_status, lifecycle)
+    app = create_app(telus_session, login_lock, camera_registry, camera_status, lifecycle,
+                     talk_manager)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, c.CONTROL_HOST, c.CONTROL_PORT)

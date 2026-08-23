@@ -12,6 +12,8 @@ from .telus_auth import RateLimited, TelusSession, relogin_if_stale
 from .telus_rest import list_cameras, get_video_source
 from .camera_session import run_camera_forever
 from .lifecycle import CameraLifecycleManager
+from .mobile_auth import MobileSession
+from .talk import TalkManager
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                      format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -273,8 +275,19 @@ async def main():
                 lambda t, cid: get_video_source_with_relogin(t, cid, login_lock),
                 camera_status))
 
+        # Talkdown (two-way audio) manager, handed to the control server the same
+        # way `lifecycle` is. Constructed only when the feature is enabled so it
+        # ships inert. It reuses the SAME login_lock as telus_auth (threaded
+        # through, not re-created) so a website re-login and a mobile MWS re-mint
+        # can never interleave, and drives a MobileSession minted off this same
+        # website session. See talk.py / mobile_auth.py.
+        talk_manager = None
+        if c.TALKDOWN_ENABLED:
+            talk_manager = TalkManager(telus, MobileSession(telus), login_lock)
+            log.info("Talkdown enabled: POST /control/cameras/{id}/talk is armed")
+
         control_runner = await control_server.start_control_server(
-            telus, login_lock, camera_registry, camera_status, lifecycle
+            telus, login_lock, camera_registry, camera_status, lifecycle, talk_manager
         )
         try:
             # First discovery pass runs synchronously so /control/cameras is

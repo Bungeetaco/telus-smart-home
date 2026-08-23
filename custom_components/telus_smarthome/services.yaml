@@ -1,0 +1,51 @@
+speak:
+  name: Speak through camera
+  description: >-
+    Play a spoken phrase (or an arbitrary audio clip) through a TELUS camera's
+    speaker via two-way audio (talkdown). Only doorbell-class cameras with an
+    upstream-audio path support this, and the camera bridge must have talkdown
+    enabled (TALKDOWN_ENABLED). If no target is given, the doorbell is used.
+  fields:
+    entity_id:
+      name: Camera
+      description: Target TELUS camera entity. Defaults to the doorbell if omitted.
+      required: false
+      selector:
+        entity:
+          integration: telus_smarthome
+          domain: camera
+    message:
+      name: Message
+      description: >-
+        Text to speak. Rendered to audio by Home Assistant's TTS engine (see
+        `engine`), then handed to the camera bridge to play. Mutually exclusive
+        with `media_content_id`.
+      required: false
+      example: "Hi, you are being recorded."
+      selector:
+        text:
+    media_content_id:
+      name: Media content id
+      description: >-
+        A media-source URI (e.g. media-source://tts/... or a media file) or a
+        direct http(s) URL to play instead of `message`. Mutually exclusive with
+        `message`.
+      required: false
+      example: "media-source://tts/google_translate?message=Hello"
+      selector:
+        text:
+    engine:
+      name: TTS engine
+      description: >-
+        TTS entity used to render `message`. Defaults to the first available TTS
+        engine (e.g. tts.google_translate or Nabu Casa cloud).
+      required: false
+      selector:
+        entity:
+          domain: tts
+    language:
+      name: Language
+      description: Language code passed to the TTS engine when rendering `message`.
+      required: false
+      selector:
+        text:

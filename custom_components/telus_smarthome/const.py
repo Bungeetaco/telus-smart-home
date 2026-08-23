@@ -148,6 +148,17 @@ CAMERA_BRIDGE_CAMERAS_URL = "http://127.0.0.1:8199/control/cameras"
 # still is actually requested, not on a poll interval.
 CAMERA_BRIDGE_SNAPSHOT_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{camera_id}/snapshot"
 
+# Talkdown: play a spoken phrase (or an arbitrary audio clip) through one
+# camera's speaker via the bridge's two-way-audio endpoint -- {camera_id} is
+# str.format()'d in. POST; body is JSON {"audio_url": ...} (HA renders TTS to a
+# loopback media-source URL and hands it to the bridge to fetch). Off by default
+# on the bridge side (config.TALKDOWN_ENABLED) -- returns 403 until enabled. See
+# camera-bridge/bridge/control_server.py for the response shape and speak_service.py.
+CAMERA_BRIDGE_TALK_URL_TEMPLATE = "http://127.0.0.1:8199/control/cameras/{camera_id}/talk"
+
+# telus_smarthome.speak service name (registered in __init__.py via speak_service.py).
+SERVICE_SPEAK = "speak"
+
 # Recent video clip events across all cameras -- see
 # camera-bridge/bridge/control_server.py for the response shape.
 CAMERA_BRIDGE_EVENTS_URL = "http://127.0.0.1:8199/control/events"

@@ -3,3 +3,4 @@ av==16.1.0
 aiohttp==3.11.11
 websockets==14.1
 numpy==2.2.1
+pylibsrtp>=0.10.0

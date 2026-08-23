@@ -46,6 +46,7 @@ from .const import (
 )
 from .controller import AlarmIntegrationController
 from .event import ActivityHistoryCoordinator
+from .speak_service import async_register_speak_service, async_remove_speak_service
 
 LOGGER = logging.getLogger(__name__)
 
@@ -246,6 +247,11 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # Create real devices
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
+    # Register the talkdown service (telus_smarthome.speak). Once per HA run and
+    # guarded by has_service inside -- reloads land here again but re-registration
+    # is a no-op, same spirit as the clip_view "once per HA run" guard above.
+    async_register_speak_service(hass)
+
     async def handle_telus_smarthome_debug_request_event(event: Event) -> None:
         """Dump debug data when requested via Home Assistant event."""
 
@@ -408,5 +414,12 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
     unload_ok: bool = await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
     if unload_ok:
         LOGGER.debug("%s: Unloaded Alarm.com config entry.", __name__)
+
+    # Remove the shared speak service once no config entries remain.
+    # "clip_view_registered" is a per-HA-run sentinel, not an entry, so exclude it
+    # when deciding whether this was the last entry.
+    remaining_entries = [key for key in hass.data.get(DOMAIN, {}) if key != "clip_view_registered"]
+    if not remaining_entries:
+        async_remove_speak_service(hass)
 
     return unload_ok

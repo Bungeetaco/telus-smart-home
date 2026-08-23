@@ -56,6 +56,16 @@ SHARED_DIR = "/shared"
 CONTROL_SECRET_PATH = f"{SHARED_DIR}/control_secret"
 CREDENTIALS_FALLBACK_PATH = f"{SHARED_DIR}/credentials.json"
 CREDENTIALS_FALLBACK_POLL_S = 30
+
+# Persisted state for mobile_auth.MobileSession, on the same /shared bind mount
+# as the credentials fallback above (survives a container recreate). Holds two
+# things minted off the website session: a stable synthetic MobileDeviceUid --
+# generated once so every restart does not register a fresh alarm.com "device" --
+# and the rolling SeamlessLoginToken (slt) from the last MWS login, so a restart
+# does a single silent SeamlessLoginNew POST instead of the full Cloudflare-fronted
+# SSO -> LoginAsLogin bootstrap. Never holds the SessionToken itself (short-lived,
+# always re-minted in memory). See mobile_auth.py.
+MOBILE_AUTH_STATE_PATH = f"{SHARED_DIR}/mobile_auth.json"
 # The control secret previously never rotated automatically (manual only --
 # delete the file and restart). HA always reads it fresh off disk per-request
 # (bridge_client.py has no in-memory caching on that side), so an in-place
@@ -219,3 +229,37 @@ JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side;
 # response -- only additions are acted on, to avoid killing a working stream
 # over a transient API hiccup.
 CAMERA_DISCOVERY_INTERVAL_S = 300
+
+
+# --- Talkdown (two-way audio to the doorbell speaker) -----------------------
+# On-demand, user-triggered talk path (POST /control/cameras/{id}/talk). It uses
+# the legacy MOBILE MWS XML API (mobile.alarm.com) authed with an MWS SessionToken
+# minted off the same website session (mobile_auth.py) -- the website video path
+# is audio-less for the doorbell. This is NOT part of the always-warm pipelines
+# and is deliberately excluded from restart_guard: a failed talk fails one request
+# and never exits the process. The persisted mobile device-uid + rolling slt live
+# in MOBILE_AUTH_STATE_PATH (defined above with the other /shared paths).
+#
+# Inert until explicitly enabled: the endpoint returns 403 while this is false, so
+# shipping the wiring does not arm two-way audio until someone opts in (set env
+# TALKDOWN_ENABLED=true, or edit here).
+TALKDOWN_ENABLED = os.environ.get("TALKDOWN_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on")
+# Prefer the <webrtc> endpoint (aiortc, clean sendrecv Opus) over <srtp> (ffmpeg).
+TALK_PREFER_WEBRTC = True
+# Bound on GetLiveVideoStream so a wedged MWS call fails the one request instead
+# of pinning the per-camera talk lock.
+TALK_STREAM_LOOKUP_TIMEOUT_S = 20
+# Hard ceiling on a whole talk session (endpoint handshake + clip playback +
+# teardown). Comfortably above talk_webrtc's own SESSION_CONNECT_TIMEOUT_S (25s)
+# plus a short phrase; on overrun the session is cancelled and torn down.
+TALK_SESSION_TIMEOUT_S = 60
+# Inner ceiling handed to the SRTP (ffmpeg) client, kept under the session ceiling
+# above so ffmpeg's own teardown runs before the outer wait_for would cancel it.
+TALK_SRTP_TIMEOUT_S = 45
+# Fetching a media_url (a loopback HA TTS / media-source URL): a small clip is
+# quick, so a tight timeout keeps a slow/hung source from stalling the talk.
+TALK_MEDIA_FETCH_TIMEOUT_S = 10
+# Hard cap on fetched/read audio. A 10-30s TTS clip is well under this; the cap is
+# enforced while streaming so an oversize body is never buffered whole.
+TALK_MEDIA_MAX_BYTES = 8 * 1024 * 1024
