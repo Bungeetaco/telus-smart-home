@@ -190,12 +190,8 @@ _LED_FIELDS: dict[str, _Field] = {
 # that is a per-device availability flag rather than a toggle, and it is checked
 # through _Field.requires. Names and rules read off the portal's own bundle.
 #
-# `notificationFormat` is deliberately NOT here. It is an enum whose members
-# include Unknown, TextOnly and AttachThumbnail, and the module defining their
-# numeric values was not in the capture -- this device reports 0, which could be
-# Unknown just as easily as TextOnly. Writing a guessed enum value to a live
-# device is not worth the convenience; the raw value is still readable through
-# `raw`.
+# `notificationFormat` is handled separately, below: it is an enum rather than a
+# bool, and only SOME of its members may be offered (see _NOTIFICATION_FORMATS).
 _NOTIFICATION_FIELDS: dict[str, _Field] = {
     "motion": _Field("doorbellNotificationSetting", ("isMotionNotificationsOn",),
                      ("panelNotificationEnableDisableFeatureSupport",), "bool",
@@ -206,6 +202,30 @@ _NOTIFICATION_FIELDS: dict[str, _Field] = {
     "smart_chime": _Field("doorbellNotificationSetting",
                           ("isSmartChimeNotificationsOn",),
                           ("smartChimeNotificationEnableDisableFeatureSupport",), "bool"),
+    # Shares the panel-notification capability with motion/button-press: the
+    # portal renders its dropdown inside the card that flag gates.
+    "format": _Field("doorbellNotificationSetting", ("notificationFormat",),
+                     ("panelNotificationEnableDisableFeatureSupport",), "int"),
+}
+
+# VideoNotificationFormat, resolved from the portal's own bundle (webpack module
+# 288086) rather than guessed:
+#
+#     Unknown = -1, TextOnly = 0, AttachVideoClip = 1, AttachThumbnail = 2
+#
+# Only TWO of those are offered here, matching the portal, which builds its
+# dropdown from TextOnly and AttachThumbnail alone. AttachVideoClip is legacy:
+# elsewhere in the same bundle the portal actively rewrites it to AttachThumbnail
+# when it reads one, so offering it would be offering a value alarm.com itself
+# treats as stale. Unknown is a null state, not a choice -- a camera with no
+# doorbell notifications reports it.
+#
+# Labels are the portal's own English strings, so what a user picks here reads
+# the same as what the TELUS website shows them.
+_NOTIFICATION_FORMAT_UNKNOWN = -1
+_NOTIFICATION_FORMATS: dict[int, str] = {
+    0: "Text Only",
+    2: "Attach a Thumbnail",
 }
 
 # --- low-level HTTP ---------------------------------------------------------
@@ -896,12 +916,16 @@ async def set_led_settings(telus: TelusSession, camera_id: str, **fields) -> dic
 
 # --- TELUS-side notifications ------------------------------------------------
 def _parse_notifications(flat: dict) -> dict:
-    """The notification section, plus the read-only format the bridge won't set."""
+    """The notification toggles plus the notification format."""
     parsed = _parse_table(flat, _NOTIFICATION_FIELDS)
     obj = _obj(flat, "doorbellNotificationSetting")
-    # Reported so a caller can SEE what the device is set to, with no setter and
-    # no claim about what the number means (see _NOTIFICATION_FIELDS).
+    # The format rides the same capability as the two panel toggles: the portal
+    # renders its dropdown inside the card that flag gates.
+    parsed["supports_format"] = _supported(
+        obj, ("panelNotificationEnableDisableFeatureSupport",))
     parsed["format"] = _as_int(obj.get("notificationFormat"), None)
+    parsed["format_choices"] = [{"value": value, "label": label}
+                                for value, label in _NOTIFICATION_FORMATS.items()]
     return parsed
 
 
@@ -926,9 +950,10 @@ async def get_notification_settings(telus: TelusSession, camera_id: str) -> dict
 
 async def set_notification_settings(telus: TelusSession, camera_id: str,
                                     **fields) -> dict:
-    """Turn TELUS-side notifications on/off; returns the read shape.
+    """Change TELUS-side notification settings; returns the read shape.
 
-    Accepted keys: ``motion``, ``button_press``, ``smart_chime`` (all bools).
+    Accepted keys: ``motion``, ``button_press``, ``smart_chime`` (bools) and
+    ``format`` (int -- one of the values in ``format_choices``).
 
     Raises CameraSettingsError with ``unsupported=True`` for a toggle this camera
     does not offer -- the reference doorbell reports
@@ -940,6 +965,23 @@ async def set_notification_settings(telus: TelusSession, camera_id: str,
     document, so the status LED and solar-panel objects beside these are resent
     exactly as read.
     """
+    # Checked before _apply_table so the value is refused for being off the list
+    # rather than for being an unknown field, and BEFORE the read-modify-write
+    # touches anything. The device publishes no options for this one -- the
+    # allowed set comes from the portal's enum (see _NOTIFICATION_FORMATS), so it
+    # has to be enforced here or a caller could write Unknown (-1) or the legacy
+    # AttachVideoClip (1) to a live doorbell.
+    if "format" in fields:
+        value = fields["format"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise CameraSettingsError("format takes an integer", field="format")
+        if value not in _NOTIFICATION_FORMATS:
+            offered = ", ".join(f"{v} ({label})"
+                                for v, label in _NOTIFICATION_FORMATS.items())
+            raise CameraSettingsError(
+                f"format={value} is not one of the notification formats this "
+                f"integration offers ({offered})", field="format")
+
     url = _GENERAL_URL.format(base=c.TELUS_BASE, cid=camera_id)
     flat = await _apply_table(telus, url, _NOTIFICATION_FIELDS, fields, "notification")
     return _parse_notifications(flat)

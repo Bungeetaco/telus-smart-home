@@ -612,7 +612,12 @@ which makes it the heaviest read here; the Home Assistant side polls it every
     "button_press": true,
     "supports_smart_chime": false,
     "smart_chime": false,
+    "supports_format": true,
     "format": 0,
+    "format_choices": [
+      {"value": 0, "label": "Text Only"},
+      {"value": 2, "label": "Attach a Thumbnail"}
+    ],
     "raw": {}
   },
   "siren": {
@@ -742,7 +747,9 @@ bundle fetches it once and splits it into the two sections.
 | `button_press` | bool | Notify when the doorbell button is pressed |
 | `supports_smart_chime` | bool | `false` on the reference doorbell |
 | `smart_chime` | bool | Notify an alarm.com Smart Chime |
-| `format` | int \| null | **Read-only** — see below |
+| `supports_format` | bool | Whether the notification format may be set. Shares the panel-notification capability with motion and button-press |
+| `format` | int \| null | The current notification format. `null` when the camera reports none |
+| `format_choices` | list | `{"value": int, "label": str}` for each format that may be written — always present, see below |
 | `raw` | object | The untouched `doorbellNotificationSetting` document |
 
 **The three `supports_*` booleans are not one upstream flag each**, which is the
@@ -758,17 +765,35 @@ use them and don't re-derive the rules.
 A camera that is not a doorbell reports every flag false and gets no controls at
 all. That is the expected answer, not a failure.
 
-#### Why `format` has no write
+#### The notification format, and why only two of its four values are offered
 
-`notificationFormat` selects between a text-only notification and one with a
-thumbnail attached. It is reported here and **cannot be set**, because nothing
-available defines its numeric values: the enum's members (`Unknown`, `TextOnly`,
-`AttachThumbnail`) appear in the web portal's bundle but the module assigning
-them numbers was not in the capture, and the Android app does not implement the
-feature at all. The reference doorbell reports `0` and a non-doorbell camera
-reports `-1`, which *suggests* `-1` is `Unknown` — suggestive is not good enough
-to write a guessed enum value to someone's device. Send `format` to the write
-route and it is a `400`, like any unknown field.
+`notificationFormat` selects how much TELUS puts in a push notification. The
+upstream enum is:
+
+| Value | Member | Offered? |
+| --- | --- | --- |
+| `-1` | `Unknown` | No — a null state, reported by a camera with no doorbell notifications |
+| `0` | `TextOnly` | **Yes** — "Text Only" |
+| `1` | `AttachVideoClip` | No — legacy, see below |
+| `2` | `AttachThumbnail` | **Yes** — "Attach a Thumbnail" |
+
+Those numbers are not inferred. They were read out of the alarm.com web portal's
+own JavaScript (webpack module `288086`), which is a public static asset — no
+account, no session and no capture of a logged-in page was involved. The labels
+are the portal's own English strings, so what a caller displays matches what the
+TELUS website shows.
+
+**`AttachVideoClip` is deliberately withheld.** The portal builds its own
+dropdown from `TextOnly` and `AttachThumbnail` alone, and elsewhere in the same
+bundle it rewrites `AttachVideoClip` to `AttachThumbnail` whenever it reads one —
+so it is a value alarm.com itself treats as stale. `Unknown` is a state, not a
+choice.
+
+The device publishes no option list for this field, so **the allowed set is
+enforced by this bridge or by nothing**: `camera_settings` refuses anything
+outside `format_choices` before the read-modify-write touches the document.
+`format_choices` is a constant rather than an upstream read, so unlike
+`chime_type_choices` it is always present when the feature is supported.
 
 ### The `siren` and `privacy` sections — a fixed contract
 
@@ -1005,9 +1030,9 @@ optional and independent — send only what you want changed.
 | `motion` | bool | no | Gated on `supports_motion` |
 | `button_press` | bool | no | Gated on `supports_button_press` |
 | `smart_chime` | bool | no | Gated on `supports_smart_chime`, `false` on the reference doorbell — a `422` there |
+| `format` | int | no | Must be one of the values in `format_choices` (`0` or `2`). Anything else — including the upstream enum's other two members, `-1` and `1` — is a **`400 malformed`**: the field is supported, the value just is not offered. Gated on `supports_format` |
 
-`format` is **not** accepted; sending it is a `400 malformed`. An empty body is
-also a `400`.
+An empty body is a `400 malformed`.
 
 **Success response:** the refreshed `notifications` object.
 

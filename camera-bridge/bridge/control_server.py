@@ -277,11 +277,13 @@ Contract (as implemented -- this is what callers must match):
 
     POST .../settings/notifications
     Body: at least one of {"motion": <bool>, "button_press": <bool>,
-                            "smart_chime": <bool>}
+                            "smart_chime": <bool>, "format": <int>}
       What TELUS pushes to its OWN app for this camera -- unrelated to anything
       Home Assistant notifies about. Motion and button-press share one support
       enum and the smart chime has another, so a camera can offer some and not
-      others. Response: 200 <the same object GET .../settings returns under
+      others. "format" chooses between a text-only push and one carrying a
+      thumbnail, and must be a value listed in the response's format_choices.
+      Response: 200 <the same object GET .../settings returns under
       "notifications">
 
     POST .../settings/image
@@ -423,6 +425,10 @@ _NOTIFICATION_FIELDS: dict[str, type | tuple[type, ...]] = {
     "motion": bool,
     "button_press": bool,
     "smart_chime": bool,
+    # An enum, not a bool: the allowed values are the ones the settings response
+    # lists in format_choices. camera_settings enforces that set, because the
+    # device publishes no options of its own for this field.
+    "format": int,
 }
 _CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
     "indoor_on": bool,

@@ -264,7 +264,10 @@ async def _settings_notifications(_telus, _camera_id, **_fields):
     """The other generalSettings-backed section, read in the same request."""
     return {"supports_motion": True, "motion": False,
             "supports_button_press": True, "button_press": False,
-            "supports_smart_chime": False, "smart_chime": False, "format": 0}
+            "supports_smart_chime": False, "smart_chime": False,
+            "supports_format": True, "format": 0,
+            "format_choices": [{"value": 0, "label": "Text Only"},
+                               {"value": 2, "label": "Attach a Thumbnail"}]}
 
 
 async def _settings_general(_telus, camera_id):
