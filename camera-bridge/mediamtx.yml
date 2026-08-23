@@ -30,6 +30,19 @@ rtmp: no
 hls: no
 webrtc: no
 srt: no
+# MediaMTX 1.20.0 added a native Media-over-QUIC server that is ENABLED BY
+# DEFAULT (upstream default `moq: true`). Left alone it listens on :8892
+# (TCP/HTTP2 + UDP/HTTP3) and :8893 (UDP/QUIC) and generates a TLS keypair on
+# disk -- and because this container runs with --network host, those are real
+# host ports. This bridge only ever needs the local RTSP listener, so turn it
+# off explicitly, exactly like the other protocols above.
+#
+# NOTE for future MediaMTX bumps: a new release can introduce a new listener
+# that defaults to ON. After bumping MEDIAMTX_VERSION, run the server against
+# this config and check the "started with listeners on ..." lines -- anything
+# beyond RTSP should be disabled here. (Unknown keys are rejected, so a disable
+# line must land in the SAME commit as the version bump that introduces it.)
+moq: no
 api: no
 metrics: no
 pprof: no
