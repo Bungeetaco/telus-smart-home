@@ -1,42 +1,35 @@
-# Talkdown deployment & validation (run LATER, by a human, with explicit approval)
+# Talkdown deployment & validation
 
-Manual steps to enable doorbell two-way audio. **Nothing here has been run
-against the live doorbell.** Every step touches the live system (rebuilds/
-restarts containers, opens a real MWS stream, plays audio at the door), so read
-the whole file first and run the steps in order.
+How to deploy doorbell two-way audio and verify it end to end. Every step here
+touches the live system — it rebuilds and restarts containers, opens a real
+stream to the doorbell, and plays audio at someone's front door — so read the
+whole file before running any of it.
 
-The protocol is confirmed and the transport is built + unit-tested — see
-`docs/talkdown-fullduplex-protocol.md` for the full mechanism. The doorbell
-(ADC-VDB750) uses the **full-duplex HTTP-PUT** talk path; the webrtc/srtp modules
-do **not** apply to it (they stay as a fallback for other ADC cameras).
+The doorbell (ADC-VDB750) uses the **full-duplex HTTP-PUT** talk path; the
+webrtc/srtp modules do not apply to it and remain a fallback for other ADC
+cameras. The mechanism is documented in
+[talkdown-fullduplex-protocol.md](talkdown-fullduplex-protocol.md).
 
-All wiring lives on branch `feature/doorbell-talkdown` in
-`~/telus-smart-home`. The bridge builds its image from that working tree;
-Home Assistant runs a **separate copy** at
-`~/homeassistant/config/custom_components/telus_smarthome`, so the HA side needs
-an explicit sync. The talk endpoint is **enabled by default**
-(`TALKDOWN_ENABLED`) — it plays only what a caller asks it to, so deploying the
-code does not make anything speak on its own. Set `TALKDOWN_ENABLED=false` to
-disable the endpoint entirely.
+Two deployments have to move together. The bridge builds its image from the
+repository working tree, while Home Assistant runs a **separate copy** of the
+integration at `~/homeassistant/config/custom_components/telus_smarthome`, so
+the HA side needs an explicit sync — a bridge rebuild alone leaves the two
+halves mismatched.
 
-Credentials: none are entered here. The bridge mints its own MWS SessionToken
-from the TELUS credentials that already live in Home Assistant (see repo
-README) — the same website session the bridge already uses for video.
+The talk endpoint is **enabled by default** (`TALKDOWN_ENABLED`). It plays only
+what a caller asks it to, so deploying the code does not make anything speak on
+its own; set `TALKDOWN_ENABLED=false` to disable the endpoint entirely.
 
-Container names (live): `telus-cam-bridge`, `homeassistant`, `frigate`.
+## 1. Deploy the bridge
 
----
+The bridge image builds from the repository working tree, so confirm it is on the
+commit you mean to deploy and is clean:
 
-## 1. Deploy the bridge (build from the branch)
-
-The bridge image builds from `~/telus-smart-home/camera-bridge`. Ensure
-the branch is checked out (or merged to your deploy branch) first:
-
-    ssh <ha-host> 'cd ~/telus-smart-home && git status --short && git rev-parse --abbrev-ref HEAD'
+    ssh <ha-host> 'cd <repo> && git status --short && git rev-parse --abbrev-ref HEAD'
 
 Rebuild + recreate the container:
 
-    ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && docker compose up -d --build'
+    ssh <ha-host> 'cd <repo>/camera-bridge && docker compose up -d --build'
 
 Confirm it came up clean:
 
@@ -49,7 +42,7 @@ is expected until step 3.
 ## 2. Deploy the HA integration (sync the separate copy)
 
     ssh <ha-host> 'rsync -a --delete \
-      ~/telus-smart-home/custom_components/telus_smarthome/ \
+      <repo>/custom_components/telus_smarthome/ \
       ~/homeassistant/config/custom_components/telus_smarthome/'
 
 Restart Home Assistant so `services.yaml` and `telus_smarthome.speak` register:
@@ -64,11 +57,11 @@ Talkdown is enabled by default, so there is nothing to do here to use it — ski
 to step 4. If you would rather the endpoint refuse all talk requests, set the
 flag false (non-secret; it belongs in `.env`, not `secrets.env`) and recreate:
 
-    ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && \
+    ssh <ha-host> 'cd <repo>/camera-bridge && \
       grep -q "^TALKDOWN_ENABLED=" .env && \
       sed -i "s/^TALKDOWN_ENABLED=.*/TALKDOWN_ENABLED=false/" .env || \
       echo "TALKDOWN_ENABLED=false" >> .env'
-    ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && docker compose up -d'
+    ssh <ha-host> 'cd <repo>/camera-bridge && docker compose up -d'
 
 The route then answers `403 talkdown_disabled`.
 

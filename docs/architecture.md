@@ -210,6 +210,34 @@ backend** (mint `SessionToken` → `GetLiveVideoStream` → WebRTC/SRTP talk
 transport) to play it through the doorbell speaker. Off by default on the bridge
 (`TALKDOWN_ENABLED`, on by default). See [talkdown.md](talkdown-fullduplex-protocol.md).
 
+### Device settings and alarm configuration
+
+Added after the original two flows and worth calling out separately, because it
+is the one area where the bridge is doing something other than moving video or
+audio: it is a settings client.
+
+`camera_settings.py`, `arming_devices.py` and `partitions.py` all speak the
+**website** API and all share one shape — a JSON:API read, a **flat** write, and
+a whole-document read-modify-write, because a settings PUT replaces the entire
+object rather than patching it. Every field is paired with a capability flag that
+is checked before a control is offered or applied, and absence of a flag counts
+as "unsupported" rather than "allowed".
+
+What flows through them: the camera settings (speaker volume, chime, image, clip
+and live-stream resolution, status LED, TELUS-side push notifications), the
+diagnostics, the Bluetooth arming devices (whether a paired phone may disarm the
+panel), and selective sensor bypass.
+
+One thing crosses backends. The **chime-type option labels** come from the mobile
+API's `GetCurrentDoorbellSettings`, because the website publishes those options as
+bare integers and names them only in the portal's own JavaScript. That read is
+cached for an hour — the option list is a property of the hardware, not state.
+
+The two alarm-side capabilities are treated with more caution than the rest, and
+the docs say why in each place: an arming-device write decides whether a phone
+walking up to the house disarms the alarm, and a bypassed sensor stops triggering
+it until it is put back.
+
 ## Component diagram
 
 ```mermaid
@@ -222,27 +250,31 @@ graph TB
         CS["control_server.py<br/>127.0.0.1:8199"]
         VID["video pipeline<br/>telus_rest -> janus_client -> ffmpeg"]
         MMTX["MediaMTX (RTSP :8554)"]
-        TALK["talk.py + mobile_auth + mws_client"]
+        TALK["talk.py + talk_fullduplex<br/>+ mobile_auth + mws_client"]
+        SET["settings + config clients<br/>camera_settings.py<br/>arming_devices.py<br/>partitions.py"]
         BAUTH["telus_auth.py (website SSO)"]
     end
 
     SHARE[("shared dir<br/>control_secret / credentials.json<br/>rtsp_password")]
 
-    WEB["Website AJAX/cookie API<br/>smarthome-security.telus.com<br/>state, video source, snapshots,<br/>clips, events, automations"]
-    MWS["Mobile MWS XML API<br/>mobile.alarm.com/MobileServlet<br/>two-way audio only"]
+    WEB["Website AJAX/cookie API<br/>smarthome-security.telus.com<br/>state, video source, snapshots,<br/>clips, events, automations,<br/>device settings + alarm config"]
+    MWS["Mobile MWS XML API<br/>mobile.alarm.com/MobileServlet<br/>two-way audio, siren/privacy,<br/>chime-type labels"]
 
     INT -->|"HTTP control API<br/>(loopback)"| CS
     INT <-->|"secrets + credential fallback"| SHARE
     CS <--> SHARE
     CS --> VID
     CS --> TALK
+    CS --> SET
     INT -->|"RTSP (authenticated)"| MMTX
     VID --> MMTX
 
     INT -->|"SSO login + REST + push websocket"| WEB
     BAUTH --> WEB
     VID --> WEB
+    SET -->|"camera settings, LED,<br/>notifications, arming devices,<br/>sensor bypass"| WEB
     TALK -->|"mint SessionToken +<br/>GetLiveVideoStream"| MWS
+    SET -.->|"chime-type labels<br/>(GetCurrentDoorbellSettings)"| MWS
     BAUTH -.->|"MWS token minted off<br/>website session"| MWS
 ```
 

@@ -1,10 +1,13 @@
 """Alarmdotcom implementation of an HA number.
 
-Two unrelated sources of numbers live here: the Skybell configuration options
-that come from pyalarmdotcomajax's device model, and the bridge-served camera
+Three unrelated sources of numbers live here: the Skybell configuration options
+that come from pyalarmdotcomajax's device model; the bridge-served camera
 settings -- the speaker/call volume (the volume talkdown actually plays at --
 see docs/talkdown-fullduplex-protocol.md, E9) and the brightness of the device's
 status LED (E32).
+
+Both bridge-served numbers ride the camera settings coordinator; neither is a
+Skybell configuration option.
 """
 
 from __future__ import annotations
@@ -320,3 +323,5 @@ class CameraStatusLedBrightnessNumber(CameraSettingsEntity, NumberEntity):
             self.coordinator.async_apply_settings_section(self._camera_id, "led", led)
         else:
             await self.coordinator.async_request_refresh()
+
+

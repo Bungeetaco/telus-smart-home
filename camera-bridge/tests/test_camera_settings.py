@@ -628,17 +628,72 @@ async def test_notification_format_offers_only_the_two_live_members():
             f"only the legal write should have reached the camera: {portal.writes}")
 
 
-async def test_general_settings_reads_both_sections_in_one_request():
-    """The bundle asks for the LED and the notifications on every poll for every
-    camera; they are one upstream document and must cost one request."""
+async def test_general_settings_reads_all_three_sections_in_one_request():
+    """The bundle asks for the LED, the notifications and the solar status on
+    every poll for every camera; they are one upstream document and must cost one
+    request."""
     async with portal_at(8495) as (portal, telus):
         portal.reads = 0
-        both = await cs.get_general_settings(telus, CAM)
-        assert set(both) == {"led", "notifications"}, both
-        assert both["led"]["supports_enabled"] is True, both
-        assert both["notifications"]["supports_button_press"] is True, both
+        sections = await cs.get_general_settings(telus, CAM)
+        assert set(sections) == {"led", "notifications", "solar"}, sections
+        assert sections["led"]["supports_enabled"] is True, sections
+        assert sections["notifications"]["supports_button_press"] is True, sections
         assert portal.reads == 1, (
             f"expected one generalSettings GET, made {portal.reads}")
+
+
+async def test_solar_panel_is_reported_as_unsupported_on_this_hardware():
+    """E39, and the expected outcome is NO CONTROL -- which is the assertion.
+
+    `connectedToSolarPanelFeatureSupport` is 0 on both cameras on the reference
+    account, so `supports_connected` is False and a caller must create nothing.
+    That is not a gap to be worked around: `isConnectedToSolarPanel` is False
+    there too, and the two are indistinguishable from a camera that genuinely has
+    no panel attached -- so a client trusting the VALUE would put a permanent
+    "no solar panel" on every doorbell in every install.
+
+    Pinned so that a future change which starts reporting the value regardless is
+    caught here rather than discovered as a phantom entity on someone's dashboard.
+    """
+    async with portal_at(8496) as (portal, telus):
+        portal.reads = 0
+        solar = await cs.get_solar_panel_status(telus, CAM)
+        assert solar["supports_connected"] is False, solar
+        assert solar["connected"] is False, solar
+        assert portal.reads == 1, portal.reads
+        # Same section, same answer, whichever getter asked for it.
+        assert (await cs.get_general_settings(telus, CAM))["solar"] == solar
+
+        # ...and it is the ENUM that decides, not the value: flipping only the
+        # value leaves the section unsupported, while advertising support without
+        # a value leaves it unsupported too (fail closed on an absent field).
+        doc = portal.docs["general_settings"]
+        panel = next(res for res in doc["included"]
+                     if res["type"] == "video/settings/solar-panel-setting")
+        panel["attributes"]["isConnectedToSolarPanel"] = True
+        supported = await cs.get_solar_panel_status(telus, CAM)
+        assert supported["supports_connected"] is False, supported
+
+        panel["attributes"]["connectedToSolarPanelFeatureSupport"] = cs._SUPPORTED
+        supported = await cs.get_solar_panel_status(telus, CAM)
+        assert supported["supports_connected"] is True, supported
+        assert supported["connected"] is True, supported
+
+        del panel["attributes"]["isConnectedToSolarPanel"]
+        absent = await cs.get_solar_panel_status(telus, CAM)
+        assert absent["supports_connected"] is False, absent
+
+        # A read-only section: nothing anywhere in this module writes it, and the
+        # LED/notification writes that DO put the document back must carry it
+        # through untouched -- a partial body would drop the object entirely.
+        panel["attributes"]["isConnectedToSolarPanel"] = True
+        assert not [name for name in dir(cs)
+                    if name.startswith("set_") and "solar" in name], (
+            "E39 is deliberately read-only; a setter appeared")
+        await cs.set_led_settings(telus, CAM, enabled=False)
+        sent = portal.last("generalSettings")["solarPanelSetting"]
+        assert sent["isConnectedToSolarPanel"] is True, sent
+        assert sent["connectedToSolarPanelFeatureSupport"] == cs._SUPPORTED, sent
 
 
 async def test_led_rejects_a_wrong_typed_value():

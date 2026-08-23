@@ -35,6 +35,7 @@ import logging
 import os
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -390,15 +391,72 @@ class TalkManager:
             timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
         )
 
-    def _select_put_url(self, doorbell: dict) -> tuple[str | None, str | None]:
-        """Pick a PutAudioStream URL by TALK_PUT_ENDPOINT_ORDER (the bridge is
-        on-LAN with the doorbell, so direct/local win). Returns (kind, url)."""
+    async def _select_put_url(self, doorbell: dict) -> tuple[str | None, str | None]:
+        """Pick a PutAudioStream URL: TALK_PUT_ENDPOINT_ORDER as the PREFERENCE,
+        filtered by what actually answers right now (E10). Returns (kind, url).
+
+        The four URLs on the <cli> are four routes to (mostly) the same device:
+        `direct` and `local` are its LAN address, `public` is the site's own WAN
+        address, and only `cloud` is a different host (the vendor relay). On-LAN
+        the old blind walk down the order already picked the right one -- the
+        value here is in NOT STALLING: off-LAN, `direct`/`local` are RFC1918
+        addresses that do not answer, and the first thing that discovers that is
+        otherwise a TCP connect inside the audio session, holding the per-camera
+        talk lock for however long the OS takes to give up.
+
+        So the candidates are probed CONCURRENTLY and consumed in preference
+        order, which costs nothing when the preferred one answers (a LAN connect
+        resolves in about a millisecond) and bounds the unreachable case at
+        TALK_ENDPOINT_PROBE_TIMEOUT_S.
+
+        A probe is a bare TCP connect -- no TLS, no HTTP, nothing written -- so
+        it cannot disturb the audio path or the device's stream session.
+
+        Detection is never allowed to be the reason a talk fails: if nothing
+        answers, the first preferred URL is returned anyway and the PUT gets to
+        produce the real error.
+        """
         put_urls = doorbell.get("put_urls") or {}
-        for kind in c.TALK_PUT_ENDPOINT_ORDER:
-            url = put_urls.get(kind)
-            if url:
-                return kind, url
-        return None, None
+        candidates = [(k, put_urls[k]) for k in c.TALK_PUT_ENDPOINT_ORDER if put_urls.get(k)]
+        if not candidates:
+            return None, None
+
+        # Static override for when detection is wrong. An override naming an
+        # endpoint this doorbell does not advertise is a misconfiguration, and
+        # the right response to a misconfigured knob is a warning plus the normal
+        # behaviour -- not a silent doorbell.
+        if c.TALK_PUT_ENDPOINT:
+            for kind, url in candidates:
+                if kind == c.TALK_PUT_ENDPOINT:
+                    log.debug("talkdown: using the configured %s endpoint (probing skipped)", kind)
+                    return kind, url
+            log.warning("talkdown: TALK_PUT_ENDPOINT=%r is not one of the endpoints this "
+                        "doorbell advertises (%s); auto-detecting instead",
+                        c.TALK_PUT_ENDPOINT, ",".join(k for k, _ in candidates))
+
+        if c.TALK_ENDPOINT_PROBE_TIMEOUT_S <= 0 or len(candidates) == 1:
+            return candidates[0]
+
+        probes = {kind: asyncio.ensure_future(
+                      _probe_endpoint(url, c.TALK_ENDPOINT_PROBE_TIMEOUT_S))
+                  for kind, url in candidates}
+        try:
+            for kind, url in candidates:
+                try:
+                    reachable = await probes[kind]
+                except Exception:  # noqa: BLE001
+                    continue
+                if reachable:
+                    return kind, url
+                log.debug("talkdown: %s endpoint did not answer a probe", kind)
+            log.warning("talkdown: none of the PutAudioStream endpoints (%s) answered a "
+                        "connect probe; trying %s anyway",
+                        ",".join(k for k, _ in candidates), candidates[0][0])
+            return candidates[0]
+        finally:
+            for task in probes.values():
+                if not task.done():
+                    task.cancel()
 
 
     @staticmethod
@@ -442,7 +500,7 @@ class TalkManager:
         did = doorbell.get("did") or DOORBELL_DEVICE_ID
         password = doorbell.get("stream_password")
         username = doorbell.get("stream_user") or "vieweruser"
-        kind, put_url = self._select_put_url(doorbell)
+        kind, put_url = await self._select_put_url(doorbell)
         if not put_url or not password:
             raise NoUpstreamAudio(
                 f"doorbell {doorbell.get('global_device_id')} has no usable "
@@ -514,7 +572,7 @@ class TalkManager:
             fresh = await self._resolve_doorbell(camera_id)
             if fresh is None:
                 raise RuntimeError("doorbell no longer reports upstream audio")
-            new_kind, new_url = self._select_put_url(fresh)
+            new_kind, new_url = await self._select_put_url(fresh)
             new_password = fresh.get("stream_password")
             if not new_url or not new_password:
                 raise RuntimeError("renegotiated session has no usable PUT URL / password")
@@ -537,7 +595,11 @@ class TalkManager:
             log.info("talkdown: renegotiated session for %s via %s endpoint",
                      fresh.get("global_device_id"), new_kind)
             return {"put_url": new_url, "password": new_password,
-                    "username": fresh.get("stream_user") or username}
+                    "username": fresh.get("stream_user") or username,
+                    # The pin travels with the session: a renegotiation can land
+                    # on a different endpoint kind, and the cloud relay is a
+                    # different host with its own CA-signed certificate.
+                    "cert_pin": talk_fullduplex.make_cert_pin(new_kind)}
 
         session_deadline = self._session_deadline(doorbell.get("expires"))
         tmp_path = await self._spool_temp(audio_bytes)
@@ -548,7 +610,12 @@ class TalkManager:
                     return await talk_fullduplex.stream_talkdown(
                         put_url, password, tmp_path, username=username, codec=cc,
                         audio_filter=audio_filter, renegotiate=_renegotiate,
-                        session_deadline=session_deadline, stop_event=stop_event)
+                        session_deadline=session_deadline, stop_event=stop_event,
+                        # E12: identify the doorbell by its self-signed cert.
+                        # Built per attempt because it accumulates per-connection
+                        # observations, and only for endpoints that terminate at
+                        # the device (see make_cert_pin).
+                        cert_pin=talk_fullduplex.make_cert_pin(kind))
                 except talk_fullduplex.TalkdownError as e:
                     last_err = e
                     more = i + 1 < len(attempts)
@@ -655,6 +722,39 @@ def _unlink_quiet(path: str) -> None:
         os.unlink(path)
     except OSError:
         log.debug("talkdown: could not remove temp audio %s", path, exc_info=True)
+
+
+async def _probe_endpoint(url: str, timeout_s: float) -> bool:
+    """Is there something listening on this URL's host:port right now?
+
+    A bare TCP connect, immediately closed: no TLS handshake, no HTTP request,
+    no bytes written. That matters -- this runs against a doorbell whose audio
+    endpoint is the thing being probed, and the probe must be incapable of
+    disturbing it.
+
+    Any failure is False, never an exception: reachability detection exists to
+    pick a better route, so it must never become a new way for a talk to fail.
+    """
+    parts = urlsplit(url)
+    host, port = parts.hostname, parts.port
+    if not host:
+        return False
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    writer = None
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port),
+                                           timeout=timeout_s)
+        return True
+    except (OSError, asyncio.TimeoutError):
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def _select_endpoint(endpoints: list[dict]) -> dict | None:

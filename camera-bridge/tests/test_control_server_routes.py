@@ -270,10 +270,21 @@ async def _settings_notifications(_telus, _camera_id, **_fields):
                                {"value": 2, "label": "Attach a Thumbnail"}]}
 
 
+async def _settings_solar(_telus, _camera_id, **_fields):
+    """The third generalSettings-backed section (backlog E39).
+
+    UNSUPPORTED, because that is what both cameras on the reference account
+    report -- the stub says what the hardware says rather than what would make an
+    entity appear.
+    """
+    return {"supports_connected": False, "connected": False}
+
+
 async def _settings_general(_telus, camera_id):
-    """Both generalSettings sections at once -- what the settings bundle calls."""
+    """All three generalSettings sections at once -- what the bundle calls."""
     return {"led": await _settings_led(None, camera_id),
-            "notifications": await _settings_notifications(None, camera_id)}
+            "notifications": await _settings_notifications(None, camera_id),
+            "solar": await _settings_solar(None, camera_id)}
 
 
 async def _settings(_telus, _camera_id):
@@ -394,8 +405,18 @@ async def test_settings_publishes_the_keys_home_assistant_reads():
         f"a camera absent from the record must be null, not a default: {allowed}")
     # The website half is untouched by any of this.
     assert allowed["audio"]["supports_call_volume"] is True
+
+    # The solar section (E39) rides the same generalSettings read as the LED and
+    # the notifications, and its EXPECTED answer on this hardware is "no". The
+    # section is still published, because "the bridge reports it as unsupported"
+    # and "the bridge is too old to have the section" are different things and a
+    # caller has to be able to tell them apart -- but supports_connected false
+    # means no entity, which is the point.
+    assert allowed["solar"] == {"supports_connected": False, "connected": False}, (
+        allowed["solar"])
     print("  ok  /settings: publishes exactly {can_manually_trigger, active, "
-          "timestamp_end} and {supported, active}, null when there is no record")
+          "timestamp_end} and {supported, active}, null when there is no record; "
+          "solar rides the generalSettings read and reports unsupported")
 
 
 def _chime_ack():

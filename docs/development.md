@@ -161,16 +161,48 @@ single reviewed PR, so never bump one alone. A runtime interpreter bump for a
 
 ## Keeping the docs current
 
-Treat documentation as part of the change:
+Documentation is part of the change, and the whole set has to stay consistent.
+Any change to behaviour, configuration, deployment, or the shape of a request or
+response updates the docs **in the same commit** -- and updates *every* page the
+change makes wrong, not just the nearest one. A set where one page is right and
+another contradicts it is worse than one where neither was touched, because a
+reader has no way to tell which to trust.
 
-- **Always update `docs/`** in the same commit as a change to behaviour,
-  configuration, deployment, or dependencies. A new setting goes in
-  [configuration.md](configuration.md); a new failure mode goes in
-  [troubleshooting.md](troubleshooting.md); a deferred idea goes in the
-  enhancement backlog (see `talkdown-fullduplex-protocol.md`) rather than being
-  lost.
-- **Update the root `README.md` when the change is user-visible** -- a new
-  capability, a changed installation step, a new requirement or limitation. Purely
+The checklist of which page to touch for which kind of change lives in
+[`AGENTS.md`](../AGENTS.md), so humans and agents work from one list rather than
+two that drift apart. In short:
+
+- **Root `README.md`** for anything user-visible -- a new capability, entity or
+  service, a changed installation step, a new requirement or limitation. Purely
   internal refactors don't need it.
-- Keep the docs anonymized and shareable (placeholders, never real IPs, account or
-  device IDs, hostnames or secrets).
+- **[architecture.md](architecture.md)** and **[camera-bridge.md](camera-bridge.md)**
+  when modules, flows or component relationships move -- including the diagram.
+- **[ha-integration.md](ha-integration.md)** for entities, services, coordinators
+  and poll intervals; keep the entity table exhaustive.
+- **[control-api.md](control-api.md)** for **any** change to a route or its
+  request/response fields. That page is a contract other code is written against.
+- **[configuration.md](configuration.md)** for a new knob, env var or interval;
+  **[troubleshooting.md](troubleshooting.md)** for a new failure mode; the
+  `*-api-findings.md` pages when something is learned about an upstream API; the
+  enhancement backlog (`talkdown-fullduplex-protocol.md`) when an idea is
+  deferred or closed, rather than losing it.
+- **[README.md](README.md)** (this folder's index) whenever a doc is added, so
+  the index never goes stale.
+
+**These docs are a source of truth, not a changelog.** They describe what the
+system *is* and what is *known*, in the present tense. What changed, when, and
+why belongs in the commit and the pull request, which is where anyone asking that
+question will look. Concretely, that means no dates on statements, no "corrected
+on…", no "this used to say…", no "an earlier version wrongly claimed…". When
+something here turns out to be wrong, **rewrite it so the page states the truth**
+and delete the wrong claim — do not leave a trail beside it. A page that narrates
+its own edit history buries the answer a reader came for.
+
+The one thing that is always worth writing down is **the limit of what is
+known**: "unverified", "inferred from the sibling endpoint rather than captured",
+"needs hardware this account does not have". That is not history, it is the
+current state of the evidence, and it is what stops the next person either
+trusting a guess or re-deriving a question that was already asked.
+
+Keep it all anonymized and shareable (placeholders, never real IPs, account or
+device IDs, hostnames or secrets).

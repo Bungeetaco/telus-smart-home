@@ -99,11 +99,22 @@ DATA_ACTIVITY_COORDINATOR = "activity_coordinator"
 DATA_CAMERA_SETTINGS_COORDINATOR = "camera_settings_coordinator"
 # Shared ArmingDevicesCoordinator instance, created on first use by
 # arming_devices_coordinator.async_get_arming_devices_coordinator() exactly like
-# the one above. Only switch.py needs it today; it is stored (rather than being a
-# local in that platform) so that a second platform -- the system-wide pairing
-# switch and disarm-timeout number of backlog E41 are the obvious candidates --
-# cannot silently double the poll rate against a rate-limited account.
+# the one above. switch.py (the per-phone disarming toggle) and select.py (its
+# enrolled partition, E43) both use it, which is exactly why it is stored here
+# rather than being a local in either platform: platforms are set up
+# concurrently, so two locals would be two pollers and double the request rate
+# against a rate-limited account.
 DATA_ARMING_DEVICES_COORDINATOR = "arming_devices_coordinator"
+# Shared PanelBluetoothCoordinator instance (backlog E41), same lazy-creation
+# pattern and shared for the same reason -- switch.py owns the system-wide
+# pairing toggle and number.py the timeout, and they are set up concurrently.
+#
+# A SECOND coordinator rather than a second job for the one above: they read
+# different bridge routes and, more to the point, the arming-devices coordinator
+# publishes `data` keyed by device id, which several entities index directly.
+# Folding a system-wide record into that dict would put a key in it that is not a
+# device and quietly change what every one of those lookups can return.
+DATA_PANEL_BLUETOOTH_COORDINATOR = "panel_bluetooth_coordinator"
 
 ATTRIB_BATTERY_NORMAL = "Normal"
 ATTRIB_BATTERY_LOW = "Low"
@@ -229,11 +240,48 @@ CAMERA_BRIDGE_ARMING_DEVICES_URL = "http://127.0.0.1:8199/control/arming-devices
 CAMERA_BRIDGE_ARMING_DEVICE_DISARMING_URL_TEMPLATE = (
     "http://127.0.0.1:8199/control/arming-devices/{device_id}/disarming")
 
+# One Bluetooth arming device. DELETE unpairs it, which cannot be undone from
+# here -- re-pairing needs physical access to the phone and the panel. Used only
+# by unpair_service.py, which is a service rather than an entity for that reason.
+CAMERA_BRIDGE_ARMING_DEVICE_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/arming-devices/{device_id}")
+
+# Moves ONE paired phone to a different partition -- {device_id} is
+# str.format()'d in. POST; body is JSON {"partition_id": "<partition number>"},
+# a real JSON string carrying the panel's own partition NUMBER ("1", "2") as the
+# arming-device record reports it -- NOT the "<unit>-127" alarm.com device id the
+# alarm panel entity uses. Answers with the refreshed record.
+#
+# This decides WHICH partition a phone disarms, which is the same class of
+# setting as whether it may disarm at all: moving a phone onto a partition it
+# should not open has the same outcome as enabling disarming on a phone that
+# should not have it. Only ever call it from an explicit user action on the
+# select entity.
+#
+# The bridge refuses in four places before it writes: a non-string or empty body
+# is 400, an unknown device id is 404, a record whose own
+# supports_enrolled_partition is false is 422, and a partition id this account
+# does not actually have is 400. That last check FAILS CLOSED -- if the bridge
+# cannot read the partition list it answers 502 rather than writing an
+# unverified partition number to a live panel. Also 429 with Retry-After.
+CAMERA_BRIDGE_ARMING_DEVICE_PARTITION_URL_TEMPLATE = (
+    "http://127.0.0.1:8199/control/arming-devices/{device_id}/enrolled-partition")
+
+# The panel's Bluetooth disarming settings: a system-wide pairing toggle and the
+# disarm window. The window is in MINUTES and takes one of exactly five values
+# (1, 5, 10, 20, 30) -- neither the unit nor the set appears in the upstream
+# document, so the bridge reports both as `timeout_unit` and `timeout_options`
+# and a client must not invent either. The write shape for that endpoint is
+# inferred from the sibling per-device endpoint, not captured.
+CAMERA_BRIDGE_BLUETOOTH_DISARMING_URL = (
+    "http://127.0.0.1:8199/control/bluetooth-disarming")
+
 # telus_smarthome service names (registered in __init__.py via speak_service.py
 # and bypass_service.py).
 SERVICE_SPEAK = "speak"
 SERVICE_STOP_SPEAKING = "stop_speaking"
 SERVICE_BYPASS_SENSORS = "bypass_sensors"
+SERVICE_UNPAIR_ARMING_DEVICE = "unpair_arming_device"
 
 # Talkdown counters (attempts/outcomes/failure reasons/durations) -- see
 # camera-bridge/bridge/metrics.py. Surfaced as the two diagnostic sensors in

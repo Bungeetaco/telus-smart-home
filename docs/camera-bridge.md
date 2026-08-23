@@ -30,6 +30,28 @@ At a high level the bridge runs two cooperating processes inside one container:
 the Python bridge. If either process dies, the container exits and Docker's
 `restart: unless-stopped` policy brings both back up together.
 
+Alongside the video pipeline it is also a **settings and configuration client**
+for the account, which is what the loopback control API exposes to Home
+Assistant. Those parts do not touch video at all:
+
+| Module | What it speaks to | What it covers |
+| --- | --- | --- |
+| `camera_settings.py` | website API | speaker/call volume, chime, image, clip and live-stream resolution, status LED, TELUS-side push notifications, diagnostics |
+| `arming_devices.py` | website API | Bluetooth arming devices — whether a paired phone may disarm the panel on approach |
+| `partitions.py` | website API | alarm partitions and selective sensor bypass |
+| `mws_client.py` | mobile MWS API | talkdown, camera siren, privacy mode, and the chime-type option labels the website only publishes as bare integers |
+
+All three website clients share one shape, described in
+[architecture.md](architecture.md#device-settings-and-alarm-configuration) and in
+detail in [web-portal-api-findings.md](web-portal-api-findings.md): a JSON:API
+read, a **flat** write, whole-document read-modify-write, and a capability flag
+checked before any control is offered or applied.
+
+Two of them reach a security system rather than a camera, and are written to
+refuse rather than guess: an arming-device write decides whether a phone
+disarms the alarm, and a bypassed sensor stops triggering it until it is put
+back. Both re-read the record they are about to change and honour what it says.
+
 ### Per-camera pipeline
 
 Each camera runs the same always-warm pipeline, owned end to end by

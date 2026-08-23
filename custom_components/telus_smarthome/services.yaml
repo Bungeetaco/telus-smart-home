@@ -101,3 +101,22 @@ stop_speaking:
         entity:
           integration: telus_smarthome
           domain: camera
+
+unpair_arming_device:
+  name: Unpair a phone from Bluetooth disarming
+  description: >-
+    Remove a paired phone from the alarm panel's Bluetooth disarming, so it can
+    no longer disarm the alarm on approach. THIS CANNOT BE UNDONE FROM HOME
+    ASSISTANT — re-pairing needs physical access to both the phone and the
+    panel. Takes one phone at a time on purpose; there is no unpair-all.
+  fields:
+    entity_id:
+      name: Paired phone
+      description: >-
+        The "Disarm alarm on arrival" switch belonging to the phone to unpair.
+      required: true
+      example: switch.someones_phone_disarm_alarm_on_arrival
+      selector:
+        entity:
+          integration: telus_smarthome
+          domain: switch
