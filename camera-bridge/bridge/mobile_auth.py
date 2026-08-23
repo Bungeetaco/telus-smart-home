@@ -37,6 +37,7 @@ walk in `_sso_get_login_as_token` is written to be robust about *where* and unde
 against one real GET before relying on the bootstrap path. See that method.
 """
 import json
+import gzip
 import logging
 import os
 import time
@@ -135,11 +136,23 @@ def _params_of(url: str) -> dict:
     return params
 
 
+def _read_body_text(raw: bytes) -> str:
+    """Decode an MWS response body, transparently gunzipping when the server
+    returns gzip without a Content-Encoding header (SubmitRequest.aspx does this,
+    so aiohttp does not auto-decompress and .text() chokes on the 1f 8b magic)."""
+    if raw[:2] == b"\x1f\x8b":
+        try:
+            raw = gzip.decompress(raw)
+        except OSError:
+            pass
+    return raw.decode("utf-8", errors="replace")
+
+
 def _named_token(url: str) -> str | None:
     """loginAsKey / loginAsLoginToken from a URL's query or fragment,
     case-insensitively."""
     lower = {k.lower(): v for k, v in _params_of(url).items()}
-    for name in ("loginaskey", "loginaslogintoken"):
+    for name in ("loginaskey", "loginaslogintoken", "token"):
         vals = lower.get(name)
         if vals and vals[0]:
             return vals[0]
@@ -323,7 +336,7 @@ class MobileSession:
                 # Body may echo the token back; never log it, only the status.
                 raise MobileLoginError(
                     f"MWS POST {form.get('Action')} -> HTTP {resp.status}")
-            return await resp.text()
+            return _read_body_text(await resp.read())
 
     def _absorb(self, parsed: dict) -> None:
         self.session_token = parsed["session_token"]

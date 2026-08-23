@@ -27,7 +27,7 @@ import aiohttp
 # envelope every MWS action does. Reuse mobile_auth's canonical assembly of that
 # envelope (HAIKU/APP_BUILD/_device_fields) and its Cloudflare-429 type so the
 # stream path funnels into the identical Retry-After backoff as the auth path.
-from .mobile_auth import HAIKU, APP_BUILD, _device_fields
+from .mobile_auth import HAIKU, APP_BUILD, _device_fields, _read_body_text
 from .telus_auth import RateLimited
 
 log = logging.getLogger(__name__)
@@ -188,7 +188,7 @@ async def get_live_video_stream(session: aiohttp.ClientSession,
     async with session.post(MWS_URL, data=form, headers=headers) as resp:
         _raise_if_rate_limited(resp)
         resp.raise_for_status()
-        body = await resp.text()
+        body = _read_body_text(await resp.read())
     return parse_live_video_stream(body)
 
 
