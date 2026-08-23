@@ -571,13 +571,36 @@ recorded. None of these block the shipped feature; all were found while groundin
   switch go unavailable in that state without any client hardcoding `-1`.
   See [mobile-api-findings.md](mobile-api-findings.md).
 
-- **E28 Resolve the option-list key/value ambiguity.**
-  `clipResolutionOptions` and `clipQualityOptions` are objects, and the API is
-  inconsistent about which half is the settable value (see
-  [web-portal-api-findings.md](web-portal-api-findings.md)). `_options` currently
-  accepts either half. A single captured `PUT` that *changes* clip quality would
-  settle it and let the check tighten. `clipQualityFeatureSupport` is `0` on the
-  reference doorbell, so this needs a different camera model to test.
+- **E28 (DONE 2026-08-23) The option-list ambiguity is resolved: the two clip
+  fields genuinely disagree, in the same document, on the same device.**
+  The entry expected this to need a captured PUT from a camera model that can set
+  clip quality. It did not -- the portal's own dropdown builders say which half
+  they write, and its JavaScript is a public static asset (the method from E40).
+
+      clipResolutionOptions  {"1": "480x480", "4": "960x960", "7": "1440x1440"}
+          -> the VALUE is settable. The builder pushes `{value: options[key]}`;
+             the key is a resolution-class enum used only to prefix a label.
+
+      clipQualityOptions     {"5": 3, "3": 2, "2": 1}
+          -> the KEY is settable. The builder writes `props.id`, which is the
+             key; the value is a quality enum used only to look up a label.
+
+  This was genuinely not guessable from the payload: `selectedClipQuality` is
+  `"3"`, which is simultaneously a key of that object and a value of it.
+
+  `_Field.options_half` now states it per field from evidence, and the four
+  object-valued option lists in this project are all declared: clip resolution
+  (values), clip quality (keys), camera-triggered clip duration (keys), live
+  resolution (keys). The concrete bug this closes is that a resolution-class enum
+  key -- `"7"` -- used to be accepted as a clip resolution.
+
+  A field that declares nothing keeps the old permissive behaviour so an unknown
+  camera model is not broken by the tightening, but it now logs a warning naming
+  the field, because resolving one needs no device at all.
+
+  Labels are published only where the other half is a real string, which rules
+  both clip fields out: their other halves are opaque enum numbers that would
+  label worse than the value itself.
 
 - **E29 Surface `Retry-After` on the siren and privacy routes.**
   `telus_auth.RateLimited` carries the server's own retry delay and

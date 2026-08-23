@@ -116,9 +116,11 @@ class _Field(NamedTuple):
     # counts as permission.
     forbids: tuple[str, ...] = ()
     # Where this field's choices live, when they are not at `<base>Options`.
-    # A dict here maps VALUE -> LABEL and only its KEYS are settable, which is
-    # narrower than the ambiguous `<base>Options` case _options handles.
     options_key: str | None = None
+    # WHICH HALF of that object is the settable value. This API is genuinely
+    # inconsistent about it -- see _field_options -- so it is stated per field
+    # from evidence rather than inferred.
+    options_half: str = "keys"
 
 
 # imageSettings. Key names, capability flags and bounds below are taken from
@@ -153,17 +155,26 @@ _IMAGE_FIELDS: dict[str, _Field] = {
 # bool `isKeepClipsForFeatureSupported` rather than an enum, and -1 is a real,
 # meaningful option ("keep forever"), so it must survive range/option checking.
 _VIDEO_FIELDS: dict[str, _Field] = {
+    # The object's VALUE is what gets written here -- see _field_options.
     "clip_resolution": _Field("savedVideoSetting", ("selectedClipResolution",),
-                              ("clipResolutionFeatureSupport",), "str"),
+                              ("clipResolutionFeatureSupport",), "str",
+                              options_key="clipResolutionOptions",
+                              options_half="values"),
+    # ...and the object's KEY is what gets written here. Same document, opposite
+    # convention; neither is guessable from the payload.
     "clip_quality": _Field("savedVideoSetting", ("selectedClipQuality",),
-                           ("clipQualityFeatureSupport",), "str"),
+                           ("clipQualityFeatureSupport",), "str",
+                           options_key="clipQualityOptions",
+                           options_half="keys"),
     "keep_clips_days": _Field("savedVideoSetting", ("selectedKeepClipsDays",),
                               ("isKeepClipsForFeatureSupported",), "int"),
     "alarm_clip_duration": _Field("savedVideoSetting", ("selectedAlarmClipsDuration",),
                                   ("alarmClipsDurationFeatureSupport",), "int"),
     "camera_triggered_clip_duration": _Field(
         "savedVideoSetting", ("selectedCameraTriggeredClipsDuration",),
-        ("cameraTriggeredClipsFeatureSupport",), "int"),
+        ("cameraTriggeredClipsFeatureSupport",), "int",
+        options_key="cameraTriggeredClipsDurationOptions",
+        options_half="keys"),
     "pretrigger_enabled": _Field("savedVideoSetting", ("isPreTriggerRecordingEnabled",),
                                  ("preTriggerRecordingFeatureSupport",), "bool"),
     # The LIVE stream's resolution, not a clip setting -- a different relationship
@@ -457,23 +468,25 @@ def _limit(obj: dict, base: str, which: str) -> int | None:
 
 
 def _options(obj: dict, base: str) -> list | None:
-    """The choice list a field publishes, normalized to a list, or None.
+    """The choice list at ``<base>Options`` for a field that names no options_key.
 
-    alarm.com publishes these as either a JSON array (``keepClipsDaysOptions``
-    is ``[3, 5, ..., -1]``) or an object (``clipResolutionOptions`` is
-    ``{"1": "480x480", "4": "960x960", "7": "1440x1440"}``).
+    Lists are unambiguous and returned as-is. An OBJECT here is a field nobody has
+    studied yet: this API is inconsistent about which half of such an object is
+    the settable value -- clipResolutionOptions means its values, clipQualityOptions
+    means its keys, in the same document -- so there is no safe default. Both
+    halves are accepted, which lets an unknown field on an unknown camera model
+    still work, and a warning names it so it can be resolved and moved onto
+    _Field.options_key like the four that already have been.
 
-    Trap, and the reason both halves of an object are returned: the API is not
-    self-consistent about which half of that mapping is the settable value.
-    ``selectedClipResolution`` is ``"1440x1440"`` -- a VALUE of the mapping --
-    while ``selectedClipQuality`` is ``"3"`` -- a KEY of ``clipQualityOptions``
-    (``{"5": 3, "3": 2, "2": 1}``). No capture disambiguates them, so membership
-    is checked against keys and values together. That accepts a wrong-half value
-    the camera might reject, but it never silently sends something absent from
-    the mapping altogether.
+    Resolving one does not need a device: the portal's own dropdown builders say
+    which half they write, and its JavaScript is a public static asset.
     """
     raw = obj.get(f"{base}Options")
     if isinstance(raw, dict) and raw:
+        log.warning(
+            "%sOptions is an object and this field does not declare which half is "
+            "settable; accepting both. Resolve it and set _Field.options_key/"
+            "options_half -- see _field_options.", base)
         merged = [str(k) for k in raw] + [str(v) for v in raw.values()]
         return list(dict.fromkeys(merged))
     if isinstance(raw, list) and raw:
@@ -482,21 +495,36 @@ def _options(obj: dict, base: str) -> list | None:
 
 
 def _field_options(obj: dict, field: "_Field", value_key: str) -> list | None:
-    """The choices for one field, preferring its explicit options_key.
+    """The settable choices for one field, or None when it publishes none.
 
-    When a field names its own options key, that object maps VALUE -> LABEL and
-    only the keys are settable -- narrower and safer than the general _options
-    rule, which has to accept both halves because the API is inconsistent about
-    which one it means (see _options). Falling back keeps every other field on
-    the old behaviour.
+    When a field names its own options object, `options_half` says which half of
+    it is the value. That is not a detail this API lets anyone infer -- the two
+    clip fields disagree, in the same object, on the same device:
+
+      clipResolutionOptions  {"1": "480x480", "4": "960x960", "7": "1440x1440"}
+          -> the VALUE is settable ("1440x1440"); the key is a resolution-class
+             enum the portal uses only to prefix a label.
+      clipQualityOptions     {"5": 3, "3": 2, "2": 1}
+          -> the KEY is settable ("3"); the value is a quality enum the portal
+             uses only to look up a label.
+
+    Both read out of the portal's own dropdown builders (the resolution one
+    pushes `{value: options[key]}`, the quality one writes `props.id`, which is
+    the key), and both agree with what the device reports as selected. Guessing
+    from the payload alone is impossible: `selectedClipQuality` is "3", which is
+    simultaneously a key of that object and a value of it.
     """
     if field.options_key:
         raw = obj.get(field.options_key)
         if isinstance(raw, dict) and raw:
-            return list(raw)
-        if isinstance(raw, list) and raw:
-            return list(raw)
-        return None
+            half = list(raw.values()) if field.options_half == "values" else list(raw)
+        elif isinstance(raw, list) and raw:
+            half = list(raw)
+        else:
+            return None
+        # A JSON object's keys are always strings; an int-typed field's options
+        # must come back as ints so a caller can echo one straight back.
+        return [_as_int(o, o) for o in half] if field.kind == "int" else half
     return _options(obj, _base(value_key))
 
 
@@ -620,9 +648,17 @@ def _read_field(obj: dict, field: _Field) -> dict[str, Any]:
     # notification format use.
     if field.options_key:
         raw = obj.get(field.options_key)
-        if isinstance(raw, dict) and raw:
-            out["choices"] = [{"value": value, "label": str(label)}
-                              for value, label in raw.items()]
+        if isinstance(raw, dict) and raw and field.options_half == "keys":
+            # Only when the KEYS are settable, so the labels are the object's
+            # values and can be real strings. When the VALUES are settable the
+            # other half is a JSON key -- always a string, and here always an
+            # opaque enum number like "7", which would be a worse label than the
+            # value it points at. Those fields publish options and no choices.
+            if all(isinstance(label, str) for label in raw.values()):
+                out["choices"] = [{"value": _as_int(value, value)
+                                              if field.kind == "int" else value,
+                                   "label": label}
+                                  for value, label in raw.items()]
     return out
 
 

@@ -689,6 +689,74 @@ async def test_a_partly_unsupported_request_writes_nothing():
         assert portal.writes == []
 
 
+def test_the_two_clip_option_objects_disagree_about_which_half_is_settable():
+    """E28. Same document, same device, opposite conventions.
+
+    `clipResolutionOptions` is {"1": "480x480", ...} and the VALUE is settable.
+    `clipQualityOptions` is {"5": 3, "3": 2, "2": 1} and the KEY is settable.
+    Nothing in the payload distinguishes them -- `selectedClipQuality` is "3",
+    which is simultaneously a key of that object and a value of it -- so this was
+    read out of the portal's own dropdown builders, which push
+    `{value: options[key]}` for the resolution and write `props.id` (the key) for
+    the quality.
+
+    Accepting both halves, which this module used to do, meant a caller could
+    write a resolution-class enum number as a resolution.
+    """
+    video = cs._parse_table(cs._flatten(fixture("video_configs_get")), cs._VIDEO_FIELDS)
+
+    assert video["clip_resolution_options"] == ["480x480", "960x960", "1440x1440"], video
+    assert video["clip_resolution"] in video["clip_resolution_options"]
+    # The keys of that object are a label-class enum and must NOT be offered.
+    for enum_key in ("1", "4", "7"):
+        assert enum_key not in video["clip_resolution_options"], video
+
+    assert video["clip_quality_options"] == ["5", "3", "2"], video
+    assert video["clip_quality"] in video["clip_quality_options"]
+    # ...and its values are a quality enum, equally not settable.
+    assert "1" not in video["clip_quality_options"][1:], video
+
+    # An int-typed field's options come back as ints, not the strings a JSON
+    # object's keys always are, so a caller can echo one straight back.
+    assert video["camera_triggered_clip_duration_options"] == [30], video
+    assert video["camera_triggered_clip_duration_choices"] == [
+        {"value": 30, "label": "30 seconds"}], video
+
+    # Labels are published only where the other half is a real string. The clip
+    # fields' other halves are opaque enum numbers, which would label worse than
+    # the value itself.
+    assert "clip_resolution_choices" not in video, video
+    assert "clip_quality_choices" not in video, video
+
+
+async def test_a_label_class_enum_key_is_not_a_settable_resolution():
+    """The concrete regression: "7" is a KEY of clipResolutionOptions, and used to
+    be accepted as a clip resolution."""
+    async with portal_at(8499) as (portal, telus):
+        for bad in ("7", "1", "4"):
+            await expect_error(f"clip_resolution={bad}",
+                               lambda b=bad: cs.set_video_config(telus, CAM,
+                                                                 clip_resolution=b),
+                               unsupported=False)
+        assert portal.writes == []
+
+        # ...while a real one still writes.
+        await cs.set_video_config(telus, CAM, clip_resolution="960x960")
+        assert portal.last("videoConfigs")[
+            "savedVideoSetting"]["selectedClipResolution"] == "960x960"
+
+
+def test_an_unstudied_option_object_still_works_and_says_so(capsys=None):
+    """A field with no declared half keeps the permissive behaviour, so an unknown
+    camera model is not broken by this tightening -- but it warns, because the
+    answer is obtainable from the portal's bundle without a device."""
+    field = cs._Field(None, ("mysteryValue",), ("mysteryFeatureSupport",), "str")
+    obj = {"mysteryValue": "a", "mysteryFeatureSupport": 2,
+           "mysteryOptions": {"a": "Alpha", "b": "Beta"}}
+    options = cs._field_options(obj, field, "mysteryValue")
+    assert set(options) == {"a", "b", "Alpha", "Beta"}, options
+
+
 async def test_off_option_value_is_refused():
     """keep_clips_days publishes an explicit option list; a value off it is a
     caller mistake, not a capability gap."""
