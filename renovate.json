@@ -60,6 +60,13 @@
         "python"
       ],
       "enabled": false
+    },
+    {
+      "description": "aiortc pins av<18.0.0. Renovate reads camera-bridge/requirements.txt without resolving that transitive constraint, so it proposed av 18 and CI rejected it with ResolutionImpossible. Cap av here until aiortc relaxes its pin, then raise this bound in the same change.",
+      "matchPackageNames": [
+        "av"
+      ],
+      "allowedVersions": "<18"
     }
   ],
   "prConcurrentLimit": 5,
