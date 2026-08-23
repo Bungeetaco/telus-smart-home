@@ -607,11 +607,26 @@ members of it. The rest is recorded in
 [mobile-api-findings.md](mobile-api-findings.md); the entries below are the parts
 that look worth having.
 
-- **E32 The doorbell's LED is controllable and completely unexposed.**
-  The root element carries `canturnonoffdeviceled="true"` with `ledi`/`ledo` and
-  `ledmn`/`ledmx`. No website equivalent was found in the portal capture, so this
-  may be a mobile-only control. A switch (and possibly a brightness number) is the
-  obvious shape. The WRITE action was not investigated.
+- **E32 (DONE 2026-08-23) The status LED is now a Home Assistant switch.**
+  **Correction to this entry as first written:** it claimed "no website
+  equivalent was found in the portal capture, so this may be a mobile-only
+  control". That was wrong. The website API has it, in a document this project
+  had never modelled: `PUT /web/api/video/settings/generalSettings/{id}` carries
+  a `ledLightSetting` object with `canTurnOnOffLedLight`,
+  `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`,
+  `ledBrightness` and `ledLightColor`. It was in the original HAR all along --
+  the endpoint inventory listed `generalSettings` as "general camera settings"
+  and nobody opened it.
+
+  Implemented over the website API, the same read-modify-write path as the other
+  settings. The reference doorbell reports `canTurnOnOffLedLight` true and
+  `canChangeLedBrightness` false, so it gets a switch and no brightness control.
+  A brightness number exists for models that do support it but has never run
+  against real hardware.
+
+  Not to be confused with the infrared illuminator, which is `ir_led_enabled` on
+  the IMAGE settings -- a different field on a different endpoint. alarm.com's
+  own UI calls this one "Camera Status LED".
 
 - **E33 `IsBatteryPowered` / `CanGetBatteryLevel` are a cleaner battery signal.**
   The mobile document reports `BatteryLevel="-1"` with `IsBatteryPowered="false"`,
@@ -648,4 +663,21 @@ that look worth having.
   where the upstream put it. Worth revisiting only if a way to warn the user at
   the point of selection appears; Home Assistant's select has no confirmation
   affordance today.
+
+- **E38 `generalSettings` also carries the doorbell's notification toggles.**
+  Found while implementing E32; the same document holds a
+  `doorbellNotificationSetting` object with
+  `panelNotificationEnableDisableFeatureSupport` (2 on the reference doorbell),
+  `isMotionNotificationsOn`, `isButtonPressNotificationsOn`,
+  `isSmartChimeNotificationsOn` and `notificationFormat`. These are the TELUS-side
+  push notifications, which is a different thing from Home Assistant's own
+  notifications -- worth exposing mainly so the two can be kept from duplicating
+  each other. `camera_settings.get_led_settings` already reads this document, so
+  the additional cost is a field table, not another endpoint.
+
+- **E39 `generalSettings` reports solar-panel status.**
+  `solarPanelSetting` with `isConnectedToSolarPanel` and
+  `connectedToSolarPanelFeatureSupport` (0 on the reference doorbell, i.e.
+  unsupported). Only meaningful on a battery + solar camera; noted so the field
+  is not mistaken for something missing.
 

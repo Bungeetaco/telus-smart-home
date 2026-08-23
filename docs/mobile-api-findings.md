@@ -228,7 +228,7 @@ work, all read-only here):
 | --- | --- |
 | `csic` / `ic` | can-set / current indoor chime — the mobile twin of `isIndoorChimeOn` |
 | `supportsoutdoorchime`, `csocl`, `ocl`, `<ocll>` | outdoor chime: supported, can-set-level, current level, and the offered levels |
-| `canturnonoffdeviceled`, `ledi`, `ledo`, `ledmn`/`ledmx` | the doorbell's LED — brightness and on/off, with no website equivalent found |
+| `canturnonoffdeviceled`, `ledi`, `ledo`, `ledmn`/`ledmx` | the doorbell's status LED — brightness and on/off. **There IS a website equivalent** (`generalSettings` → `ledLightSetting`), which is what the implementation uses; an earlier version of this table wrongly said there was none |
 | `cancontrolirleds`, `irledenabled` | IR LEDs (the website's `infraredSetting` covers this) |
 | `cswt`, `wt`, `wsn`, `<wtol>` | mounting wedge type, e.g. "Downward Wedge Installed" |
 | `CanSetResolutionAndQuality`, `ResolutionAndQuality`, `<ResolutionAndQualityOptionList>` | live-video resolution/quality |

@@ -261,10 +261,19 @@ Contract (as implemented -- this is what callers must match):
       Response: 200 <the same object GET .../settings returns under "audio">
 
     POST .../settings/chime
-    Body: at least one of {"indoor_on": <bool>, "outdoor_on": <bool>,
-                            "outdoor_volume": <int>}
-      The doorbell's own chime. outdoor_volume is bounded by the device's
-      outdoor_tone_volume_max the same way. Response: the audio settings object.
+    Body: at least one of {"indoor_on": <bool>, "chime_type": <int>,
+                            "outdoor_on": <bool>, "outdoor_volume": <int>}
+      The doorbell's own chime. chime_type is the WIRED CHIME TYPE and must be
+      one of the values the device offers; outdoor_volume is bounded by the
+      device's outdoor_tone_volume_max the same way.
+      Response: the audio settings object.
+
+    POST .../settings/led
+    Body: at least one of {"enabled": <bool>, "brightness": <int>}
+      The device's STATUS indicator light -- not the infrared illuminator, which
+      is ir_led_enabled on the image route. The reference doorbell can toggle it
+      but not dim it, so brightness is a 422 there.
+      Response: 200 <the same object GET .../settings returns under "led">
 
     POST .../settings/image
     Body: at least one of brightness / contrast / saturation / sharpness /
@@ -276,7 +285,7 @@ Contract (as implemented -- this is what callers must match):
       (int or str), pretrigger_enabled (bool), keep_clips_days (int),
       alarm_clip_duration (int). Response: the video config object.
 
-      All four writes read the current settings first, purely to honour the
+      All five writes read the current settings first, purely to honour the
       FeatureSupport gate above (422 rather than a write TELUS would refuse);
       the read-modify-write a website settings PUT requires -- it sends the
       WHOLE object back, and a partial body risks resetting unrelated fields --
@@ -392,6 +401,12 @@ _VIDEO_FIELDS: dict[str, type | tuple[type, ...]] = {
     "pretrigger_enabled": bool,
     "keep_clips_days": int,
     "alarm_clip_duration": int,
+}
+# generalSettings -> ledLightSetting: the device's STATUS indicator light, not the
+# infrared illuminator (that is `ir_led_enabled` on the image route).
+_LED_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "enabled": bool,
+    "brightness": int,
 }
 _CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
     "indoor_on": bool,
@@ -1328,6 +1343,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
                 telus_session, login_lock, camera_settings.get_image_settings, camera_id)
             video = await _fetch_with_relogin(
                 telus_session, login_lock, camera_settings.get_video_config, camera_id)
+            led = await _fetch_with_relogin(
+                telus_session, login_lock, camera_settings.get_led_settings, camera_id)
         except Exception:
             log.exception("Control endpoint: camera settings fetch failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1342,6 +1359,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             "audio": audio,
             "image": image,
             "video": video,
+            "led": led,
             "siren": await _mws_camera_record(get_siren_devices, camera_id,
                                               _MWS_SIREN_READ, _normalize_siren),
             "privacy": await _mws_camera_record(get_privacy_mode_info, camera_id,
@@ -1458,6 +1476,12 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         return await _settings_write(
             request, camera_settings.get_audio_settings, camera_settings.set_chime,
             _CHIME_FIELDS, _CHIME_SUPPORT.__getitem__, augment=_augment_audio)
+
+    async def handle_set_led(request: web.Request) -> web.Response:
+        """Turn the camera's status LED on/off, or set its brightness."""
+        return await _settings_write(
+            request, camera_settings.get_led_settings, camera_settings.set_led_settings,
+            _LED_FIELDS, lambda name: f"supports_{name}")
 
     async def handle_set_image(request: web.Request) -> web.Response:
         """Set picture/IR fields on one camera (see _IMAGE_FIELDS for the set)."""
@@ -1651,6 +1675,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_get("/control/cameras/{camera_id}/diagnostics", handle_diagnostics)
     app.router.add_post("/control/cameras/{camera_id}/settings/volume", handle_set_volume)
     app.router.add_post("/control/cameras/{camera_id}/settings/chime", handle_set_chime)
+    app.router.add_post("/control/cameras/{camera_id}/settings/led", handle_set_led)
     app.router.add_post("/control/cameras/{camera_id}/settings/image", handle_set_image)
     app.router.add_post("/control/cameras/{camera_id}/settings/video", handle_set_video)
     app.router.add_post("/control/cameras/{camera_id}/siren", handle_siren)

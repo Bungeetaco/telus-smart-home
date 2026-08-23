@@ -72,6 +72,7 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/cameras/{camera_id}/diagnostics` | bearer | Camera signal strength, battery, device status |
 | POST | `/control/cameras/{camera_id}/settings/volume` | bearer | Set the camera speaker (call) volume |
 | POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime, wired chime type, outdoor tone and its volume |
+| POST | `/control/cameras/{camera_id}/settings/led` | bearer | Turn the device's status LED on/off, or set its brightness |
 | POST | `/control/cameras/{camera_id}/settings/image` | bearer | Set picture settings (brightness, HDR, IR, night vision, …) |
 | POST | `/control/cameras/{camera_id}/settings/video` | bearer | Set clip settings (resolution, quality, retention, pre-trigger) |
 | POST | `/control/cameras/{camera_id}/siren` | bearer | Start or stop the camera siren |
@@ -596,6 +597,13 @@ which makes it the heaviest read here; the Home Assistant side polls it every
     "pretrigger_enabled": true,
     "raw": {}
   },
+  "led": {
+    "supports_enabled": true,
+    "enabled": true,
+    "supports_brightness": false,
+    "brightness": 0,
+    "raw": {}
+  },
   "siren": {
     "can_manually_trigger": true,
     "active": false,
@@ -686,6 +694,24 @@ routes accept, each paired with a `supports_<field>` boolean off the matching
 a range or a list, plus `raw`. **Which fields appear is device-dependent** — the
 example above is a doorbell; a camera without IR will still return the IR keys,
 with `supports_*` false. Always branch on `supports_*`, never on key presence.
+
+### The `led` object — the status indicator light
+
+Read from `generalSettings`, a document that also carries the doorbell's
+TELUS-side notification toggles and its solar-panel status; neither is modelled,
+but both are in `raw`, and both are resent untouched by a write.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `supports_enabled` | bool | From `canTurnOnOffLedLight` |
+| `enabled` | bool | Whether the light is on |
+| `supports_brightness` | bool | From `canChangeLedBrightness` — a **separate** flag, and `false` on the reference doorbell, which can switch its LED but not dim it |
+| `brightness` | int | Current brightness. `brightness_min` / `brightness_max` appear only if the device publishes them; the reference doorbell publishes neither |
+| `raw` | object | The untouched `ledLightSetting` document |
+
+**This is the status indicator light, not the infrared illuminator.** The IR LEDs
+are `ir_led_enabled` in the `image` object, a different field on a different
+endpoint. alarm.com's own interface calls this one "Camera Status LED".
 
 ### The `siren` and `privacy` sections — a fixed contract
 
@@ -904,6 +930,39 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
   -d '{"indoor_on": true, "outdoor_volume": 1}' \
   $BASE/control/cameras/<camera_id>/settings/chime
+```
+
+---
+
+## `POST /control/cameras/{camera_id}/settings/led`
+
+Turns the device's status indicator light on or off, or sets its brightness.
+Both fields are optional and independent — send only what you want changed.
+
+**Path parameter:** `camera_id` — must exist in the camera registry.
+
+**Request body (JSON)**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | no | The light on/off. Gated on `supports_enabled` |
+| `brightness` | int | no | Gated on `supports_brightness`, which is a *different* flag and is `false` on the reference doorbell — `enabled` works there, `brightness` is a `422`. Bounded by `brightness_min`/`brightness_max` when the device publishes them; out of range is a `400`, never a clamp |
+
+An empty body — no recognised field — is a `400 malformed` rather than a no-op.
+
+**Success response:** the refreshed `led` object (same shape as `GET
+.../settings`'s `led`).
+
+**Errors:** the shared table. Both fields are support-checked **before anything
+is written**, so a partly-unsupported request leaves the device untouched.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}' \
+  $BASE/control/cameras/<camera_id>/settings/led
 ```
 
 ---

@@ -56,7 +56,8 @@ CAM = "100000000-2048"
 # fixture stem -> the URL path segment the client reads it from
 KINDS = {"audio_settings": "audioSettings",
          "image_settings": "imageSettings",
-         "video_configs": "videoConfigs"}
+         "video_configs": "videoConfigs",
+         "general_settings": "generalSettings"}
 
 
 def fixture(name):
@@ -238,6 +239,27 @@ class FakePortal:
             return web.json_response({"error": "this endpoint takes a flat object"},
                                      status=400)
         self.writes.append((kind, body))
+        # Echo the document back the way the real endpoint does, rather than a
+        # bare acknowledgement: the setters parse this reply into their return
+        # value, so a fake that answers with an empty document would silently
+        # exercise only the fallback path.
+        stem = self._stem(kind)
+        if stem is not None:
+            attrs = {k: v for k, v in body.items()
+                     if k not in ("id", "type") and not isinstance(v, dict)}
+            rels, included = {}, []
+            for key, value in body.items():
+                if not isinstance(value, dict):
+                    continue
+                ref = {"type": value.get("type", "x"), "id": value.get("id", CAM)}
+                rels[key] = {"data": ref}
+                included.append({**ref, "attributes":
+                                 {k: v for k, v in value.items()
+                                  if k not in ("id", "type")}})
+            return web.json_response({
+                "data": {"id": body.get("id", CAM), "type": body.get("type", "x"),
+                         "attributes": attrs, "relationships": rels},
+                "included": included})
         return web.json_response({"data": {"id": CAM, "type": "x", "attributes": {}}})
 
     def last(self, kind):
@@ -386,6 +408,59 @@ async def test_video_write_reaches_the_nested_relationship():
         assert sent["savedVideoSetting"]["selectedKeepClipsDays"] == 30
         assert sent["liveVideoConfig"] == before["liveVideoConfig"]
         assert sent["pirVideoConfig"] == before["pirVideoConfig"]
+
+
+async def test_led_toggles_and_preserves_the_rest_of_general_settings():
+    """The status LED lives in generalSettings beside the doorbell's notification
+    toggles and its solar-panel status. A PUT replaces the whole document, so
+    switching the light must resend both of those untouched -- otherwise turning
+    off an indicator light would quietly reset someone's notifications."""
+    async with portal_at(8488) as (portal, telus):
+        before = cs._flatten(portal.docs["general_settings"])
+        result = await cs.set_led_settings(telus, CAM, enabled=False)
+
+        sent = portal.last("generalSettings")
+        assert "data" not in sent, "the write must be flat, not a JSON:API envelope"
+        assert sent["ledLightSetting"]["isLedLightEnabled"] is False
+        assert sent["doorbellNotificationSetting"] == before["doorbellNotificationSetting"]
+        assert sent["solarPanelSetting"] == before["solarPanelSetting"]
+
+        changed = {k: v for k, v in paths(sent).items() if paths(before).get(k) != v}
+        assert set(changed) == {"ledLightSetting.isLedLightEnabled"}, changed
+        assert result["enabled"] is False, result
+
+
+async def test_led_brightness_is_refused_on_a_camera_that_cannot_dim():
+    """canTurnOnOffLedLight and canChangeLedBrightness are separate flags, and the
+    reference doorbell reports true/false: it can switch the light but not dim
+    it. Conflating them would offer a slider that silently does nothing."""
+    async with portal_at(8489) as (portal, telus):
+        led = cs._parse_table(cs._flatten(portal.docs["general_settings"]), cs._LED_FIELDS)
+        assert led["supports_enabled"] is True, led
+        assert led["supports_brightness"] is False, led
+
+        await expect_error("brightness",
+                           lambda: cs.set_led_settings(telus, CAM, brightness=5),
+                           unsupported=True)
+        assert portal.writes == []
+
+        # ...and a request mixing the two changes nothing at all.
+        await expect_error("mixed",
+                           lambda: cs.set_led_settings(telus, CAM,
+                                                       enabled=True, brightness=5),
+                           unsupported=True)
+        assert portal.writes == []
+
+
+async def test_led_rejects_a_wrong_typed_value():
+    async with portal_at(8490) as (portal, telus):
+        await expect_error("enabled=1",
+                           lambda: cs.set_led_settings(telus, CAM, enabled=1),
+                           unsupported=False)
+        await expect_error("no fields",
+                           lambda: cs.set_led_settings(telus, CAM),
+                           unsupported=False)
+        assert portal.writes == []
 
 
 async def test_out_of_range_is_refused_and_nothing_is_written():
