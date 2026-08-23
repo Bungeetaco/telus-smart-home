@@ -50,6 +50,16 @@
         "dependencies",
         "review-required"
       ]
+    },
+    {
+      "description": "CI's Python version must MIRROR the runtime image (camera-bridge/Dockerfile: FROM python:<ver>-slim). Renovate sees the two as unrelated deps, so an independent setup-python bump would test an interpreter the container never runs -- and it opened exactly that PR. Bump the Dockerfile and the workflow together, by hand.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "enabled": false
     }
   ],
   "prConcurrentLimit": 5,
