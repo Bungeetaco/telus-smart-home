@@ -636,6 +636,7 @@ async def set_call_volume(telus: TelusSession, camera_id: str, volume: int) -> d
 
 async def set_chime(telus: TelusSession, camera_id: str, *,
                     indoor_on: bool | None = None,
+                    chime_type: int | None = None,
                     outdoor_on: bool | None = None,
                     outdoor_volume: int | None = None) -> dict:
     """Set the doorbell's indoor chime / outdoor tone; returns the audio shape.
@@ -647,13 +648,23 @@ async def set_chime(telus: TelusSession, camera_id: str, *,
     the outdoor tone but not change its level -- so this argument raises
     ``unsupported`` there while ``outdoor_on`` works.
 
+    ``chime_type`` is the style of chime the doorbell is WIRED TO, not a ringtone
+    -- see CHIME_TYPES. It must be one of the values the camera publishes in
+    ``chimeTypeOptions``; anything else is refused as a caller mistake. Setting it
+    to CHIME_TYPE_NONE is what the portal treats as "no wired chime", and it then
+    disables the indoor-chime toggle (see _parse_audio's indoor_chime_available).
+
     Raises CameraSettingsError with ``unsupported=True`` if any requested part is
     unsupported -- checked for ALL requested fields before anything is written,
     so a partly-unsupported request leaves the camera untouched rather than
     half-applied. Passing no arguments at all is an error, not a no-op.
     """
-    if indoor_on is None and outdoor_on is None and outdoor_volume is None:
+    if (indoor_on is None and chime_type is None and outdoor_on is None
+            and outdoor_volume is None):
         raise CameraSettingsError("no chime fields given")
+    if chime_type is not None and (isinstance(chime_type, bool)
+                                   or not isinstance(chime_type, int)):
+        raise CameraSettingsError("chime_type takes an integer", field="chime_type")
     if outdoor_volume is not None and (isinstance(outdoor_volume, bool)
                                        or not isinstance(outdoor_volume, int)):
         raise CameraSettingsError("outdoor_volume takes an integer",
@@ -673,6 +684,10 @@ async def set_chime(telus: TelusSession, camera_id: str, *,
     indoor_ok = _supported(chime, ("indoorChimeEnableDisableFeatureSupport",))
     outdoor_ok = _supported(chime, ("outdoorToneEnableDisableFeatureSupport",))
     volume_ok = _supported(chime, ("outdoorToneVolumeFeatureSupport",))
+    type_ok = _supported(chime, ("indoorChimeTypeFeatureSupport",))
+    if chime_type is not None and not type_ok:
+        raise CameraSettingsError("this camera does not support selecting a chime type",
+                                  unsupported=True, field="chime_type")
     if indoor_on is not None and not indoor_ok:
         raise CameraSettingsError("this camera does not support the indoor chime",
                                   unsupported=True, field="indoor_chime_on")
@@ -683,6 +698,13 @@ async def set_chime(telus: TelusSession, camera_id: str, *,
         raise CameraSettingsError("this camera does not support outdoor tone volume",
                                   unsupported=True, field="outdoor_tone_volume")
 
+    if chime_type is not None:
+        offered = _options(chime, "chimeType")
+        if offered is not None and chime_type not in offered:
+            raise CameraSettingsError(
+                f"chime_type={chime_type} is not one of the values this camera offers "
+                f"({', '.join(str(o) for o in offered)})", field="chime_type")
+        chime["selectedChimeType"] = chime_type
     if indoor_on is not None:
         chime["isIndoorChimeOn"] = bool(indoor_on)
     if outdoor_on is not None:
@@ -695,8 +717,8 @@ async def set_chime(telus: TelusSession, camera_id: str, *,
                 f"outdoor_volume={outdoor_volume} is outside the range this camera "
                 f"reports ({low}..{high})", field="outdoor_tone_volume")
         chime["outdoorToneVolumeValue"] = outdoor_volume
-    log.info("Setting chime on camera %s (indoor=%s outdoor=%s volume=%s)",
-             camera_id, indoor_on, outdoor_on, outdoor_volume)
+    log.info("Setting chime on camera %s (indoor=%s type=%s outdoor=%s volume=%s)",
+             camera_id, indoor_on, chime_type, outdoor_on, outdoor_volume)
     return _parse_audio(_flatten_result(await _put_doc(telus, url, doc), doc))
 
 

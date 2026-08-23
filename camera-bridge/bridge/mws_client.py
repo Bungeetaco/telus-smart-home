@@ -833,6 +833,86 @@ def _mws_device_id(device_id) -> str:
     return str(device_id).rsplit("-", 1)[-1]
 
 
+def parse_chime_type_options(result: dict) -> dict:
+    """Pull the chime-type options out of a GetCurrentDoorbellSettings ack.
+
+    Returns ``{"options": [{"value": int, "label": str, "disables_indoor_chime":
+    bool}, ...], "selected": int | None}``, or empty when the response carries
+    none. Pure function -- safe to unit-test with a literal ack.
+
+    The point of this call is the LABELS. The website API publishes
+    ``chimeTypeOptions`` as bare integers (``[-1, 0, 1]``) and the web portal maps
+    them to names through a client-side enum, so a client that only speaks the
+    website API has numbers and no way to name them. The mobile API gives the
+    names directly: ``<scto>`` holds one ``<sctoi>`` per option, each carrying
+    ``n`` (display name), ``v`` (value) and ``sdict``
+    (shouldDisableIndoorChimeToggle) -- names taken from the decompiled parser
+    ``SupportedChimeTypeOptionsInfoParser``. ``<ct>`` is the current selection in
+    the same shape.
+
+    ``disables_indoor_chime`` is the server telling the client that picking this
+    option makes the indoor-chime toggle meaningless -- the "no wired chime"
+    case. The web portal implements the same rule client-side. Honour it rather
+    than reimplementing the reasoning: the server knows which value means "none"
+    on this model, and this client should not have to.
+    """
+    data = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(data, dict):
+        return {"options": [], "selected": None}
+
+    def _one(item):
+        if not isinstance(item, dict) or "v" not in item:
+            return None
+        value = _as_int_str(item.get("v"))
+        if value is None:
+            return None
+        return {"value": value,
+                "label": str(item.get("n") or "").strip() or str(value),
+                "disables_indoor_chime": _json_bool(item.get("sdict"))}
+
+    raw = data.get("scto")
+    options = []
+    for item in (raw if isinstance(raw, list) else [raw] if raw else []):
+        parsed = _one(item)
+        if parsed is not None:
+            options.append(parsed)
+
+    current = _one(data.get("ct"))
+    return {"options": options, "selected": current["value"] if current else None}
+
+
+def _as_int_str(value):
+    """int() of an XML attribute value, or None when it is not a number."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+async def get_doorbell_settings(session: aiohttp.ClientSession, session_token: str,
+                                device_id, *, customer_id: str | int | None = None,
+                                mobile_device_uid: str | None = None,
+                                seamless_login_token: str | None = None) -> dict:
+    """POST GetCurrentDoorbellSettings for one doorbell and return the ack.
+
+    Read-only. This project uses it for exactly one thing -- the human-readable
+    chime-type option names the website API does not provide (see
+    parse_chime_type_options) -- but the response is a large doorbell settings
+    document, so ``data`` carries much more than that and is worth a look before
+    adding another endpoint.
+
+    Request shape from the decompiled GetCurrentDoorbellSettingsRequest: the
+    standard token envelope plus ``DeviceId``, which is the bare numeric MWS id.
+    """
+    form = _base_token_form(
+        "GetCurrentDoorbellSettings", session_token, customer_id=customer_id,
+        mobile_device_uid=mobile_device_uid, seamless_login_token=seamless_login_token)
+    form["DeviceId"] = _mws_device_id(device_id)
+    log.debug("GetCurrentDoorbellSettings for DeviceId=%s "
+              "(SessionToken/slt/Haiku redacted)", form["DeviceId"])
+    return _parse_mws_ack(await _post_mws(session, form))
+
+
 async def get_siren_devices(session: aiohttp.ClientSession, session_token: str, *,
                             customer_id: str | int | None = None,
                             mobile_device_uid: str | None = None,

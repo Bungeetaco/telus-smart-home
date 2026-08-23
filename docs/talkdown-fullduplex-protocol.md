@@ -543,22 +543,33 @@ Logged rather than fixed, per the project's rule that a gap noticed is a gap
 recorded. None of these block the shipped feature; all were found while grounding
 `camera_settings.py` against the browser capture.
 
-- **E26 The doorbell's chime has no Home Assistant entity.**
-  `set_chime` works and `POST …/settings/chime` is routed, but nothing in the
-  integration calls it -- `const.py` even defines
-  `CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE` with no consumer. The indoor chime
-  on/off and the outdoor tone on/off are both `FeatureSupport: 2` on the
-  reference doorbell, so two switches would work today. Note the outdoor tone's
-  *volume* is `FeatureSupport: 0` there -- a control for it would be correctly
-  refused, so gate on `supports_outdoor_tone_volume`, which is a different flag
-  from `supports_outdoor_tone`.
+- **E26 (DONE 2026-08-23) The doorbell's chime now has Home Assistant entities.**
+  Two switches per capable camera -- indoor chime and outdoor tone -- over the
+  existing `POST .../settings/chime` route, which previously had no caller at all
+  (`const.py` defined the URL template and nothing used it). They are separately
+  gated: the reference doorbell reports `indoorChimeEnableDisableFeatureSupport`
+  and `outdoorToneEnableDisableFeatureSupport` both 2, but
+  `outdoorToneVolumeFeatureSupport` 0 -- it can mute the outdoor tone, not level
+  it -- so no volume control is offered there.
 
-- **E27 `selectedChimeType` is readable but not writable.**
-  `get_audio_settings` reports `chime_type` and `chime_type_options`
-  (`[-1, 0, 1]` on the reference device, `indoorChimeTypeFeatureSupport: 2`), but
-  `set_chime` has no argument for it. A select entity is the obvious shape. The
-  option values are bare ints with no labels in the payload; the portal UI must
-  hold the names, so a capture of that screen would be needed to label them.
+- **E27 (DONE 2026-08-23) The wired chime type is now readable AND writable, with names.**
+  This is the style of physical chime the doorbell is wired to, NOT a ringtone.
+  The open question was labels: the website API publishes `chimeTypeOptions` as
+  bare integers and the web portal names them with a client-side enum, so the
+  entry predicted "a capture of that screen would be needed".
+
+  It did not. The **mobile** API hands the names over directly:
+  `GetCurrentDoorbellSettings` returns `<sctoi>` elements carrying `n` (name),
+  `v` (value) and `sdict` (`shouldDisableIndoorChimeToggle`). Live from the
+  reference doorbell: `-1` = None (`sdict` true), `0` = Mechanical, `1` = Digital.
+  The bridge merges these into the audio section as `chime_type_choices` and Home
+  Assistant renders a select from them, falling back to the bare integers if that
+  secondary read fails -- losing the labels must not lose the control.
+
+  The `sdict` flag is the part worth keeping: it is the server saying which value
+  means "no wired chime" on THIS model, which is what lets the indoor-chime
+  switch go unavailable in that state without any client hardcoding `-1`.
+  See [mobile-api-findings.md](mobile-api-findings.md).
 
 - **E28 Resolve the option-list key/value ambiguity.**
   `clipResolutionOptions` and `clipQualityOptions` are objects, and the API is
@@ -588,4 +599,53 @@ recorded. None of these block the shipped feature; all were found while groundin
   names kept for untested camera models may be real dBm and mislabelling would
   poison Home Assistant's long-term statistics. Confirming that every model this
   integration sees reports the normalized score would allow labelling it `%`.
+
+## Gaps found while implementing E26/E27 (2026-08-23)
+
+`GetCurrentDoorbellSettings` returns a large document and this project reads two
+members of it. The rest is recorded in
+[mobile-api-findings.md](mobile-api-findings.md); the entries below are the parts
+that look worth having.
+
+- **E32 The doorbell's LED is controllable and completely unexposed.**
+  The root element carries `canturnonoffdeviceled="true"` with `ledi`/`ledo` and
+  `ledmn`/`ledmx`. No website equivalent was found in the portal capture, so this
+  may be a mobile-only control. A switch (and possibly a brightness number) is the
+  obvious shape. The WRITE action was not investigated.
+
+- **E33 `IsBatteryPowered` / `CanGetBatteryLevel` are a cleaner battery signal.**
+  The mobile document reports `BatteryLevel="-1"` with `IsBatteryPowered="false"`,
+  which says "no battery" unambiguously. The website's `batteryLevel` is
+  present-and-`0` on the same device, which is why the bridge has to gate on
+  `shouldDisplayBatteryLevel` instead. Worth cross-checking against a
+  battery-powered camera before trusting either.
+
+- **E34 Live-video resolution/quality is settable and unexposed.**
+  `CanSetResolutionAndQuality="true"` with `ResolutionAndQuality` and a
+  `<ResolutionAndQualityOptionList>`. Distinct from the clip settings the video
+  route already covers -- this is the LIVE stream, so it would directly affect
+  what the bridge restreams.
+
+- **E35 The outdoor chime level disagrees between the two APIs.**
+  Mobile reports `ocl="3"`, website reports `outdoorToneVolumeValue: 0`, for what
+  should be the same setting. Both agree it is not settable on this device
+  (`csocl="false"` / `outdoorToneVolumeFeatureSupport: 0`), so nothing depends on
+  it -- but the two reads are not interchangeable and one of them is wrong. A
+  device that CAN set it would settle which.
+
+- **E36 The `sdcds` attribute on a chime-type option is unexplained.**
+  It sits beside `n`/`v`/`sdict` and is `true` for None and Mechanical, `false`
+  for Digital on the reference doorbell. The decompiled parser does not read it.
+  Harmless to ignore, but it is a hint about some UI rule this project does not
+  model.
+
+- **E37 Selecting the "none" chime type silently disables the indoor chime.**
+  Found in live testing: `chime_type: -1` leaves `indoor_chime_on` false, and
+  restoring the type does not restore the toggle. TELUS does this, not the bridge.
+  It is documented in [control-api.md](control-api.md) and
+  [ha-integration.md](ha-integration.md), and deliberately NOT worked around --
+  auto-re-enabling a chime the user may have wanted off is worse than leaving it
+  where the upstream put it. Worth revisiting only if a way to warn the user at
+  the point of selection appears; Home Assistant's select has no confirmation
+  affordance today.
 

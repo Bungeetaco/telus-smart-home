@@ -332,6 +332,8 @@ from .mws_client import (
     set_privacy_mode,
     start_siren,
     stop_siren,
+    get_doorbell_settings,
+    parse_chime_type_options,
 )
 from .telus_auth import RateLimited, relogin_if_stale
 from .telus_rest import (
@@ -393,6 +395,7 @@ _VIDEO_FIELDS: dict[str, type | tuple[type, ...]] = {
 }
 _CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
     "indoor_on": bool,
+    "chime_type": int,
     "outdoor_on": bool,
     "outdoor_volume": int,
 }
@@ -405,6 +408,9 @@ _CHIME_FIELDS: dict[str, type | tuple[type, ...]] = {
 # only after a round trip against a rate-limited account.
 _CHIME_SUPPORT: dict[str, str] = {
     "indoor_on": "supports_indoor_chime",
+    # The chime TYPE is a third, separate feature enum
+    # (indoorChimeTypeFeatureSupport) -- not the indoor chime's on/off flag.
+    "chime_type": "supports_chime_type",
     "outdoor_on": "supports_outdoor_tone",
     "outdoor_volume": "supports_outdoor_tone_volume",
 }
@@ -502,6 +508,13 @@ _MWS_PRIVACY_READ = "GetAllCameraPrivacyModeInfo"
 # Lives here rather than in config.py because it is an implementation detail of
 # this route, not a knob an operator should be turning against a live account.
 _MWS_ACCOUNT_READ_TTL_S = 30
+
+# The chime-type option LIST is hardware, not state: a doorbell offers the same
+# handful of wired-chime types for its whole life. Re-reading it on the 30s
+# account-wide TTL would be one upstream round trip per camera per poll to be told
+# the same three values, so it is held for an hour. The current SELECTION is not
+# cached here -- it comes from the website settings read in the same response.
+_MWS_CHIME_OPTIONS_TTL_S = 3600
 
 # How many container levels below an MWS action result _mws_entry_for_device
 # descends before giving up. The known shapes sit one level below the ack's
@@ -1160,14 +1173,16 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             result = await _mws_post(action_fn, mobile, *args)
         return result
 
-    async def _mws_account_fetch(action_fn, what: str) -> tuple[dict | None, float]:
-        """Run one account-wide MWS read; return (result or None, seconds to cache).
+    async def _mws_account_fetch(action_fn, what: str, args: tuple = (),
+                                 ttl: float = _MWS_ACCOUNT_READ_TTL_S
+                                 ) -> tuple[dict | None, float]:
+        """Run one cached MWS read; return (result or None, seconds to cache).
 
         Never raises -- the caller is a best-effort section of the settings
         bundle. The TTL comes back with the result so a rate-limited edge can be
         held longer than an ordinary miss."""
         try:
-            result = await _mws_call(action_fn)
+            result = await _mws_call(action_fn, *args)
         except RateLimited as err:
             # Logged apart from every other failure, and held for the server's own
             # Retry-After: this is Cloudflare's edge limiter (telus_auth.RateLimited),
@@ -1178,17 +1193,23 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             log.warning("Control endpoint: %s rate limited by the edge, "
                         "Retry-After=%ss; holding a negative result that long",
                         what, err.retry_after_s)
-            return None, max(_MWS_ACCOUNT_READ_TTL_S, float(err.retry_after_s))
+            return None, max(ttl, float(err.retry_after_s))
         except Exception:
             log.warning("Control endpoint: %s read failed", what, exc_info=True)
-            return None, _MWS_ACCOUNT_READ_TTL_S
+            return None, ttl
         if not result.get("ok"):
             log.info("Control endpoint: %s not ok (%s)", what, _mws_failure_note(result))
-            return None, _MWS_ACCOUNT_READ_TTL_S
-        return result, _MWS_ACCOUNT_READ_TTL_S
+            return None, ttl
+        return result, ttl
 
-    async def _mws_account_read(action_fn, what: str) -> dict | None:
-        """The cached result of one account-wide MWS read, or None.
+    async def _mws_account_read(action_fn, what: str, args: tuple = (),
+                                ttl: float = _MWS_ACCOUNT_READ_TTL_S) -> dict | None:
+        """The cached result of one MWS read, or None.
+
+        `what` is the cache key as well as the log label, so a PER-DEVICE read
+        passes a key that includes the device id (see _chime_type_choices) while
+        the account-wide reads pass the bare action name and share one entry
+        across every camera in a sweep.
 
         A FAILURE is cached exactly like a success. The only caller is a poll, so
         the alternative is every camera in the sweep independently retrying an
@@ -1207,8 +1228,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             cached = _mws_account_cache.get(what)
             if cached is not None and time.monotonic() < cached[0]:
                 return cached[1]
-            result, ttl = await _mws_account_fetch(action_fn, what)
-            _mws_account_cache[what] = (time.monotonic() + ttl, result)
+            result, hold_s = await _mws_account_fetch(action_fn, what, args, ttl)
+            _mws_account_cache[what] = (time.monotonic() + hold_s, result)
             return result
 
     def _mws_invalidate(what: str) -> None:
@@ -1244,6 +1265,50 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             return None
         return normalize(entry)
 
+    async def _chime_type_choices(camera_id: str) -> list:
+        """Labelled chime-type options for one camera, or [] if unavailable.
+
+        The website API publishes `chimeTypeOptions` as bare integers
+        (`[-1, 0, 1]`) and leaves naming them to a client-side enum in the portal's
+        JavaScript. The mobile API hands over the names instead -- and, more
+        usefully, a per-option `disables_indoor_chime` flag saying which value
+        means "no wired chime" on THIS model. Asking the server beats hardcoding a
+        mapping this project would then have to keep true for every camera model.
+
+        Best-effort: [] when there is no mobile session or the read fails, and the
+        caller falls back to the bare integers. Losing the labels must not lose
+        the control.
+
+        Cached for _MWS_CHIME_OPTIONS_TTL_S rather than the account-wide 30s: the
+        set of chime types a doorbell offers is a property of the hardware, not
+        state, so re-reading it every poll would be one upstream round trip per
+        camera per cycle to be told the same three options. The CURRENT selection
+        is not taken from here -- that comes from the website settings in the same
+        response, which the chime write refreshes."""
+        if _mobile_session() is None:
+            return []
+        result = await _mws_account_read(
+            get_doorbell_settings, f"GetCurrentDoorbellSettings:{camera_id}",
+            args=(camera_id,), ttl=_MWS_CHIME_OPTIONS_TTL_S)
+        if result is None:
+            return []
+        return parse_chime_type_options(result).get("options") or []
+
+    async def _augment_audio(camera_id: str, audio) -> object:
+        """Add the labelled chime-type options to an audio section, in place.
+
+        Called on EVERY response that carries an audio object -- the settings
+        bundle and both audio write routes -- because the section is a single
+        contract and a caller must not get a different shape depending on how it
+        asked. Skipping it on the write path is not a cosmetic difference: a
+        client that renders a picker from the labels, then writes, then adopts the
+        echoed section, would lose the labels and fall back to bare integers,
+        invalidating the very options it had just shown. That was a real bug.
+        """
+        if isinstance(audio, dict) and audio.get("supports_chime_type"):
+            audio["chime_type_choices"] = await _chime_type_choices(camera_id)
+        return audio
+
     async def handle_camera_settings(request: web.Request) -> web.Response:
         """Audio, image and video settings for one camera, plus its siren and
         privacy records. Every object carries supports_* flags the caller must
@@ -1266,6 +1331,12 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         except Exception:
             log.exception("Control endpoint: camera settings fetch failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
+
+        # Folded into `audio` rather than offered as a sibling section: it is part
+        # of the chime control's own contract, and a caller that has the options
+        # but has to look elsewhere for their names is the situation this exists
+        # to remove. Absent/[] means "names unavailable, use chime_type_options".
+        await _augment_audio(camera_id, audio)
 
         return web.json_response({
             "audio": audio,
@@ -1313,7 +1384,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         return None
 
     async def _settings_write(request: web.Request, getter, setter, spec: dict,
-                              support_flags) -> web.Response:
+                              support_flags, augment=None) -> web.Response:
         """Shared body for the four settings writes: validate, refuse anything
         the device reports unsupported, then apply.
 
@@ -1371,19 +1442,22 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             log.exception("Control endpoint: %s failed for %s", setter.__name__, camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
 
+        if augment is not None:
+            result = await augment(camera_id, result)
         return web.json_response(result)
 
     async def handle_set_volume(request: web.Request) -> web.Response:
         """Set the camera's talk/call volume -- the volume talkdown plays at."""
         return await _settings_write(
             request, camera_settings.get_audio_settings, camera_settings.set_call_volume,
-            {"volume": int}, lambda _name: "supports_call_volume")
+            {"volume": int}, lambda _name: "supports_call_volume",
+            augment=_augment_audio)
 
     async def handle_set_chime(request: web.Request) -> web.Response:
         """Set the doorbell's own indoor chime / outdoor tone."""
         return await _settings_write(
             request, camera_settings.get_audio_settings, camera_settings.set_chime,
-            _CHIME_FIELDS, _CHIME_SUPPORT.__getitem__)
+            _CHIME_FIELDS, _CHIME_SUPPORT.__getitem__, augment=_augment_audio)
 
     async def handle_set_image(request: web.Request) -> web.Response:
         """Set picture/IR fields on one camera (see _IMAGE_FIELDS for the set)."""

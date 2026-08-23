@@ -250,7 +250,9 @@ CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE = (
 # POST, body {"volume": int} -- the 0-10 speaker/call volume talkdown plays at.
 CAMERA_BRIDGE_CAMERA_VOLUME_URL_TEMPLATE = (
     "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/volume")
-# POST, body {"indoor_on": bool?, "outdoor_on": bool?, "outdoor_volume": int?}.
+# POST, body {"indoor_on": bool?, "outdoor_on": bool?, "chime_type": int?,
+# "outdoor_volume": int?} -- any subset. Answers with the whole refreshed
+# `audio` section, which the caller folds back in rather than re-polling.
 CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE = (
     "http://127.0.0.1:8199/control/cameras/{camera_id}/settings/chime")
 # POST, body of brightness/contrast/saturation/sharpness/is_flipped/hdr_enabled/

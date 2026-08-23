@@ -193,6 +193,61 @@ def test_xml_ack_mapping():
           "their spelling, ts/s/em map to the JSON shape, junk fails closed")
 
 
+def test_chime_type_options_are_parsed_with_their_server_supplied_names():
+    """The whole reason GetCurrentDoorbellSettings is called at all.
+
+    The website API publishes chimeTypeOptions as bare integers and leaves naming
+    them to a client-side enum in the portal's JavaScript. The mobile API sends
+    the names -- and `sdict`, which says which value means "no wired chime" on
+    this model. Asking the server beats hardcoding a mapping that would then have
+    to stay true for every camera model.
+
+    This body is the LIVE response from the reference doorbell, trimmed to the
+    chime members; attribute names come from the decompiled
+    SupportedChimeTypeOptionsInfoParser (n / v / sdict).
+    """
+    real = ('<gcdsr ts="0" dsl="false" s="true" dn="Doorbell">'
+            '<ct n="Mechanical" v="0" sdict="false" sdcds="true"/>'
+            '<scto>'
+            '<sctoi n="None" v="-1" sdict="true" sdcds="true"/>'
+            '<sctoi n="Mechanical" v="0" sdict="false" sdcds="true"/>'
+            '<sctoi n="Digital" v="1" sdict="false" sdcds="false"/>'
+            '</scto></gcdsr>')
+    parsed = mws_client.parse_chime_type_options(mws_client._parse_mws_ack(real))
+
+    assert parsed["selected"] == 0, parsed
+    assert [o["value"] for o in parsed["options"]] == [-1, 0, 1], parsed
+    assert [o["label"] for o in parsed["options"]] == ["None", "Mechanical", "Digital"]
+    # Only "None" disables the indoor chime toggle. Nothing here hardcodes -1:
+    # the server says which one it is, which is the point.
+    assert [o["disables_indoor_chime"] for o in parsed["options"]] == [True, False, False]
+
+    # sdict arrives as the STRING "true"/"false" like every other MWS boolean, so
+    # a plain truthiness test would mark every option as disabling.
+    assert parsed["options"][1]["disables_indoor_chime"] is False
+
+    # A response with no chime members is empty, not an error -- callers fall back
+    # to the website's bare integers rather than losing the control.
+    empty = mws_client.parse_chime_type_options(
+        mws_client._parse_mws_ack('<gcdsr ts="0" s="true" />'))
+    assert empty == {"options": [], "selected": None}, empty
+
+    # An option with no usable value is skipped rather than guessed at.
+    junk = mws_client.parse_chime_type_options(mws_client._parse_mws_ack(
+        '<gcdsr ts="0" s="true"><scto>'
+        '<sctoi n="Broken" v="not-a-number"/><sctoi n="Digital" v="1"/>'
+        '</scto></gcdsr>'))
+    assert [o["value"] for o in junk["options"]] == [1], junk
+
+    # An option the server names with nothing usable still gets a label, so a
+    # select never renders a blank row.
+    unnamed = mws_client.parse_chime_type_options(mws_client._parse_mws_ack(
+        '<gcdsr ts="0" s="true"><scto><sctoi n="" v="7"/></scto></gcdsr>'))
+    assert unnamed["options"][0]["label"] == "7", unnamed
+    print("  ok  chime types: server-supplied names + the sdict flag that says "
+          "which value means 'no wired chime'")
+
+
 async def test_privacy_mode_sends_string_bool():
     """IsActive is the string "true"/"false" -- never Python's "True"/"False"."""
     replies = {"SetCameraPrivacyModeState": {
@@ -292,7 +347,9 @@ async def main():
     async_tests = (test_privacy_mode_sends_string_bool,
                    test_siren_commands_carry_the_token_envelope,
                    test_reads_preserve_the_device_payload)
-    for test in (test_json_ack_mapping, test_xml_ack_mapping) + async_tests:
+    for test in (test_json_ack_mapping, test_xml_ack_mapping,
+                 test_chime_type_options_are_parsed_with_their_server_supplied_names,
+                 ) + async_tests:
         try:
             result = test()
             if asyncio.iscoroutine(result):

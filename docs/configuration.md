@@ -330,7 +330,7 @@ patch these).
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the privacy switch, the siren buttons and the camera diagnostic sensors. |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the privacy switch, the siren buttons and the camera diagnostic sensors. |
 
 Deliberately slow, and the one knob here worth understanding before changing.
 Unlike the camera-list poll — a local read of an in-memory dict on the bridge —

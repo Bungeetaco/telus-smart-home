@@ -128,6 +128,17 @@
     "switch": {
       "camera_privacy_mode": {
         "name": "Privacy mode"
+      },
+      "camera_indoor_chime": {
+        "name": "Indoor chime"
+      },
+      "camera_outdoor_tone": {
+        "name": "Outdoor tone"
+      }
+    },
+    "select": {
+      "camera_chime_type": {
+        "name": "Wired chime type"
       }
     },
     "button": {
