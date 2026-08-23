@@ -430,9 +430,27 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   trip, capped by `TALK_PREBUFFER_MAX_MS`, which also caps how much audio sits
   buffered at the doorbell when a stop arrives.
 
-  **The tuning itself remains open and needs a listening test.** The 500 ms lead
-  was tuned by ear against the real speaker, and nothing measurable offline
-  justifies lowering it. `CHUNK_MS` is untouched for the same reason.
+  **Adaptation has now had its listening test and is audibly neutral on a LAN.**
+  A 36-second spoken passage over the `direct` endpoint played 35.9 s of 35.9 s
+  with no reconnects or renegotiations and no audible difference, which is the
+  expected result rather than a disappointing one: adaptation raised the lead by
+  23 ms in total (500 -> 516 -> 523), reacting to worst round trips of 258 and
+  262 ms. Twenty-three milliseconds is far below anything a listener can hear, so
+  hearing a difference would have meant something was wrong.
+
+  That establishes it does not HURT. It cannot establish that it helps, and no
+  test on this LAN can: the mechanism reacts to round trips that outrun the lead,
+  and the worst here is roughly half of it. Its value is for a link bad enough
+  that the fixed lead runs short -- talkdown from outside the house over the
+  `cloud` relay, or Wi-Fi having a bad day.
+
+  **The cost, if it ever does engage:** the lead is also how long a stop takes to
+  be heard and how much audio is sitting in the doorbell when one arrives. At the
+  `TALK_PREBUFFER_MAX_MS` ceiling that is two seconds. That is the trade, and it
+  is why the ceiling exists.
+
+  The 500 ms baseline stays as tuned by ear; adaptation never goes below it.
+  `CHUNK_MS` is untouched for the same reason.
 
   First numbers off the live doorbell, on the LAN, which are what a future tuning
   starts from:
