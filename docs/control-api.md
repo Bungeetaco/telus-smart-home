@@ -66,6 +66,7 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/cameras` | bearer | In-memory camera registry (metadata) |
 | GET | `/control/cameras/{camera_id}/snapshot` | bearer | Fresh on-demand JPEG still |
 | POST | `/control/cameras/{camera_id}/talk` | bearer | Play audio through the camera speaker (talkdown) |
+| POST | `/control/cameras/{camera_id}/talk/stop` | bearer | Stop the talk currently playing on that camera |
 | GET | `/control/events` | bearer | Recent camera video-clip events |
 | GET | `/control/history` | bearer | System-wide activity feed |
 | GET | `/control/clip/{video_event_id}` | bearer | Re-mint a fresh signed clip download URL |
@@ -215,7 +216,7 @@ curl -s -H "Authorization: Bearer $SECRET" \
 
 Plays a short audio clip (typically an HA-rendered TTS phrase) through the
 camera's speaker via two-way audio (talkdown). **Off by default:** the route
-returns `403` until `config.TALKDOWN_ENABLED` is set (env `TALKDOWN_ENABLED=true`),
+is enabled by default and returns `403` only when `TALKDOWN_ENABLED` is set false,
 so the wiring ships inert.
 
 Only one talk may be in flight per camera at a time. A concurrent trigger for
@@ -259,7 +260,7 @@ response).
 | `400` | `{"error": "malformed"}` | Bad JSON, neither audio field, a non-`http(s)` `audio_url`, a bad-type `conditioning`/`audio_filter`, or unreadable/invalid audio |
 | `400` | `{"error": "bad_codec"}` | `codec` not in the supported set |
 | `401` | `{"error": "bad_secret"}` | Auth failure |
-| `403` | `{"error": "talkdown_disabled"}` | `config.TALKDOWN_ENABLED` is false (or the talk manager was not constructed) |
+| `403` | `{"error": "talkdown_disabled"}` | `TALKDOWN_ENABLED` was set false (or the talk manager was not constructed) |
 | `404` | `{"error": "unknown_camera"}` | `camera_id` not in the registry |
 | `409` | `{"error": "talk_in_progress"}` | A talk is already in flight for this camera |
 | `413` | `{"error": "media_too_large"}` | Fetched/read audio exceeded the size cap |
@@ -297,6 +298,37 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 ```
 
 ---
+
+## `POST /control/cameras/{camera_id}/talk/stop`
+
+Stops the clip currently playing through that camera's speaker. Empty body.
+
+The stream ends at the next chunk boundary — at most one chunk of audio (40 ms) —
+and the still-open `POST .../talk` call returns normally with partial stats and
+`"stopped": true`, rather than erroring. Stopping is a signal, not a task
+cancellation, so the session teardown (`EndLiveStream`) still runs on its usual
+path.
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $SECRET" \
+  $BASE/control/cameras/<camera_id>/talk/stop
+```
+
+**Response**
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| `200` | `{"status": "stopping"}` | A talk was in flight and has been asked to stop |
+| `403` | `{"error": "talkdown_disabled"}` | `TALKDOWN_ENABLED` was set false |
+| `404` | `{"error": "unknown_camera"}` | No such camera |
+| `404` | `{"error": "no_talk_in_progress"}` | Nothing is playing on that camera |
+
+A `404 no_talk_in_progress` is informational, not a failure: callers may fire this
+unconditionally (e.g. on a door-open event) without first checking whether a clip
+is playing. The Home Assistant service `telus_smarthome.stop_speaking` wraps this
+and treats that case as a no-op.
+
 
 ## `GET /control/events`
 

@@ -198,7 +198,7 @@ The integration's `speak` service renders TTS to a loopback media URL and POSTs
 it to `/control/cameras/{id}/talk`. The bridge then uses the **mobile MWS
 backend** (mint `SessionToken` → `GetLiveVideoStream` → WebRTC/SRTP talk
 transport) to play it through the doorbell speaker. Off by default on the bridge
-(`TALKDOWN_ENABLED`). See [talkdown.md](talkdown-fullduplex-protocol.md).
+(`TALKDOWN_ENABLED`, on by default). See [talkdown.md](talkdown-fullduplex-protocol.md).
 
 ## Component diagram
 

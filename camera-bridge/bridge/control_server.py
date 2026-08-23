@@ -83,21 +83,28 @@ Contract (as implemented -- this is what callers must match):
           {"audio_path": "<path readable by the bridge>"}
       Play a short audio clip (typically HA-rendered TTS) through the camera's
       speaker via two-way audio (talkdown). audio_url wins if both are given.
-      Off by default: returns 403 until config.TALKDOWN_ENABLED is set, so the
-      route ships inert. Single in-flight talk per camera -- a concurrent
+      Enabled by default (config.TALKDOWN_ENABLED); returns 403 when it has been
+      turned off. Nothing plays unless a caller asks for it. Single in-flight talk per camera -- a concurrent
       trigger for the same camera is rejected (409), never queued. See talk.py.
 
     Responses:
       200 {"status": "spoken", "path": "webrtc"|"srtp"}
       400 {"error": "malformed"}          -- bad JSON / neither audio field / bad audio
       401 {"error": "bad_secret"}         -- Authorization missing/wrong
-      403 {"error": "talkdown_disabled"}  -- config.TALKDOWN_ENABLED is false
+      403 {"error": "talkdown_disabled"}  -- TALKDOWN_ENABLED was set false
       404 {"error": "unknown_camera"}     -- camera_id not in camera_registry
       409 {"error": "talk_in_progress"}   -- a talk is already in flight for THIS camera
       413 {"error": "media_too_large"}    -- fetched/read audio exceeded the cap
       422 {"error": "no_upstream_audio"}  -- no webrtc/srtp upstream-audio endpoint
       502 {"error": "telus_error"}        -- MWS auth / stream lookup / signaling failed
       504 {"error": "talk_timeout"}       -- session exceeded TALK_SESSION_TIMEOUT_S
+
+    POST http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/talk/stop
+
+    Stops the talk currently playing on that camera. The stream ends at the next
+    chunk boundary (<=40ms) and the in-flight POST above returns its partial
+    stats with "stopped": true. Response: 200 {"status": "stopping"}, or
+    404 {"error": "no_talk_in_progress"} when nothing is playing.
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/events?limit=<N>
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -587,12 +594,33 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
     app = web.Application()
     app[APP_CURRENT_SECRET] = current_secret
+
+    async def handle_talk_stop(request: web.Request) -> web.Response:
+        """Stop the talk currently playing on this camera.
+
+        The stream ends at the next chunk boundary (<=40ms) and the original
+        POST returns its partial stats with "stopped": true. Idempotent-ish: with
+        nothing in flight this is a 404 rather than an error condition.
+        """
+        if (err := _check_auth(request)) is not None:
+            return err
+        if not c.TALKDOWN_ENABLED or talk_manager is None:
+            return web.json_response({"error": "talkdown_disabled"}, status=403)
+
+        camera_id = request.match_info["camera_id"]
+        if camera_id not in camera_registry:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+        if not talk_manager.stop(camera_id):
+            return web.json_response({"error": "no_talk_in_progress"}, status=404)
+        return web.json_response({"status": "stopping"})
+
     app.router.add_post("/control/credentials", handle_credentials)
     app.router.add_get("/control/health", handle_health)
     app.router.add_get("/control/cameras", handle_cameras)
     app.router.add_get("/control/status", handle_status)
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
     app.router.add_post("/control/cameras/{camera_id}/talk", handle_talk)
+    app.router.add_post("/control/cameras/{camera_id}/talk/stop", handle_talk_stop)
     app.router.add_get("/control/events", handle_events)
     app.router.add_get("/control/clip/{video_event_id}", handle_clip)
     app.router.add_get("/control/automations", handle_automations)

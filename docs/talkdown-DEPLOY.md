@@ -14,8 +14,10 @@ All wiring lives on branch `feature/doorbell-talkdown` in
 `~/telus-smart-home`. The bridge builds its image from that working tree;
 Home Assistant runs a **separate copy** at
 `~/homeassistant/config/custom_components/telus_smarthome`, so the HA side needs
-an explicit sync. The talk endpoint is **off by default** (`TALKDOWN_ENABLED`),
-so deploying the code arms nothing until step 3.
+an explicit sync. The talk endpoint is **enabled by default**
+(`TALKDOWN_ENABLED`) — it plays only what a caller asks it to, so deploying the
+code does not make anything speak on its own. Set `TALKDOWN_ENABLED=false` to
+disable the endpoint entirely.
 
 Credentials: none are entered here. The bridge mints its own MWS SessionToken
 from the TELUS credentials that already live in Home Assistant (see repo
@@ -56,15 +58,19 @@ Restart Home Assistant so `services.yaml` and `telus_smarthome.speak` register:
 
 Verify: Developer Tools > Actions > search `telus_smarthome.speak`.
 
-## 3. Enable talkdown on the bridge
+## 3. (Optional) turn talkdown off
 
-Set the flag (non-secret; put it in `.env`, not `secrets.env`) and recreate:
+Talkdown is enabled by default, so there is nothing to do here to use it — skip
+to step 4. If you would rather the endpoint refuse all talk requests, set the
+flag false (non-secret; it belongs in `.env`, not `secrets.env`) and recreate:
 
     ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && \
       grep -q "^TALKDOWN_ENABLED=" .env && \
-      sed -i "s/^TALKDOWN_ENABLED=.*/TALKDOWN_ENABLED=true/" .env || \
-      echo "TALKDOWN_ENABLED=true" >> .env'
+      sed -i "s/^TALKDOWN_ENABLED=.*/TALKDOWN_ENABLED=false/" .env || \
+      echo "TALKDOWN_ENABLED=false" >> .env'
     ssh <ha-host> 'cd ~/telus-smart-home/camera-bridge && docker compose up -d'
+
+The route then answers `403 talkdown_disabled`.
 
 ## 4. Manual end-to-end test (someone should be able to hear the doorbell)
 
@@ -89,7 +95,7 @@ seconds; the bridge logs `talkdown: full-duplex armed ...` then
 `talkdown: streamed N chunks / M bytes mu-law to <host>`.
 
 Troubleshooting quick map (full contract in control_server.py docstring):
-- 403 talkdown_disabled  -> step 3 not done / bridge not recreated.
+- 403 talkdown_disabled  -> TALKDOWN_ENABLED was set false (step 3).
 - 409 talk_in_progress   -> a talk is already running for that camera; wait.
 - 422 no_upstream_audio  -> the doorbell returned no usable PutAudioStream URL /
                             password (susa false, or a stale stream); retry.

@@ -241,10 +241,13 @@ CAMERA_DISCOVERY_INTERVAL_S = 300
 # and never exits the process. The persisted mobile device-uid + rolling slt live
 # in MOBILE_AUTH_STATE_PATH (defined above with the other /shared paths).
 #
-# Inert until explicitly enabled: the endpoint returns 403 while this is false, so
-# shipping the wiring does not arm two-way audio until someone opts in (set env
-# TALKDOWN_ENABLED=true, or edit here).
-TALKDOWN_ENABLED = os.environ.get("TALKDOWN_ENABLED", "false").strip().lower() in (
+# ENABLED BY DEFAULT. Talkdown shipped off while it was unproven; it is now
+# verified end to end against the doorbell (see docs/talkdown-fullduplex-protocol.md),
+# so the control route is armed out of the box. It still only ever plays audio a
+# caller explicitly asks it to play -- nothing speaks on its own.
+# To disable, set TALKDOWN_ENABLED=false in the bridge's .env and recreate the
+# container; the route then returns 403 (talkdown_disabled).
+TALKDOWN_ENABLED = os.environ.get("TALKDOWN_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 # Prefer the <webrtc> endpoint (aiortc, clean sendrecv Opus) over <srtp> (ffmpeg).
 TALK_PREFER_WEBRTC = True

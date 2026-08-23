@@ -318,7 +318,7 @@ playing.
 
 | Status | Meaning | Fix |
 | --- | --- | --- |
-| **403** | Talkdown is **disabled**. The feature is off by default. | Enable it on the bridge: set `TALKDOWN_ENABLED=true` in the bridge's `.env`, then rebuild the container so the change is picked up (`docker compose up -d --build`). |
+| **403** | Talkdown has been **disabled**. It is enabled by default, so this means `TALKDOWN_ENABLED` is set to a false value in the bridge's `.env`. | Remove that line (or set it `true`) and recreate the container so the change is picked up (`docker compose up -d`). |
 | **409** | A talk is **already in progress** for that camera. The transport is single-session; a second concurrent talk is rejected rather than interleaved. | Wait for the current clip to finish (or cancel it, if a cancel path is available) before starting another. |
 | **422** | **No upstream audio** could be produced — the request named an `audio_url`/`audio_path` (or TTS `message`) that yielded nothing to send. | Verify the audio source is reachable *from the bridge* and returns real audio. For an HTTP TTS URL, confirm the bridge can fetch it (loopback/`internal_url` reachability); for a file, confirm the path exists inside the container. |
 

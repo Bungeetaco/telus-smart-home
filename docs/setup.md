@@ -305,15 +305,16 @@ directory and how to rotate these secrets.
 ## Optional — Talkdown (two-way / speak-to-camera audio)
 
 The bridge can push audio *down* to a doorbell-class camera's speaker
-(talkdown), exposed in Home Assistant as the `telus_smarthome.speak` service. It
-is **off by default** — the wiring ships but the bridge endpoint returns
-`403 {"error": "talkdown_disabled"}` until you opt in — and only doorbell-class
-cameras with an upstream-audio path support it.
+(talkdown), exposed in Home Assistant as the `telus_smarthome.speak` service —
+with `telus_smarthome.stop_speaking` to end a clip early. It is **enabled by
+default**: nothing ever speaks on its own, the endpoint only plays what a caller
+asks it to. Only doorbell-class cameras with an upstream-audio path support it.
 
-1. **Enable it on the bridge** by setting the environment variable in `.env`:
+1. **To turn it off** (optional), set the environment variable in `.env`; the
+   endpoint then returns `403 {"error": "talkdown_disabled"}`:
 
    ```ini
-   TALKDOWN_ENABLED=true
+   TALKDOWN_ENABLED=false
    ```
 
 2. **Recreate the container** so it picks up the change:

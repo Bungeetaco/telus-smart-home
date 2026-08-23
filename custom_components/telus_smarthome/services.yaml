@@ -3,8 +3,8 @@ speak:
   description: >-
     Play a spoken phrase (or an arbitrary audio clip) through a TELUS camera's
     speaker via two-way audio (talkdown). Only doorbell-class cameras with an
-    upstream-audio path support this, and the camera bridge must have talkdown
-    enabled (TALKDOWN_ENABLED). If no target is given, the doorbell is used.
+    upstream-audio path support this. Talkdown is enabled on the bridge by
+    default (TALKDOWN_ENABLED). If no target is given, the doorbell is used.
   fields:
     entity_id:
       name: Camera
@@ -49,3 +49,19 @@ speak:
       required: false
       selector:
         text:
+
+stop_speaking:
+  name: Stop speaking through camera
+  description: >-
+    Stop the clip currently playing through a TELUS camera's speaker. The stream
+    ends within a few tens of milliseconds. Stopping when nothing is playing is
+    not an error, so this is safe to call unconditionally from an automation.
+  fields:
+    entity_id:
+      name: Camera
+      description: Target TELUS camera entity. Defaults to the doorbell if omitted.
+      required: false
+      selector:
+        entity:
+          integration: telus_smarthome
+          domain: camera

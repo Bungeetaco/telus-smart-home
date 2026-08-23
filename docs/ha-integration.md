@@ -144,7 +144,10 @@ These are covered in detail under [The update model](#the-update-model) and
     (config-only; video is handled by the bridge, not here).
 11. **Forward platforms.** `async_forward_entry_setups(config_entry, PLATFORMS)`
     sets up all 13 entity platforms.
-12. **Speak service.** Register the `telus_smarthome.speak` talkdown service
+12. **Speak services.** Register the `telus_smarthome.speak` talkdown service
+    (and its companion `telus_smarthome.stop_speaking`, which ends whatever is
+    currently playing; stopping when nothing is playing is a no-op, so it is
+    safe to call unconditionally from an automation)
     (see [talkdown-DEPLOY.md](talkdown-DEPLOY.md)), guarded so reloads are a
     no-op.
 13. **Debug event listener.** Register a listener for `DEBUG_REQ_EVENT` that dumps

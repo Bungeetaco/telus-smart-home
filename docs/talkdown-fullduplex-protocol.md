@@ -177,8 +177,9 @@ it best-effort in a `finally` and always removes the spooled temp clip.
 - **no secrets logged** (password, SessionToken, nonce) — only non-secret routing
   facts (endpoint kind, chunk/byte counts, host).
 
-Feature is **inert until `config.TALKDOWN_ENABLED=true`** — the control route
-returns 403 otherwise.
+Feature is **enabled by default** (`config.TALKDOWN_ENABLED`); the control route
+returns 403 only when it has been explicitly disabled. Nothing plays unless a
+caller asks for it.
 
 ## How to test (once enabled)
 
@@ -322,10 +323,18 @@ VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
       a local fake doorbell enforcing real Digest auth dies mid-clip, and the test
       asserts the bytes both sessions received, concatenated, are byte-identical
       to a clean single-pass encode -- plus the bound and the opt-in behaviour.
-- **E2 Cancel / stop an in-progress talk.** There is no way to stop a playing
-  clip early -- a long (e.g. 10-min music) talk only ends when the audio finishes
-  or the safety deadline fires. Add a cancel path (control endpoint + a
-  per-camera handle that cancels the transport task and tears the session down).
+- **E2 (DONE 2026-08-23) Cancel / stop an in-progress talk.**
+  `POST /control/cameras/{id}/talk/stop` (and the Home Assistant service
+  `telus_smarthome.stop_speaking`) ends the clip currently playing. Implemented as
+  a stop *signal*, not task cancellation: `TalkManager` holds an `asyncio.Event`
+  per in-flight talk, and the transport checks it at each chunk boundary, so the
+  stream stops within one chunk (40 ms) while the MWS teardown still runs on its
+  normal path — cancelling the task would have raced the `finally` that issues
+  `EndLiveStream`. The in-flight `POST .../talk` returns normally with partial
+  stats (`"stopped": true`, `played_seconds`) instead of raising, and stopping
+  when nothing is playing is a `404`, not an error, so automations can fire it
+  unconditionally. Covered by the test suite (a stop mid-clip must end promptly
+  with partial stats and no exception).
 - **E3 HA integration + speak service -- DEPLOYED & VERIFIED 2026-08-23.**
   `custom_components/telus_smarthome` v1.5.1 is live (rsynced to
   `~/homeassistant/config/...`, HA restarted); `telus_smarthome.speak` is

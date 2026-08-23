@@ -10,9 +10,9 @@ itself, so a large clip is the bridge's concern (it caps the fetch).
 
 Registered once per HA run in __init__.py (guarded by has_service, the same
 spirit as the clip_view registration guard) and removed when the last config
-entry unloads. The bridge endpoint is OFF by default (config.TALKDOWN_ENABLED);
-until it is enabled the bridge returns 403 and this service surfaces that as a
-clear HomeAssistantError rather than appearing to succeed.
+entry unloads. The bridge endpoint is enabled by default (config.TALKDOWN_ENABLED); if it has
+been turned off the bridge returns 403 and this service surfaces that as a clear
+HomeAssistantError rather than appearing to succeed.
 """
 from __future__ import annotations
 
@@ -30,7 +30,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .bridge_client import read_control_secret
-from .const import CAMERA_BRIDGE_TALK_URL_TEMPLATE, DOMAIN, SERVICE_SPEAK
+from .const import (
+    CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE,
+    CAMERA_BRIDGE_TALK_URL_TEMPLATE,
+    DOMAIN,
+    SERVICE_SPEAK,
+    SERVICE_STOP_SPEAKING,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,8 +58,13 @@ _SPEAK_SCHEMA = vol.Schema(
 _POST_TIMEOUT_S = 70
 
 
+_STOP_SCHEMA = vol.Schema({vol.Optional("entity_id"): cv.entity_ids})
+
+
 def async_register_speak_service(hass: HomeAssistant) -> None:
-    """Register telus_smarthome.speak once. Idempotent (guarded by has_service)."""
+    """Register telus_smarthome.speak + .stop_speaking once.
+
+    Idempotent (guarded by has_service)."""
     if hass.services.has_service(DOMAIN, SERVICE_SPEAK):
         return
 
@@ -80,14 +91,60 @@ def async_register_speak_service(hass: HomeAssistant) -> None:
         for entity_id, camera_id in targets:
             await _post_talk(session, secret, entity_id, camera_id, audio_url)
 
+    async def _handle_stop(call: ServiceCall) -> None:
+        """Stop whatever is currently playing through the camera's speaker.
+
+        Stopping something that isn't playing is not an error -- the bridge
+        answers 404 and we simply log it, so an automation can fire this
+        unconditionally (e.g. when a door opens) without needing to know whether
+        a clip is in flight."""
+        data = _STOP_SCHEMA(dict(call.data))
+        targets = _resolve_targets(hass, data.get("entity_id"))
+        if not targets:
+            raise HomeAssistantError(
+                "stop_speaking found no target TELUS camera (pass entity_id, or "
+                "ensure a doorbell camera exists)")
+
+        secret = await hass.async_add_executor_job(read_control_secret)
+        if secret is None:
+            raise HomeAssistantError(
+                "Camera bridge not reachable (no control secret on the shared mount)")
+
+        session = async_get_clientsession(hass)
+        for entity_id, camera_id in targets:
+            url = CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE.format(camera_id=camera_id)
+            try:
+                async with session.post(
+                    url,
+                    headers={"Authorization": f"Bearer {secret}"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 404:
+                        LOGGER.debug("stop_speaking: nothing playing on %s", entity_id)
+                        continue
+                    if resp.status == 403:
+                        raise HomeAssistantError(
+                            "stop_speaking: talkdown is disabled on the camera bridge")
+                    resp.raise_for_status()
+                    LOGGER.info("stop_speaking: stopping talk on %s", entity_id)
+            except HomeAssistantError:
+                raise
+            except (aiohttp.ClientError, TimeoutError) as err:
+                raise HomeAssistantError(
+                    f"stop_speaking failed for {entity_id}: {err}") from err
+
     hass.services.async_register(DOMAIN, SERVICE_SPEAK, _handle_speak, schema=_SPEAK_SCHEMA)
-    LOGGER.debug("Registered %s.%s service", DOMAIN, SERVICE_SPEAK)
+    hass.services.async_register(DOMAIN, SERVICE_STOP_SPEAKING, _handle_stop,
+                                 schema=_STOP_SCHEMA)
+    LOGGER.debug("Registered %s.%s and %s.%s services",
+                 DOMAIN, SERVICE_SPEAK, DOMAIN, SERVICE_STOP_SPEAKING)
 
 
 def async_remove_speak_service(hass: HomeAssistant) -> None:
-    """Remove the service (called when the last config entry unloads)."""
-    if hass.services.has_service(DOMAIN, SERVICE_SPEAK):
-        hass.services.async_remove(DOMAIN, SERVICE_SPEAK)
+    """Remove the services (called when the last config entry unloads)."""
+    for service in (SERVICE_SPEAK, SERVICE_STOP_SPEAKING):
+        if hass.services.has_service(DOMAIN, service):
+            hass.services.async_remove(DOMAIN, service)
 
 
 async def _resolve_audio_url(hass, data, message, media_content_id) -> str:
