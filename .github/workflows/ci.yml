@@ -16,7 +16,7 @@ jobs:
           # Testing on a different interpreter than the container runs is worse than
           # not testing. Renovate is configured not to bump this independently; change
           # it only together with the Dockerfile base image.
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install integration requirements (as declared in manifest.json)
         run: |
           python -m pip install --upgrade pip
@@ -37,7 +37,7 @@ jobs:
           # Testing on a different interpreter than the container runs is worse than
           # not testing. Renovate is configured not to bump this independently; change
           # it only together with the Dockerfile base image.
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install bridge requirements (--only-binary catches aiortc/av bumps with no manylinux wheel)
         run: |
           python -m pip install --upgrade pip
@@ -54,7 +54,7 @@ jobs:
           # Testing on a different interpreter than the container runs is worse than
           # not testing. Renovate is configured not to bump this independently; change
           # it only together with the Dockerfile base image.
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install bridge requirements
         run: |
           python -m pip install --upgrade pip
@@ -84,7 +84,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install ffmpeg
         # The bridge image ships ffmpeg; GitHub runners do not. The talkdown
         # transport shells out to it to encode each clip, so the tests need it to
