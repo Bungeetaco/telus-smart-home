@@ -724,3 +724,46 @@ directory is HA's `/share/telus_cam_bridge` (mounted into the bridge at
 
 The blacklisted sensor subtypes (`SENSOR_SUBTYPE_BLACKLIST`) — mobile phone,
 panel image sensor, fixed panic — are excluded from entity creation everywhere.
+
+## Talkdown diagnostics
+
+Two diagnostic sensors surface the bridge's talkdown counters (see
+[control-api.md](control-api.md#get-controlmetrics)), so a talk that starts
+failing is visible in Home Assistant instead of only as an HTTP error to whoever
+triggered it. Both sit under the synthetic "TELUS Smart Home Integration" device
+alongside Auth Health, and are polled slowly — the counters only move when
+someone triggers a talk.
+
+| Entity | State | Useful attributes |
+| --- | --- | --- |
+| `sensor.…_talkdown_status` | `idle`, `ok`, `stopped`, `rejected`, `failed` | `last_failure_reason`, `last_played_seconds`, `last_camera_id`, `recent` (last 5) |
+| `sensor.…_talkdown_failures` | failed count since the bridge started (`total_increasing`) | `attempts`, `succeeded`, `stopped`, `rejected_in_progress`, `failures_by_reason`, `by_endpoint`, `by_codec`, `renegotiations`, `audio_seconds_played` |
+
+The state is deliberately coarse (`failed`, not `failed:media_error`) so it is
+easy to automate on; the reason rides along as an attribute. The failure count
+resets to 0 when the bridge restarts, which `total_increasing` treats as a
+counter reset rather than a spike.
+
+### Getting told when talkdown breaks
+
+```yaml
+automation:
+  - alias: Doorbell talkdown failed
+    trigger:
+      - trigger: state
+        entity_id: sensor.telus_smart_home_integration_talkdown_status
+        to: failed
+    action:
+      - action: notify.mobile_app_phone
+        data:
+          title: Doorbell talkdown failed
+          message: >-
+            {{ state_attr('sensor.telus_smart_home_integration_talkdown_status',
+                          'last_failure_reason') }}
+            (failures since bridge start:
+            {{ states('sensor.telus_smart_home_integration_talkdown_failures') }})
+```
+
+`no_upstream_audio` suggests the device stopped advertising a talk path;
+`transport_error` / `network_error` point at the doorbell or the LAN;
+`media_error` means the audio you supplied could not be fetched or decoded.

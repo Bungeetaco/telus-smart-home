@@ -5,6 +5,10 @@ can see in Home Assistant (as a normal entity/history graph) when
 authentication starts failing, rather than only discovering it via the
 reauth persistent-notification or raw logs.
 
+TalkdownStatusSensor / TalkdownFailuresSensor surface the bridge's talkdown
+counters, so a talk that starts failing is visible as an entity (and can drive a
+notification) rather than only as an HTTP error to whoever triggered it.
+
 ActivityFeedSensor exposes the full recent Activity list (not just the
 single latest entry event.py's TelusActivityEvent tracks) as an attribute,
 for a dashboard card to render as a scrollable feed -- see that entity's
@@ -14,18 +18,34 @@ own docstring for why an EventEntity alone can't do this.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant import core
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
-from .const import DATA_ACTIVITY_COORDINATOR, DATA_CONTROLLER, DOMAIN
+from .bridge_client import bridge_get
+from .const import (
+    CAMERA_BRIDGE_METRICS_URL,
+    DATA_ACTIVITY_COORDINATOR,
+    DATA_CONTROLLER,
+    DOMAIN,
+    TALK_METRICS_POLL_INTERVAL_SECONDS,
+)
 from .controller import AlarmIntegrationController
 from .event import ActivityHistoryCoordinator, _clip_link_for
 
@@ -47,9 +67,18 @@ async def async_setup_entry(
         DATA_ACTIVITY_COORDINATOR
     ]
 
+    # The talkdown counters live on the bridge, which may not be running (or may
+    # have talkdown disabled). Its own coordinator, refreshed once up front: a
+    # failure here must not stop the other sensors from being added, so the
+    # entities simply report unavailable until a poll succeeds.
+    metrics_coordinator = TalkMetricsCoordinator(hass, config_entry)
+    await metrics_coordinator.async_config_entry_first_refresh_soft()
+
     async_add_entities([
         AuthHealthSensor(controller, config_entry),
         ActivityFeedSensor(activity_coordinator, config_entry),
+        TalkdownStatusSensor(metrics_coordinator, config_entry),
+        TalkdownFailuresSensor(metrics_coordinator, config_entry),
     ])
 
 
@@ -154,4 +183,151 @@ class ActivityFeedSensor(CoordinatorEntity[ActivityHistoryCoordinator], SensorEn
                 {**e, "clip_link": _clip_link_for(entry, e.get("video_event_id"))}
                 for e in (self.coordinator.data or [])
             ]
+        }
+
+
+class TalkMetricsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Polls the camera-bridge's /control/metrics endpoint.
+
+    Talkdown counters only move when someone triggers a talk, so this polls
+    slowly -- it exists so a run of failures becomes visible (and automatable),
+    not to watch a clip play.
+    """
+
+    def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            LOGGER,
+            config_entry=config_entry,
+            name="TELUS talkdown metrics",
+            update_interval=timedelta(seconds=TALK_METRICS_POLL_INTERVAL_SECONDS),
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        try:
+            payload = await bridge_get(self.hass, CAMERA_BRIDGE_METRICS_URL)
+        except Exception as err:  # noqa: BLE001 - aiohttp/timeout variants
+            raise UpdateFailed(f"camera bridge metrics unavailable: {err}") from err
+        if payload is None:
+            # Bridge hasn't written its control secret yet (normal right after a
+            # restart) -- keep whatever we had rather than flapping to unavailable.
+            return self.data or {}
+        return payload.get("talk") or {}
+
+    async def async_config_entry_first_refresh_soft(self) -> None:
+        """First refresh that never blocks setup.
+
+        Unlike async_config_entry_first_refresh, a bridge that is down (or older
+        than this endpoint) must not abort the whole sensor platform -- these are
+        diagnostics, so they just start out unavailable and recover on a later
+        poll."""
+        try:
+            await self.async_refresh()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Initial talkdown metrics refresh failed; sensors start "
+                         "unavailable", exc_info=True)
+
+
+class _TalkMetricsEntity(CoordinatorEntity[TalkMetricsCoordinator], SensorEntity):
+    """Shared plumbing: both talkdown sensors are integration-level diagnostics
+    grouped under the same synthetic device as AuthHealthSensor."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: TalkMetricsCoordinator, config_entry: ConfigEntry,
+                 key: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{config_entry.entry_id}_{key}"
+        self._attr_translation_key = key
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_integration")},
+            name="TELUS Smart Home Integration",
+            manufacturer="TELUS",
+            entry_type=dr.DeviceEntryType.SERVICE,
+        )
+
+    @property
+    def _metrics(self) -> dict[str, Any]:
+        return self.coordinator.data or {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self.coordinator.data)
+
+
+class TalkdownStatusSensor(_TalkMetricsEntity):
+    """How the most recent talk went: `idle`, `ok`, `stopped`, `rejected`, or
+    `failed` (with the reason in an attribute).
+
+    The state is deliberately coarse so it is easy to automate on -- the reason,
+    counts and recent history ride along as attributes for a notification
+    template or a dashboard.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["idle", "ok", "stopped", "rejected", "failed"]
+
+    def __init__(self, coordinator: TalkMetricsCoordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(coordinator, config_entry, "talkdown_status")
+
+    @property
+    def native_value(self) -> str:
+        recent = self._metrics.get("recent") or []
+        if not recent:
+            return "idle"
+        outcome = str(recent[-1].get("outcome") or "idle")
+        # "failed:<reason>" collapses to "failed"; the reason is an attribute.
+        return outcome.split(":", 1)[0] if outcome.split(":", 1)[0] in self._attr_options else "idle"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        m = self._metrics
+        recent = m.get("recent") or []
+        last = recent[-1] if recent else {}
+        return {
+            "last_outcome": last.get("outcome"),
+            "last_failure_reason": m.get("last_failure_reason"),
+            "last_success_at": m.get("last_success_at"),
+            "last_failure_at": m.get("last_failure_at"),
+            "last_played_seconds": last.get("played_seconds"),
+            "last_camera_id": last.get("camera_id"),
+            # Trimmed: the full window is on the bridge; a handful is plenty for a
+            # card and keeps the state machine's attribute payload small.
+            "recent": recent[-5:],
+        }
+
+
+class TalkdownFailuresSensor(_TalkMetricsEntity):
+    """Count of failed talks since the bridge started.
+
+    Numeric and total_increasing so an automation can trigger on it going up --
+    "the doorbell refused to speak" is exactly the kind of thing that otherwise
+    goes unnoticed. It resets to 0 when the bridge restarts, which
+    total_increasing handles as a reset rather than a spike.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(self, coordinator: TalkMetricsCoordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(coordinator, config_entry, "talkdown_failures")
+
+    @property
+    def native_value(self) -> int:
+        return int(self._metrics.get("failed") or 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        m = self._metrics
+        return {
+            "attempts": m.get("attempts"),
+            "succeeded": m.get("succeeded"),
+            "stopped": m.get("stopped"),
+            "rejected_in_progress": m.get("rejected_in_progress"),
+            "failures_by_reason": m.get("failures_by_reason"),
+            "by_endpoint": m.get("by_endpoint"),
+            "by_codec": m.get("by_codec"),
+            "renegotiations": m.get("renegotiations"),
+            "audio_seconds_played": m.get("audio_seconds_played"),
+            "bridge_uptime_seconds": m.get("uptime_seconds"),
         }

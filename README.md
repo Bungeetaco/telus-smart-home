@@ -18,7 +18,8 @@ TELUS doesn't publish an API, and their portal logs in through TELUS's own SSO/O
 - **Two-way audio ("talkdown")** — speak through the doorbell's speaker from HA: a text-to-speech phrase, or any audio clip you point it at, via a `telus_smarthome.speak` service, and stop it early with `telus_smarthome.stop_speaking`. See [Two-way audio](#two-way-audio-talkdown) below.
 - **Credentials that stay in sync** — change your TELUS password once, in HA's Reconfigure flow, and both the integration and the separate bridge process pick it up. No more silently-stale bridge login after a password change.
 - **Cameras that heal themselves** — Alarm.com force-closes a video session about every three minutes. The bridge rotates ahead of that so viewers see at most a brief freeze, notices dead sessions on its own, and restarts cleanly if one truly wedges — with a guard that keeps an *upstream* outage from turning into a restart loop.
-- **An Auth Health sensor** so you can see login/session state in HA instead of digging through logs.
+- **Diagnostics as entities** — an Auth Health sensor for login/session state, plus talkdown status and failure-count
+  sensors, so a doorbell that quietly stops speaking can trigger a notification instead of going unnoticed.
 
 ## Two moving parts
 

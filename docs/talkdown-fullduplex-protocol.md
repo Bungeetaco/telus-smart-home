@@ -409,8 +409,12 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   on restart) and recorded at the single `speak()` entry point, so every
   transport and failure mode is counted identically. Reason labels never carry
   exception text (a URL or token could ride along) -- asserted by a test.
-  Follow-up **E15b**: surface these as Home Assistant sensors, so a failing
-  talkdown can drive a notification instead of needing a curl.
+  **E15b (DONE 2026-08-23)**: surfaced as two diagnostic HA sensors
+  (`talkdown_status`, `talkdown_failures`) on their own slow-polling
+  coordinator, so a failing talkdown can drive a notification instead of
+  needing a curl. A bridge that is down or predates the endpoint leaves them
+  unavailable rather than breaking sensor setup. See
+  `docs/ha-integration.md` for the entities and an example automation.
 
 ### Dependency-driven (from the 2026-08 aiortc 1.15 / aiohttp 3.14 upgrade)
 - **E21 (DONE 2026-08-23) Replaced the hand-rolled HTTP Digest with aiohttp's `DigestAuthMiddleware`.**

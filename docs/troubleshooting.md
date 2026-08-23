@@ -384,3 +384,8 @@ suggests the device stopped advertising a talk path; `transport_error` or
 you supplied could not be fetched or decoded), and `recent` shows the last 20
 talks with their outcomes. The counters are in-memory and reset when the bridge
 restarts — see [control-api.md](control-api.md).
+
+The same data is available without a curl: the `talkdown_status` and
+`talkdown_failures` diagnostic sensors expose it in Home Assistant, and can
+drive a notification when a talk fails — see
+[ha-integration.md](ha-integration.md#talkdown-diagnostics).
