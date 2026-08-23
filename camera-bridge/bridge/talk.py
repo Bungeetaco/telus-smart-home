@@ -34,6 +34,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 
 import aiohttp
 
@@ -128,7 +129,9 @@ class TalkManager:
                     # auth/start/end steps are each bounded inside
                     # _run_full_duplex; the doorbell imposes no session limit
                     # we've observed.
-                    return await self._run_full_duplex(doorbell, audio_bytes, codec=codec, audio_filter=audio_filter)
+                    return await self._run_full_duplex(
+                        camera_id, doorbell, audio_bytes, codec=codec,
+                        audio_filter=audio_filter)
             endpoint = await self._resolve_endpoint(camera_id)
             return await asyncio.wait_for(
                 self._run_talk(endpoint, audio_bytes),
@@ -306,8 +309,36 @@ class TalkManager:
                 return kind, url
         return None, None
 
-    async def _run_full_duplex(self, doorbell: dict, audio_bytes: bytes, *,
-                               codec: str | None = None,
+
+    @staticmethod
+    def _session_deadline(expires_iso: str | None) -> float | None:
+        """Monotonic time at which the stream session expires, or None.
+
+        The doorbell's <cli> carries `cstet`, which looks like a session-expiry
+        timestamp -- but its exact semantics are NOT confirmed (in one capture it
+        sat within seconds of the fetch, which would make it a creation time). So
+        this only returns a deadline when the value is far enough in the future to
+        be meaningful as one; anything else yields None and the transport simply
+        falls back to reacting to a failed PUT. Data-driven rather than a guess.
+        """
+        if not expires_iso:
+            return None
+        try:
+            from datetime import datetime, timezone
+            when = datetime.fromisoformat(expires_iso.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            remaining = (when - datetime.now(timezone.utc)).total_seconds()
+        except (ValueError, TypeError):
+            return None
+        if remaining < 2 * c.TALK_RENEGOTIATE_MARGIN_S:
+            log.debug("talkdown: ignoring implausible session expiry %r (%.0fs away)",
+                      expires_iso, remaining)
+            return None
+        return time.monotonic() + remaining
+
+    async def _run_full_duplex(self, camera_id: str, doorbell: dict,
+                               audio_bytes: bytes, *, codec: str | None = None,
                                audio_filter: str | None = None) -> dict:
         """StartFullDuplex -> chunked Digest mu-law PUT -> EndLiveStream.
 
@@ -350,6 +381,62 @@ class TalkManager:
         attempts = [primary]
         if c.TALK_CODEC_FALLBACK and c.TALK_CODEC_FALLBACK != primary:
             attempts.append(c.TALK_CODEC_FALLBACK)
+        # Session renegotiation (E1). The PutAudioStream URL/port/password are
+        # per-session, so a long clip -- or a network blip -- can outlive the one
+        # we opened above. Rather than abort with the audio half-played, hand the
+        # transport a way to get a FRESH session; it resumes from the exact byte
+        # offset it reached. Everything here (teardown, re-discovery, re-arm) is
+        # MWS work that belongs on this side of the boundary, so the transport
+        # stays transport-only.
+        state = {"did": did}
+
+        async def _renegotiate() -> dict:
+            # 1. best-effort close the dying session; a failure here is expected
+            #    (it may already be gone) and must not block the swap.
+            try:
+                await asyncio.wait_for(
+                    end_live_stream(
+                        self._telus.session, self._mobile.session_token, state["did"],
+                        customer_id=self._mobile.customer_id,
+                        mobile_device_uid=self._mobile.device_uid,
+                        seamless_login_token=self._mobile.seamless_login_token,
+                    ),
+                    timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("talkdown: teardown of the dying session failed (ignored)",
+                          exc_info=True)
+
+            # 2. fresh GetDoorbellCameraList -> new port, password and PUT URL.
+            fresh = await self._resolve_doorbell(camera_id)
+            if fresh is None:
+                raise RuntimeError("doorbell no longer reports upstream audio")
+            new_kind, new_url = self._select_put_url(fresh)
+            new_password = fresh.get("stream_password")
+            if not new_url or not new_password:
+                raise RuntimeError("renegotiated session has no usable PUT URL / password")
+
+            # 3. re-arm the mic path on the new session.
+            state["did"] = fresh.get("did") or state["did"]
+            new_ack = await asyncio.wait_for(
+                start_full_duplex(
+                    self._telus.session, self._mobile.session_token, state["did"],
+                    customer_id=self._mobile.customer_id,
+                    mobile_device_uid=self._mobile.device_uid,
+                    seamless_login_token=self._mobile.seamless_login_token,
+                ),
+                timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+            )
+            if not new_ack.get("ok"):
+                raise RuntimeError(
+                    f"StartFullDuplex failed on renegotiation: "
+                    f"token_status={new_ack.get('token_status')} error={new_ack.get('error')!r}")
+            log.info("talkdown: renegotiated session for %s via %s endpoint",
+                     fresh.get("global_device_id"), new_kind)
+            return {"put_url": new_url, "password": new_password,
+                    "username": fresh.get("stream_user") or username}
+
+        session_deadline = self._session_deadline(doorbell.get("expires"))
         tmp_path = await self._spool_temp(audio_bytes)
         try:
             last_err: Exception | None = None
@@ -357,7 +444,8 @@ class TalkManager:
                 try:
                     return await talk_fullduplex.stream_talkdown(
                         put_url, password, tmp_path, username=username, codec=cc,
-                        audio_filter=audio_filter)
+                        audio_filter=audio_filter, renegotiate=_renegotiate,
+                        session_deadline=session_deadline)
                 except talk_fullduplex.TalkdownError as e:
                     last_err = e
                     more = i + 1 < len(attempts)
@@ -368,7 +456,7 @@ class TalkManager:
             try:
                 await asyncio.wait_for(
                     end_live_stream(
-                        self._telus.session, self._mobile.session_token, did,
+                        self._telus.session, self._mobile.session_token, state["did"],
                         customer_id=self._mobile.customer_id,
                         mobile_device_uid=self._mobile.device_uid,
                         seamless_login_token=self._mobile.seamless_login_token,

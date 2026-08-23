@@ -90,19 +90,36 @@ async def _encode(audio_source: str, ffmpeg_fmt: str, audio_filter: str) -> byte
     return out
 
 
+class _DeadlineExceeded(TalkdownError):
+    """Safety deadline hit. Never retried/renegotiated -- it means the whole talk
+    has run too long, not that this session went bad."""
+
+
 async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                           username: str = DIGEST_USER, codec: str = DEFAULT_CODEC,
                           audio_filter: str | None = None,
-                          pace: bool = True, timeout_s: float | None = None) -> dict:
+                          pace: bool = True, timeout_s: float | None = None,
+                          renegotiate=None, session_deadline: float | None = None) -> dict:
     """Play `audio_source` through the doorbell speaker via chunked Digest PUT.
 
     put_url  -- the PutAudioStream endpoint (duae/luae for LAN, puae/uae for WAN)
     password -- the per-session stream password (Digest password for "vieweruser")
     codec    -- "l16" (default, 16-bit linear) or "mulaw" (G.711 fallback)
+    renegotiate -- optional async callable returning a fresh session as
+                   {"put_url", "password", "username"}. When the stream session
+                   dies mid-clip (its per-session URL/port/password expire, or the
+                   connection drops), the transport calls this and RESUMES FROM THE
+                   EXACT BYTE OFFSET it reached, so no audio is lost or repeated.
+                   Bounded by config.TALK_MAX_RENEGOTIATIONS.
+    session_deadline -- optional time.monotonic() value at which the current
+                   session is known to expire. When given, the transport swaps
+                   PROACTIVELY (config.TALK_RENEGOTIATE_MARGIN_S ahead) instead of
+                   waiting for the first failed PUT.
+
     Returns {"path": "full_duplex", "codec": ..., "chunks": n, "bytes": total,
-    "seconds": s}. Guarantees ffmpeg + the HTTP session are torn down on every
-    path. Raises TalkdownError on a transport/codec failure (so the caller can
-    fall back to another codec)."""
+    "seconds": s, "renegotiations": n}. Guarantees ffmpeg + the HTTP session are
+    torn down on every path. Raises TalkdownError on a transport/codec failure (so
+    the caller can fall back to another codec)."""
     spec = CODECS.get(codec)
     if spec is None:
         raise TalkdownError(f"unknown codec {codec!r}")
@@ -120,71 +137,128 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
     expected_s = total / bytes_per_s
     deadline = time.monotonic() + (timeout_s or (expected_s + max(30.0, 0.5 * expected_s)))
     # Doorbell serves a self-signed cert -> no verification. Keep-alive one host.
-    conn = aiohttp.TCPConnector(ssl=False, limit=1, force_close=False)
-    # Per-socket timeouts: the deadline below is only checked BETWEEN chunks,
-    # so without these a single wedged PUT would pin the per-camera talk lock
-    # for aiohttp's 300s default. A 40ms audio chunk never needs seconds.
+    # Per-socket timeouts: the deadline below is only checked BETWEEN chunks, so
+    # without these a single wedged PUT would pin the per-camera talk lock for
+    # aiohttp's 300s default. A 40ms audio chunk never needs seconds.
     sock_timeout = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=5)
-    sent = 0
-    chunks = 0
     headers_base = {
         "User-Agent": "GStreamer souphttpclientsink libsoup/3.6.0",
         "Content-Type": spec["content_type"],
     }
-    # HTTP Digest is handled by aiohttp's DigestAuthMiddleware (added in 3.12):
-    # it answers the doorbell's 401 challenge, then -- with preemptive=True, the
-    # default -- signs every subsequent request from the cached challenge with an
-    # incrementing nc, which is exactly what this chunk loop needs. This replaced
-    # a hand-rolled RFC 2617 implementation; aiohttp 3.14 additionally fixed the
-    # middleware to sign the ENCODED request-target, which matters for the cloud
-    # relay endpoint whose URL carries a ?camera_id= token.
-    digest = aiohttp.DigestAuthMiddleware(login=username, password=password)
-    async with aiohttp.ClientSession(connector=conn, timeout=sock_timeout,
-                                     middlewares=(digest,)) as s:
+    total_chunks = (total + chunk_bytes - 1) // chunk_bytes
+    sent = 0
+    chunks = 0
+    renegotiations = 0
+    off = 0          # byte offset into the encoded audio -- survives renegotiation
+    idx = 0          # chunks sent overall, drives the pacing schedule
+    start = time.monotonic()
+    next_log = start + PROGRESS_LOG_S
 
-        async def put_chunk(body: bytes) -> None:
-            nonlocal chunks, sent
-            async with s.put(put_url, data=body, headers=dict(headers_base)) as r:
-                if r.status == 401:
-                    raise TalkdownError(
-                        "PUT rejected with 401 after Digest authentication -- "
-                        "check the per-session stream password")
-                if r.status // 100 != 2:
-                    txt = (await r.read())[:120]
-                    raise TalkdownError(f"PUT -> HTTP {r.status}: {txt!r}")
-                await r.read()
-                chunks += 1
-                sent += len(body)
+    def _session():
+        """A fresh ClientSession for the CURRENT credentials.
 
-        total_chunks = (total + chunk_bytes - 1) // chunk_bytes
-        start = time.monotonic()
-        next_log = start + PROGRESS_LOG_S
-        idx = 0
-        for off in range(0, total, chunk_bytes):
-            if time.monotonic() > deadline:
-                raise TalkdownError(
-                    f"talkdown exceeded safety deadline after {chunks} chunks")
-            await put_chunk(audio[off:off + chunk_bytes])
-            idx += 1
-            if pace:
-                # Schedule-based pacing: sleep until THIS chunk's real-time slot
-                # (start + idx*CHUNK_MS), absorbing per-PUT latency so wall-clock
-                # tracks audio time (a fixed sleep-after-each-PUT drifted ~10%).
-                # The PREBUFFER_MS lead keeps a constant jitter buffer at the
-                # doorbell (first ~PREBUFFER worth of chunks burst out) so
-                # playback stays continuous instead of underrunning into gaps.
-                slack = (start + idx * (CHUNK_MS / 1000.0)
-                         - PREBUFFER_MS / 1000.0) - time.monotonic()
-                if slack > 0:
-                    await asyncio.sleep(slack)
-            now = time.monotonic()
-            if now >= next_log:
-                log.info("talkdown: %s %d/%d chunks, %.0f/%.0fs elapsed to %s",
-                         spec["label"], chunks, total_chunks, now - start,
-                         expected_s, urlsplit(put_url).netloc)
-                next_log = now + PROGRESS_LOG_S
-    log.info("talkdown: streamed %d chunks / %d bytes %s in %.1fs (audio %.1fs) to %s",
-             chunks, sent, spec["label"], time.monotonic() - start, expected_s,
+        HTTP Digest is handled by aiohttp's DigestAuthMiddleware (3.12+): it
+        answers the doorbell's 401 challenge, then -- preemptive by default --
+        signs every subsequent request from the cached challenge with an
+        incrementing nc, which is exactly what this chunk loop needs. A
+        renegotiated session gets a NEW password, hence a new middleware and a new
+        connector (the old socket belongs to a dead session).
+        """
+        conn = aiohttp.TCPConnector(ssl=False, limit=1, force_close=False)
+        digest = aiohttp.DigestAuthMiddleware(login=username, password=password)
+        return aiohttp.ClientSession(connector=conn, timeout=sock_timeout,
+                                     middlewares=(digest,))
+
+    while off < total:
+        # One iteration per session generation: stream until the audio runs out,
+        # or until this session dies / is about to expire.
+        async with _session() as s:
+
+            async def put_chunk(body: bytes) -> None:
+                nonlocal chunks, sent
+                async with s.put(put_url, data=body, headers=dict(headers_base)) as r:
+                    if r.status == 401:
+                        raise TalkdownError(
+                            "PUT rejected with 401 after Digest authentication -- "
+                            "the per-session stream password is no longer valid")
+                    if r.status // 100 != 2:
+                        txt = (await r.read())[:120]
+                        raise TalkdownError(f"PUT -> HTTP {r.status}: {txt!r}")
+                    await r.read()
+                    chunks += 1
+                    sent += len(body)
+
+            try:
+                while off < total:
+                    if time.monotonic() > deadline:
+                        raise _DeadlineExceeded(
+                            f"talkdown exceeded safety deadline after {chunks} chunks")
+                    # Proactive swap: get ahead of a known expiry rather than
+                    # discovering it as a failed PUT mid-sentence.
+                    if (session_deadline is not None and renegotiate is not None
+                            and renegotiations < c.TALK_MAX_RENEGOTIATIONS
+                            and time.monotonic() >= session_deadline - c.TALK_RENEGOTIATE_MARGIN_S):
+                        log.info("talkdown: session expiry approaching, renegotiating early "
+                                 "at %d/%d chunks", chunks, total_chunks)
+                        break
+                    await put_chunk(audio[off:off + chunk_bytes])
+                    off += chunk_bytes
+                    idx += 1
+                    if pace:
+                        # Schedule-based pacing: sleep until THIS chunk's real-time
+                        # slot (start + idx*CHUNK_MS), absorbing per-PUT latency so
+                        # wall-clock tracks audio time (a fixed sleep-after-each-PUT
+                        # drifted ~10%). The PREBUFFER_MS lead keeps a constant
+                        # jitter buffer at the doorbell so playback stays continuous
+                        # instead of underrunning into gaps.
+                        slack = (start + idx * (CHUNK_MS / 1000.0)
+                                 - PREBUFFER_MS / 1000.0) - time.monotonic()
+                        if slack > 0:
+                            await asyncio.sleep(slack)
+                    now = time.monotonic()
+                    if now >= next_log:
+                        log.info("talkdown: %s %d/%d chunks, %.0f/%.0fs elapsed to %s",
+                                 spec["label"], chunks, total_chunks, now - start,
+                                 expected_s, urlsplit(put_url).netloc)
+                        next_log = now + PROGRESS_LOG_S
+            except _DeadlineExceeded:
+                raise
+            except (TalkdownError, aiohttp.ClientError, asyncio.TimeoutError) as err:
+                # The session went bad mid-clip. Without a way to get a new one,
+                # this is fatal exactly as before.
+                if renegotiate is None or renegotiations >= c.TALK_MAX_RENEGOTIATIONS:
+                    raise
+                log.warning("talkdown: session failed at %d/%d chunks (%s); renegotiating",
+                            chunks, total_chunks, err)
+
+        if off >= total:
+            break
+
+        # ---- renegotiate: a fresh session, then resume at the SAME byte offset ----
+        renegotiations += 1
+        swap_started = time.monotonic()
+        try:
+            fresh = await renegotiate()
+        except Exception as err:  # noqa: BLE001
+            raise TalkdownError(f"talkdown renegotiation failed: {err}") from err
+        if not fresh or not fresh.get("put_url") or not fresh.get("password"):
+            raise TalkdownError("talkdown renegotiation returned no usable session")
+        put_url = fresh["put_url"]
+        password = fresh["password"]
+        username = fresh.get("username") or username
+        swap_s = time.monotonic() - swap_started
+        # The swap is dead air, not audio time: push the safety deadline out by
+        # what it cost, and re-baseline the pacing schedule so the next chunk goes
+        # immediately and then paces normally (rather than bursting to "catch up",
+        # which would overrun the doorbell's small buffer).
+        deadline += swap_s
+        start = time.monotonic() - idx * (CHUNK_MS / 1000.0) + PREBUFFER_MS / 1000.0
+        log.info("talkdown: renegotiated in %.1fs (#%d), resuming at %d/%d chunks to %s",
+                 swap_s, renegotiations, chunks, total_chunks, urlsplit(put_url).netloc)
+
+    log.info("talkdown: streamed %d chunks / %d bytes %s (audio %.1fs, %d renegotiation(s)) to %s",
+             chunks, sent, spec["label"], expected_s, renegotiations,
              urlsplit(put_url).netloc)
     return {"path": "full_duplex", "codec": codec, "chunks": chunks,
-            "bytes": sent, "seconds": round(expected_s, 1)}
+            "bytes": sent, "seconds": round(expected_s, 1),
+            "renegotiations": renegotiations}
