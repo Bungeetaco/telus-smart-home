@@ -430,23 +430,33 @@ class CameraSignalStrengthSensor(_CameraDiagnosticSensor):
 
     Only created for cameras that report one -- a wired camera reports null.
 
-    Deliberately carries NO device class and NO unit, even for a numeric value.
-    The obvious choice, SensorDeviceClass.SIGNAL_STRENGTH, is wrong here: it
-    means dBm, and what the bridge reports is alarm.com's `normalizedSignalStrength`,
-    a 0-100 score (the bars the portal draws). Labelling a 0-100 score "dBm"
-    produces readings like "58 dBm" -- a real dBm figure for Wi-Fi is negative --
-    and, worse, HA records long-term statistics against the declared unit, so
-    the wrong one poisons the history rather than just the display.
+    The unit is decided per camera from what the BRIDGE says it read, not
+    assumed. alarm.com's `normalizedSignalStrength` is a 0-100 score (the bars
+    the portal draws), so it is labelled a percentage; the other key spellings
+    the bridge still accepts for camera models this was never tested against may
+    be real dBm, and those get no unit at all.
 
-    Not relabelled as a percentage either: `_SIGNAL_KEYS` on the bridge side also
-    accepts `signalStrength`/`signalStrengthValue` from models this was never
-    tested against, and those may well be real dBm. Asserting no unit is the only
-    claim that is true whichever key answered. The value is still a number HA
-    graphs, via the MEASUREMENT state class on the base class.
+    Why not just pick one: `SensorDeviceClass.SIGNAL_STRENGTH` means dBm, and a
+    0-100 score labelled dBm reads as "58 dBm" -- real Wi-Fi dBm is negative --
+    while Home Assistant records long-term statistics against the declared unit,
+    so a wrong one poisons the history rather than just the display. Refusing to
+    label anything (which this did before the bridge reported the key) was safe
+    but lost real information for the case that is actually known.
     """
 
     _field = "signal_strength"
     _attr_icon = "mdi:wifi"
+
+    # The one key whose unit is known. Anything else stays unlabelled.
+    _NORMALIZED_KEY = "normalizedSignalStrength"
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """PERCENTAGE for the normalized score, otherwise nothing."""
+        diagnostics = self._diagnostics
+        if diagnostics.get("signal_strength_key") == self._NORMALIZED_KEY:
+            return PERCENTAGE
+        return None
 
 
 class CameraBatterySensor(_CameraDiagnosticSensor):

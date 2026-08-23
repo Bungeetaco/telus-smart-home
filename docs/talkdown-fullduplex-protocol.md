@@ -514,28 +514,93 @@ These are not talkdown, but they are gaps found while working the same account
 and there is no better backlog to put them in. Full detail in
 [web-portal-api-findings.md](web-portal-api-findings.md).
 
-- **E24 Bluetooth arming device config -- genuinely unimplemented.**
-  `PUT /web/api/devices/bluetoothArmingDevices/{id}` carries
-  `isDisarmingEnabledForDevice` (plus `enrolledPartitionId`, `description`,
-  `macAddress`, `managedDeviceType: 29`) -- i.e. whether a paired phone may
-  auto-disarm the panel on approach. Nothing in this integration and nothing in
-  `pyalarmdotcomajax` models it. Whole-object read-modify-write, the same shape
-  as the camera settings documents, so `camera_settings.py` is the template.
-  Worth doing here rather than deferring to local panel access: alarm.com is the
-  **configuration authority** for the Qolsys panel and pushes settings down to
-  it, while the Control4 endpoint on the same panel is **local access only** --
-  the two coexist and are wired independently, so this is a real alarm.com-side
-  toggle, not a cloud mirror. Treat it with siren-level caution: it decides
-  whether a phone walking up to the house disarms the alarm.
-- **E25 Selective sensor bypass -- a small delta, NOT a missing capability.**
-  `POST /web/api/devices/partitions/{id}/bypassSensors` was previously read as
-  "this project cannot bypass sensors". It can: `CONF_FORCE_BYPASS` is passed as
-  `force_bypass` on all three arm calls in `alarm_control_panel.py`, so bypass
-  ships today. The endpoint would only add *selective* bypass (naming specific
-  sensors) on top of the existing bypass-whatever-is-open. **If this is ever
-  built it must extend the existing `force_bypass` option, never sit beside it**
-  -- two independent bypass paths against one partition will disagree about
-  which zones are skipped on a live alarm system.
+- **E24 (DONE 2026-08-23) Bluetooth arming devices are now a switch per phone.**
+  `isDisarmingEnabledForDevice` decides whether a paired phone walking up to the
+  house disarms the alarm, so it is treated with siren-level caution: the write
+  is reachable only from an explicit toggle, the entity exists only where the
+  record reports the capability, and an unknown device id is a 404 rather than a
+  blind PUT at an arbitrary device.
+
+  Same wire conventions as the camera settings -- JSON:API read, flat write, type
+  pluralized on write, whole-document read-modify-write. Discovery is the device
+  catalog, filtered on the resource TYPE rather than the localized category name.
+
+  No `*FeatureSupport` enum exists for this field and the portal renders its
+  switch unconditionally, so the capability flag had to be assembled: `canBeSaved`
+  (which does discriminate -- true on these records, false on plain mobile devices
+  in the same catalog), `canAccessWebSettings`, and the field being a real bool.
+  That reasoning is asserted in a test, so if the flag stops discriminating it
+  fails loudly instead of quietly offering a control that does nothing.
+
+  Verified live on the real account: both paired phones listed, a toggle
+  round-tripped and persisted, a non-bool refused with 400 and an unknown id with
+  404. Run while the panel was disarmed.
+
+  The entity is named for the consequence rather than the mechanism -- "Disarm
+  alarm on arrival" on a device named after the phone, not "Bluetooth disarming"
+  -- and polls every 15 minutes, since nothing but a person can change it.
+
+  Implementing it also turned up a latent bug in `camera_settings._flatten`: it
+  accepted a relationship whose `type` was merely present rather than a string,
+  which walked into an AttributeError mid-parse. These documents contain such
+  members. Fixed and pinned in both modules.
+
+- **E25 (DONE 2026-08-23) Selective sensor bypass -- and a correction: it is not
+  an arm-time option at all.**
+  This entry warned that if built it "must extend the existing `force_bypass`
+  option, never sit beside it", on the grounds that two bypass paths would
+  disagree about which zones get skipped. That reasoning assumed
+  `POST /web/api/devices/partitions/{id}/bypassSensors` was another way of doing
+  arm-time bypass. **It is not.** The capture shows a standalone partition action:
+
+      {"bypass": "<unit>-1|<unit>-3|<unit>-2", "unbypass": ""}
+
+  Pipe-separated device ids, applied immediately, independent of any arm call --
+  the same thing the TELUS app's own bypass screen does. It cannot be folded into
+  `CONF_FORCE_BYPASS`, which is a boolean passed to an arm call.
+
+  So it ships as a MANUAL service (`telus_smarthome.bypass_sensors`) and is
+  deliberately not wired into the arm path. The hazard the original entry named --
+  two *automatic* bypass paths racing over one partition -- is real and is still
+  avoided; a manual action alongside an automatic flag is a different thing.
+  `alarm_control_panel.py` is untouched.
+
+  Real gates found on the partition object and honoured by the bridge, which
+  pre-reads it before writing:
+
+  | Flag | On this panel | Meaning |
+  | --- | --- | --- |
+  | `canBypassSensorWhenArmed` | **false** | a sensor cannot be bypassed while the partition is armed |
+  | `hasPermissionToChangeState` | true | this account may change partition state at all |
+  | `limitSelectiveBypassSensors` | false | no cap on how many may be selectively bypassed |
+  | `hasOpenBypassableSensors` | false | nothing currently open and bypassable |
+  | `hideForceBypass` | true | the portal hides the force-bypass control on this dealer's config |
+
+  The response does NOT report which sensors ended up bypassed, so the service
+  triggers a coordinator refresh rather than claiming a result it was not told.
+
+  A bypassed zone does not trigger the alarm until it is un-bypassed. That is
+  stated in the service description, not just here.
+
+  **Verified live, and one detail nearly shipped as a bug: the write takes about
+  ten seconds to reach the sensor.** Bypassing the front door returned 200
+  immediately, but `isBypassed` was still false at 5s and true at 10s -- so the
+  first verification attempt (a 3-second re-read) wrongly concluded the endpoint
+  had done nothing. The service's post-write refresh is delayed past that window
+  for exactly this reason: refreshing the instant the POST returns reads the OLD
+  state and paints the sensors unchanged, which reads as "the service did
+  nothing" for a call that in fact worked. An un-bypass takes the same ten
+  seconds.
+
+  Also worth recording, because it looks like a contradiction: the vendor's own
+  portal does NOT offer its bypass button while the panel is disarmed. Its gate
+  is `extendedArmingOptions`, which is `{"Disarmed": [], "ArmedStay": [2,1,4],
+  "ArmedAway": [2,1,4]}` on this panel -- no options at all in the disarmed
+  state. **The endpoint honours the call anyway**, verified above, so that is a
+  UI choice rather than an API constraint. Sensors additionally carry
+  `supportsBypass` / `supportsImmediateBypass`; on this account the three door,
+  patio and motion sensors have both and the life-safety devices (smoke, CO,
+  glass-break) do not.
 
 ## Camera-settings gaps found while implementing E9 (2026-08-23)
 
@@ -602,26 +667,36 @@ recorded. None of these block the shipped feature; all were found while groundin
   both clip fields out: their other halves are opaque enum numbers that would
   label worse than the value itself.
 
-- **E29 Surface `Retry-After` on the siren and privacy routes.**
-  `telus_auth.RateLimited` carries the server's own retry delay and
-  `_mws_account_read` honours it for the cached reads, but on
-  `POST …/siren` / `POST …/privacy` the exception becomes a bare `502` and Home
-  Assistant retries on its own schedule. Returning `429` with the header would
-  let the caller back off correctly.
+- **E29 (DONE 2026-08-23) The siren and privacy routes now answer 429 with
+  Retry-After.**
+  They used to return a bare 502 for an edge rate-limit, which tells a caller
+  "upstream broke" when the truth is "come back in N seconds" -- so Home Assistant
+  retried on its own schedule and walked straight back into the limiter. Both
+  routes' reads and writes now go through one `_rate_limited` helper that emits
+  the server's own wait as an integer `Retry-After` header plus a
+  `{"error": "rate_limited", "retry_after": N}` body.
 
-- **E30 Two more settings fields are parsed but not routed.**
-  `camera_settings` handles `max_exposure` (image) and
-  `camera_triggered_clip_duration` (video), but neither is in
-  `control_server._IMAGE_FIELDS` / `_VIDEO_FIELDS`, so neither is reachable over
-  the control API. Both are `FeatureSupport: 0`/unsupported on the reference
-  doorbell, which is why they were not needed -- another model may differ.
+- **E30 (DONE 2026-08-23) `max_exposure` and `camera_triggered_clip_duration`
+  are routed.**
+  Both were parsed by `camera_settings` but missing from the control server's
+  field specs, so neither was reachable. Both are still unsupported on the two
+  cameras here (`canSetMaxExposure` false, and the camera-triggered duration
+  offers a single value), so neither has been exercised against hardware -- the
+  support gate refuses them on these devices, which is the correct outcome and
+  the only one testable here.
 
-- **E31 Signal strength has no unit.**
-  The bridge reports `normalizedSignalStrength`, a 0-100 score. The sensor
-  deliberately declares no device class and no unit, because the fallback key
-  names kept for untested camera models may be real dBm and mislabelling would
-  poison Home Assistant's long-term statistics. Confirming that every model this
-  integration sees reports the normalized score would allow labelling it `%`.
+- **E31 (DONE 2026-08-23) Signal strength is labelled per camera, from what the
+  bridge says it read.**
+  The unit was the blocker: `normalizedSignalStrength` is a 0-100 score, while the
+  fallback spellings kept for untested models may be real dBm, and Home Assistant
+  records long-term statistics against the declared unit -- so a wrong label
+  poisons history rather than just the display.
+
+  Rather than "confirm every model reports the score", which is not a thing anyone
+  can confirm, the bridge now reports `signal_strength_key` alongside the value
+  and the sensor labels a percentage ONLY when that key is
+  `normalizedSignalStrength`. Anything else stays unlabelled, exactly as before.
+  The known case gets its unit; the unknown ones keep the safe answer.
 
 ## Gaps found while implementing E26/E27 (2026-08-23)
 
@@ -651,12 +726,22 @@ that look worth having.
   the IMAGE settings -- a different field on a different endpoint. alarm.com's
   own UI calls this one "Camera Status LED".
 
-- **E33 `IsBatteryPowered` / `CanGetBatteryLevel` are a cleaner battery signal.**
-  The mobile document reports `BatteryLevel="-1"` with `IsBatteryPowered="false"`,
-  which says "no battery" unambiguously. The website's `batteryLevel` is
-  present-and-`0` on the same device, which is why the bridge has to gate on
-  `shouldDisplayBatteryLevel` instead. Worth cross-checking against a
-  battery-powered camera before trusting either.
+- **E33 (DONE 2026-08-23, with one point still open) The battery gate is correct
+  on the hardware available, and hardened for the case that is not.**
+  Verified live on both cameras: `shouldDisplayBatteryLevel` false,
+  `batteryLevel` 0, and the bridge correctly reports no battery. The existing gate
+  was right.
+
+  Added on top: a NEGATIVE level is now also treated as "no reading". `-1` is this
+  API family's "not applicable" -- the mobile document reports `BatteryLevel="-1"`
+  with `IsBatteryPowered="false"` for the same device the website reports `0` for
+  -- so a model that omits the display flag but answers -1 no longer surfaces a
+  nonsense battery of -1%.
+
+  **Still open, and not closable here:** whether `shouldDisplayBatteryLevel` is
+  reliable on an actual battery-powered camera. Neither camera on this account has
+  a battery. If it ever proves unreliable, the mobile document's
+  `IsBatteryPowered` / `CanGetBatteryLevel` pair is the unambiguous tiebreaker.
 
 - **E34 (DONE 2026-08-23) Live-video resolution is now a select, and it really
   does change what this bridge restreams.**
@@ -690,28 +775,49 @@ that look worth having.
   this API is inconsistent about which half it means (see E28) -- so the field
   names its own options key and gets the stricter treatment.
 
-- **E35 The outdoor chime level disagrees between the two APIs.**
-  Mobile reports `ocl="3"`, website reports `outdoorToneVolumeValue: 0`, for what
-  should be the same setting. Both agree it is not settable on this device
-  (`csocl="false"` / `outdoorToneVolumeFeatureSupport: 0`), so nothing depends on
-  it -- but the two reads are not interchangeable and one of them is wrong. A
-  device that CAN set it would settle which.
+- **E35 (DONE 2026-08-23) The outdoor chime level disagreement is resolved: the
+  WEBSITE value is a placeholder, and it is no longer reported as a reading.**
+  Re-read both APIs against the live doorbell at the same moment. Mobile still
+  says `ocl="3"`; website still says `outdoorToneVolumeValue: 0`; both still agree
+  it is not settable (`csocl="false"` / `outdoorToneVolumeFeatureSupport: 0`).
 
-- **E36 The `sdcds` attribute on a chime-type option is unexplained.**
-  It sits beside `n`/`v`/`sdict` and is `true` for None and Mechanical, `false`
-  for Digital on the reference doorbell. The decompiled parser does not read it.
-  Harmless to ignore, but it is a hint about some UI rule this project does not
-  model.
+  What settles it is the control in the same pair of documents: the volume that IS
+  settable agrees exactly across both APIs -- mobile `speakervolume="10"`, website
+  `call_volume: 10`. Only the unsettable field disagrees. And the outdoor tone is
+  switched ON, which a level of 0 would contradict.
 
-- **E37 Selecting the "none" chime type silently disables the indoor chime.**
-  Found in live testing: `chime_type: -1` leaves `indoor_chime_on` false, and
-  restoring the type does not restore the toggle. TELUS does this, not the bridge.
-  It is documented in [control-api.md](control-api.md) and
-  [ha-integration.md](ha-integration.md), and deliberately NOT worked around --
-  auto-re-enabling a chime the user may have wanted off is worse than leaving it
-  where the upstream put it. Worth revisiting only if a way to warn the user at
-  the point of selection appears; Home Assistant's select has no confirmation
-  affordance today.
+  So the website reports a default for a field it does not manage. The bridge now
+  returns `outdoor_tone_volume: null` when `supports_outdoor_tone_volume` is false,
+  rather than a 0 that invites a caller to display "volume 0" for an unmuted tone.
+  The min/max still come through, so a model that can set it still gets its range.
+
+- **E36 (DONE 2026-08-23) `sdcds` is inert: no client reads it, and its most
+  likely meaning is recorded.**
+  Searched the decompiled app's dex strings directly. `sdict` appears (the parser
+  reads it); **`sdcds` appears nowhere at all** -- and neither do `cscd`, `cdv`,
+  `mncdv` or `mxcdv`, the chime-DURATION fields carried by the same response. So
+  no shipped client of either API reads it, and nothing here depends on it.
+
+  Best-supported reading, by naming convention and by what sits beside it:
+  `sdict` = shouldDisableIndoorChimeToggle, so `sdcds` =
+  should-disable-chime-duration-setting -- consistent with it being true for None
+  and Mechanical and false for Digital, since a digital chime is the kind with a
+  programmable duration. **Unconfirmed**, and deliberately not acted on: an
+  attribute no client reads is not a rule worth modelling on a guess.
+
+- **E37 (DONE 2026-08-23) Selecting the "none" chime type now tells the user what
+  it did.**
+  The entry left this open pending "a way to warn the user at the point of
+  selection". A persistent notification is that affordance, and it is what the
+  select now raises -- naming the camera, saying the indoor chime was turned off,
+  and saying explicitly that choosing a real chime type again will NOT turn it
+  back on.
+
+  Still deliberately not worked around: the integration does not re-enable the
+  chime. Silently re-arming something the user may have wanted off is the worse
+  failure; telling them is not. The notice is keyed per camera, so changing the
+  type twice replaces the notice rather than stacking copies, and it is raised
+  only when the chime was actually on beforehand.
 
 - **E38 (DONE 2026-08-23) The TELUS-side notification toggles are now switches.**
   Motion and button-press, over the same `generalSettings` document as the status
@@ -765,3 +871,43 @@ that look worth having.
   what the app *contains*, and one of these chunks was even stored truncated in
   the capture. Re-fetching the assets is cheap and answers questions the capture
   cannot.
+
+## Gaps found while implementing E24 (2026-08-23)
+
+- **E41 Panel-level Bluetooth disarming is a separate feature.**
+  `GET/PUT /web/api/settings/panelBluetooth/bluetoothDisarmingSettings/{system_id}`
+  carries `isBluetoothPairingEnabledForSystem` and a `timeout` (minutes), with its
+  own save in the portal bundle, plus an `enrolledDevices` relationship listing
+  the paired phones. It is **not** the capability gate for the per-device toggle
+  -- the per-device settings page never consults it -- so E24 did not build it.
+  A system-wide pairing switch and a disarm-timeout number are the obvious shapes.
+  Open question: whether `isBluetoothPairingEnabledForSystem: false` makes a
+  per-device `true` inert on the panel.
+
+- **E42 Unpairing a Bluetooth arming device is deliberately not exposed.**
+  `DELETE /web/api/devices/bluetoothArmingDevices/{id}` and
+  `POST /web/api/devices/bluetoothArmingDevices/deleteAll` exist in the portal
+  bundle. Neither is undoable from this side -- re-pairing needs the phone and the
+  panel -- so they are recorded rather than built. If ever built, they belong
+  behind something more deliberate than a switch.
+
+- **E43 The enrolled partition is read-only here.**
+  Each arming device carries `enrolledPartitionId`, and the portal has a
+  partition-picker page for it. The bridge reports it and does not write it.
+
+- **E44 (DONE 2026-08-23) The arming-device write body is confirmed by a live PUT.**
+  Two details were unverified when the module was written: the browser's PUT
+  carries three top-level keys the server never sent (`state: -1`,
+  `desiredState: 0`, `isRefreshingState: false`) plus a `deviceIcon.cachedData`
+  sub-object, while omitting `deviceModelId` and `primaryAssociatedDeviceIds`;
+  and it sends `webSettings` as the string `"7205"` where the read returns the
+  integer `7205`.
+
+  The bridge chose to resend exactly what the server said -- no invented `state`
+  for a record whose `hasState` is false, and `webSettings` as the integer. **A
+  live PUT against the real account returned 200 and the change persisted**, so
+  that form is accepted. The browser's extra keys are Ember model state, not
+  something the endpoint requires.
+
+  What is still not known, and does not matter here: whether the endpoint would
+  *also* accept the browser's form. Nothing needs it to.

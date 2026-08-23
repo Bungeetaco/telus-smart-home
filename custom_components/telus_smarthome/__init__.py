@@ -25,6 +25,7 @@ from pyalarmdotcomajax.exceptions import (
     ConfigureTwoFactorAuthentication,
 )
 
+from .bypass_service import async_register_bypass_service, async_remove_bypass_service
 from .camera import CameraBridgeCoordinator
 from .clip_view import TelusClipRedirectView
 from .const import (
@@ -252,6 +253,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # is a no-op, same spirit as the clip_view "once per HA run" guard above.
     async_register_speak_service(hass)
 
+    # Register the manual selective-sensor-bypass service
+    # (telus_smarthome.bypass_sensors). Same once-per-HA-run, has_service-guarded
+    # lifecycle as the talkdown services above. It is a MANUAL action only and is
+    # deliberately not wired into the arm path -- CONF_FORCE_BYPASS remains the
+    # only bypass that happens as a side effect of arming (see bypass_service.py).
+    async_register_bypass_service(hass)
+
     async def handle_telus_smarthome_debug_request_event(event: Event) -> None:
         """Dump debug data when requested via Home Assistant event."""
 
@@ -415,11 +423,12 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
     if unload_ok:
         LOGGER.debug("%s: Unloaded Alarm.com config entry.", __name__)
 
-    # Remove the shared speak service once no config entries remain.
+    # Remove the shared speak and bypass services once no config entries remain.
     # "clip_view_registered" is a per-HA-run sentinel, not an entry, so exclude it
     # when deciding whether this was the last entry.
     remaining_entries = [key for key in hass.data.get(DOMAIN, {}) if key != "clip_view_registered"]
     if not remaining_entries:
         async_remove_speak_service(hass)
+        async_remove_bypass_service(hass)
 
     return unload_ok

@@ -72,6 +72,10 @@ BASE=http://127.0.0.1:8199
 | GET | `/control/cameras/{camera_id}/diagnostics` | bearer | Camera signal strength, battery, device status |
 | POST | `/control/cameras/{camera_id}/settings/volume` | bearer | Set the camera speaker (call) volume |
 | POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime, wired chime type, outdoor tone and its volume |
+| GET | `/control/partitions` | bearer | List alarm partitions and the flags that gate a sensor bypass |
+| POST | `/control/partitions/{partition_id}/bypass` | bearer | Bypass / un-bypass named sensors — **a bypassed zone stops triggering the alarm** |
+| GET | `/control/arming-devices` | bearer | List the Bluetooth arming devices (phones that may auto-disarm the panel) |
+| POST | `/control/arming-devices/{device_id}/disarming` | bearer | Turn a phone's auto-disarm permission on or off |
 | POST | `/control/cameras/{camera_id}/settings/notifications` | bearer | Turn TELUS-side push notifications on/off |
 | POST | `/control/cameras/{camera_id}/settings/led` | bearer | Turn the device's status LED on/off, or set its brightness |
 | POST | `/control/cameras/{camera_id}/settings/image` | bearer | Set picture settings (brightness, HDR, IR, night vision, …) |
@@ -94,6 +98,7 @@ Shared error responses across the authed routes:
 | --- | --- | --- |
 | `401` | `{"error": "bad_secret"}` | Missing/wrong `Authorization` header |
 | `502` | `{"error": "telus_error"}` | The upstream TELUS/alarm.com call failed |
+| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited us. Carries a `Retry-After` header with the **server's own** wait — honour it rather than retrying on your own schedule, or the next attempt walks straight back into the limiter. Raised by the siren and privacy routes; the settings poll absorbs it internally instead |
 
 ---
 
@@ -650,7 +655,7 @@ and what the volume and chime writes return too):
 | `supports_outdoor_tone` | bool | Whether the doorbell's own outdoor tone can be turned on/off |
 | `outdoor_tone_on` | bool | Outdoor tone state |
 | `supports_outdoor_tone_volume` | bool | Whether that tone's **volume** is settable — a **separate** flag, and `false` on the reference doorbell even though the tone itself toggles fine |
-| `outdoor_tone_volume` | int | `outdoor_tone_volume_min`–`outdoor_tone_volume_max` (0–3 on the doorbell tested) |
+| `outdoor_tone_volume` | int \| null | **`null` when `supports_outdoor_tone_volume` is false.** The website reports `0` there for a tone that is audibly on, while the mobile API reports level 3 for the same setting on the same device — it is a placeholder for a field the website does not manage, not a reading. The min/max still come through for a model that can set it |
 | `outdoor_tone_volume_min` / `outdoor_tone_volume_max` | int | Device-reported range |
 | `raw` | object | The untouched upstream settings object, so a caller can read a field the bridge does not model yet |
 
@@ -923,6 +928,7 @@ something can alert on.
 
 | Field | Type | Notes |
 | --- | --- | --- |
+| `signal_strength_key` | str \| null | WHICH upstream key the reading came from. `normalizedSignalStrength` is a 0–100 score; the other spellings, kept for camera models this was never tested against, may be real dBm. A caller must label the first and only the first — Home Assistant records long-term statistics against the declared unit, so a wrong one poisons history rather than just the display |
 | `signal_strength` | number \| null | alarm.com's `normalizedSignalStrength` — a **0–100 score, not dBm** (see below). `null` when the device reports none, typically a wired camera |
 | `battery` | number \| null | Battery percentage, `null` on a camera with no battery |
 | `device_status` | string \| null | Upstream status string |
@@ -1076,6 +1082,117 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
   -d '{"button_press": false}' \
   $BASE/control/cameras/<camera_id>/settings/notifications
+```
+
+---
+
+## `GET /control/partitions`
+
+Lists the alarm partitions with the two flags that decide whether a bypass is
+allowed right now.
+
+```json
+{"partitions": [
+  {"id": "<unit>-127", "partition_id": 1, "description": "Panel",
+   "state": 1, "is_disarmed": true,
+   "has_permission_to_change_state": true,
+   "can_bypass_when_armed": false,
+   "has_open_bypassable_sensors": false,
+   "raw": {}}
+]}
+```
+
+Both gate flags default to the **refusing** value when the partition does not
+report them: an unknown permission is not permission, and an unknown "may I
+bypass while armed" is not a yes.
+
+---
+
+## `POST /control/partitions/{partition_id}/bypass`
+
+**A bypassed sensor does not trigger the alarm until it is un-bypassed.**
+
+`partition_id` is the partition's alarm.com device id (`<unit>-127`), not the
+`partition_id: 1` ordinal.
+
+**Request body:** `{"bypass": [<sensor id>, ...], "unbypass": [...]}` — both
+lists optional, at least one non-empty, else `400 malformed`. A sensor id
+containing the `|` separator is refused: the wire format is pipe-separated, so
+one would split server-side and bypass a sensor nobody named.
+
+The partition is **re-read before every write** and the operation refused with
+`422 unsupported` when it says no — no permission, or armed on a panel whose
+`canBypassSensorWhenArmed` is false. Discovering that a panel forbade the write
+by having already attempted it is not an acceptable order of operations.
+
+**Success response:** `{"status": "applied", "partition": { … }}`.
+
+> **The write takes about ten seconds to reach the sensor.** Verified live:
+> `isBypassed` was still false 5s after a 200 and true at 10s. The response says
+> nothing about which sensors ended up bypassed — this endpoint never does — so a
+> caller that re-reads immediately will see the old state and conclude nothing
+> happened. Wait past that window before reading back.
+
+This is **not** the integration's `force_bypass` arming option and must never
+become an automatic second one; see `partitions.py`.
+
+---
+
+## `GET /control/arming-devices`
+
+Lists the **Bluetooth arming devices** on the account — paired phones that may
+disarm the panel when they come within range.
+
+**Response**
+
+```json
+{"devices": [
+  {"id": "<unit>-5264",
+   "description": "Someone's iPhone",
+   "disarming_enabled": true,
+   "enrolled_partition_id": "1",
+   "supports_disarming_toggle": true,
+   "raw": {}}
+]}
+```
+
+`supports_disarming_toggle` is assembled rather than read from a single flag:
+this endpoint publishes no `*FeatureSupport` enum and no `canSetX` for the field,
+and the portal renders its switch unconditionally. It combines `canBeSaved`
+(which does discriminate — true on these devices, false on plain mobile devices
+in the same catalog), `canAccessWebSettings` (the bridge is a website client),
+and the field being present as a real boolean.
+
+**Errors:** the shared table, minus `400`/`422` — this route takes no caller
+input, so an upstream problem is a `502` rather than "you asked wrong".
+
+---
+
+## `POST /control/arming-devices/{device_id}/disarming`
+
+**This decides whether a phone walking up to the house disarms the alarm.**
+Treat it with the caution the siren route gets: it is never called except by an
+explicit user action.
+
+**Request body:** `{"enabled": <bool>}` — a non-bool is a `400`.
+
+Three refusals, cheapest first: a bad body is a `400` before any upstream call; a
+device id absent from the catalog is a `404`, so a typo can never become a blind
+`PUT` at an arbitrary device; and a device that does not report the capability is
+a `422`.
+
+**Success response:** the same object `GET /control/arming-devices` returns for
+that device.
+
+**Errors:** the shared table.
+
+**Example**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}' \
+  $BASE/control/arming-devices/<device_id>/disarming
 ```
 
 ---
