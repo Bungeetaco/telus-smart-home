@@ -34,6 +34,7 @@ own deployment.
 | Doc | What it covers |
 | --- | --- |
 | [alarm-com-api.md](alarm-com-api.md) | The Alarm.com backend API and the TELUS SSO login handshake (both reimplementations). |
+| [mobile-api-findings.md](mobile-api-findings.md) | Survey of mobile-app API actions this project does NOT use, and what each would enable. |
 | [configuration.md](configuration.md) | Every configurable knob across the bridge and the integration, in one place. |
 
 ## Guides
