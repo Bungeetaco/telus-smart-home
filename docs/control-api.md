@@ -711,6 +711,36 @@ a range or a list, plus `raw`. **Which fields appear is device-dependent** — t
 example above is a doorbell; a camera without IR will still return the IR keys,
 with `supports_*` false. Always branch on `supports_*`, never on key presence.
 
+### `live_resolution` — the one video field that is not about clips
+
+The `video` object's fields are clip/recording settings with one exception:
+`live_resolution` is the **live stream's** resolution, read from a different
+relationship of the same upstream document.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `supports_live_resolution` | bool | True when the camera offers a choice — see below |
+| `live_resolution` | str | e.g. `"1440x1440"` |
+| `live_resolution_options` | list | The settable values |
+| `live_resolution_choices` | list | `{"value": str, "label": str}` using the vendor's own labels, e.g. `"Full High Definition (1440x1440)"` |
+
+**This changes what the bridge itself restreams.** That is not obvious — the
+bridge fetches its stream from an endpoint named `liveVideoHighestResSources`,
+which reads as though it would ignore the setting. It does not. Verified live:
+selecting `480x480` and renegotiating took the bridge's own stream from
+`1440x1440@15fps` to `480x480@15fps`. "Highest available" means highest *under
+the current selection*.
+
+So it is the control for a camera's bandwidth, and equally a way to degrade every
+view of that camera by accident. The change reaches an already-running stream
+only when that stream renegotiates.
+
+Support is derived from the option object itself: an **empty** `webOptions` is
+how this API says "no choice offered" (it is exactly what `mobileOptions` is on
+the reference doorbell), and `isWebOptionsDisabled` is a separate server-side
+veto. Only the **keys** of `webOptions` are settable — the labels are not values,
+unlike the ambiguous `<field>Options` objects elsewhere in this API.
+
 ### The `led` object — the status indicator light
 
 Read from `generalSettings`, a document that also carries the doorbell's
@@ -1134,11 +1164,12 @@ the image route.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `clip_resolution` | string | Must be one of the device's `clip_resolution_options` (`480x480` / `960x960` / `1440x1440` on the cameras seen). This is the **recorded clip** resolution and has no effect on the live RTSP stream, which the bridge encodes itself |
+| `clip_resolution` | string | Must be one of the device's `clip_resolution_options` (`480x480` / `960x960` / `1440x1440` on the cameras seen). This is the **recorded clip** resolution and has no effect on the live stream — for that, see `live_resolution` below |
 | `clip_quality` | string | Encode quality; must be one of the device's `clip_quality_options` |
 | `pretrigger_enabled` | bool | Pre-trigger recording (the seconds before the event) |
 | `keep_clips_days` | int | Cloud retention in days, checked against whichever the device publishes — its `keep_clips_days_options` list and/or a min/max. **`-1` is a legitimate option meaning "keep forever"**, so do not filter negatives out on the assumption that a retention must be positive |
 | `alarm_clip_duration` | int | Alarm-clip length in seconds; must be within the device-reported range, else `400` |
+| `live_resolution` | string | The **live stream's** resolution — the exception in this route, and the one field here that is not about clips. Must be one of `live_resolution_options`. Unlike `clip_resolution` it **does** change what this bridge restreams (verified live), though only from the next stream renegotiation |
 
 Any other key, or a value of the wrong type, is a `400 malformed`. A recognised
 key the device reports no support for is a `422 unsupported` — that gate runs on

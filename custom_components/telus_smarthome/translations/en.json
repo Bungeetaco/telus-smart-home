@@ -157,6 +157,9 @@
       },
       "camera_telus_app_notification_format": {
         "name": "TELUS app notification format"
+      },
+      "camera_live_resolution": {
+        "name": "Live video resolution"
       }
     },
     "button": {

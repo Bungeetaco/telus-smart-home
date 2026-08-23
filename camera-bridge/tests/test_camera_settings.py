@@ -583,6 +583,73 @@ async def test_led_rejects_a_wrong_typed_value():
         assert portal.writes == []
 
 
+async def test_live_resolution_is_gated_on_the_option_object_itself():
+    """The LIVE stream's resolution, in a different relationship of the same
+    document as the clip settings.
+
+    Its capability flag IS the option object: `webOptions` maps value -> label and
+    an EMPTY object is how this API says "no choice offered" -- which is exactly
+    what `mobileOptions` is on this doorbell. `isWebOptionsDisabled` is a separate
+    server-side veto, and is the one gate in this module phrased as a prohibition
+    rather than a capability, so an absent one means allowed.
+    """
+    async with portal_at(8496) as (portal, telus):
+        video = cs._parse_table(cs._flatten(portal.docs["video_configs"]), cs._VIDEO_FIELDS)
+        assert video["supports_live_resolution"] is True, video
+        assert video["live_resolution"] == "1440x1440", video
+        assert video["live_resolution_options"] == ["1440x1440", "960x960", "480x480"]
+        # Labelled the way the vendor's own UI labels them, not bare geometry.
+        assert video["live_resolution_choices"][0] == {
+            "value": "1440x1440", "label": "Full High Definition (1440x1440)"}
+
+        await cs.set_video_config(telus, CAM, live_resolution="480x480")
+        sent = portal.last("videoConfigs")
+        assert sent["liveVideoConfig"]["selectedWebOption"] == "480x480"
+        # A different relationship of the same document -- the clip settings ride
+        # along untouched.
+        assert sent["savedVideoSetting"] == cs._flatten(
+            portal.docs["video_configs"])["savedVideoSetting"]
+
+
+async def test_live_resolution_refuses_a_value_the_camera_does_not_offer():
+    """Only the KEYS of webOptions are settable. The general option rule accepts
+    either half of such an object because this API is inconsistent about which it
+    means -- here it is not ambiguous, so the label must not be accepted as a
+    value."""
+    async with portal_at(8497) as (portal, telus):
+        for bad in ("2160x2160", "Full High Definition (1440x1440)", "hd"):
+            await expect_error(f"live_resolution={bad}",
+                               lambda b=bad: cs.set_video_config(telus, CAM,
+                                                                 live_resolution=b),
+                               unsupported=False)
+        assert portal.writes == []
+
+
+async def test_live_resolution_unsupported_when_no_options_or_disabled():
+    """An empty option object and an explicit veto both mean no control."""
+    async with portal_at(8498) as (portal, telus):
+        for res in portal.docs["video_configs"]["included"]:
+            attrs = res.get("attributes") or {}
+            if "webOptions" in attrs:
+                attrs["webOptions"] = {}
+        video = cs._parse_table(cs._flatten(portal.docs["video_configs"]), cs._VIDEO_FIELDS)
+        assert video["supports_live_resolution"] is False, video
+
+        for res in portal.docs["video_configs"]["included"]:
+            attrs = res.get("attributes") or {}
+            if "webOptions" in attrs:
+                attrs["webOptions"] = {"960x960": "High Definition (960x960)"}
+                attrs["isWebOptionsDisabled"] = True
+        video = cs._parse_table(cs._flatten(portal.docs["video_configs"]), cs._VIDEO_FIELDS)
+        assert video["supports_live_resolution"] is False, video
+
+        await expect_error("vetoed",
+                           lambda: cs.set_video_config(telus, CAM,
+                                                       live_resolution="960x960"),
+                           unsupported=True)
+        assert portal.writes == []
+
+
 async def test_out_of_range_is_refused_and_nothing_is_written():
     """Refused, not clamped: silently writing a different value than asked hides
     the mismatch. unsupported=False marks it a caller mistake (400), not a

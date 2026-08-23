@@ -37,6 +37,7 @@ from .camera_settings_coordinator import (
 from .const import (
     CAMERA_BRIDGE_CAMERA_CHIME_URL_TEMPLATE,
     CAMERA_BRIDGE_CAMERA_NOTIFICATIONS_URL_TEMPLATE,
+    CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE,
     DATA_CONTROLLER,
     DOMAIN,
 )
@@ -103,6 +104,18 @@ async def async_setup_entry(
 
     async_add_camera_entities(
         config_entry, settings_coordinator, async_add_entities, _build_notification_format
+    )
+
+    @core.callback
+    def _build_live_resolution(camera_id: str, camera_data: dict[str, Any]) -> list[Entity]:
+        """One selector per camera that offers a choice of live-stream resolution."""
+        video = (camera_data.get("settings") or {}).get("video") or {}
+        if not video.get("supports_live_resolution"):
+            return []
+        return [CameraLiveResolutionSelect(settings_coordinator, camera_id)]
+
+    async_add_camera_entities(
+        config_entry, settings_coordinator, async_add_entities, _build_live_resolution
     )
 
 
@@ -293,6 +306,108 @@ class CameraNotificationFormatSelect(CameraSettingsEntity, SelectEntity):
             self.coordinator.async_apply_settings_section(
                 self._camera_id, "notifications", notifications
             )
+        else:
+            await self.coordinator.async_request_refresh()
+
+
+class CameraLiveResolutionSelect(CameraSettingsEntity, SelectEntity):
+    """The resolution of a camera's LIVE stream -- including the one this
+    integration restreams.
+
+    Not a clip setting: recorded clips have their own resolution, and changing
+    this does not touch it. This is the live view, and it was confirmed against
+    real hardware that it changes what the bridge itself receives -- selecting
+    Standard Definition took the bridge's own stream from 1440x1440 to 480x480.
+    That is worth knowing in both directions: it is the control for cutting a
+    camera's bandwidth, and it is also a way to accidentally make every Home
+    Assistant view of that camera worse.
+
+    The bridge asks TELUS for the *highest resolution source available*, which
+    reads like it would ignore this setting. It does not -- "highest available"
+    turns out to mean highest under the current selection, not the camera's
+    absolute maximum.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:video-high-definition"
+
+    def __init__(self, coordinator: CameraSettingsCoordinator, camera_id: str) -> None:
+        """Initialize the live-resolution selector for one camera."""
+        super().__init__(coordinator, camera_id, "live_resolution")
+
+    @property
+    def _video(self) -> dict[str, Any]:
+        """The camera's video settings section."""
+        return self._settings.get("video") or {}
+
+    @property
+    def available(self) -> bool:
+        """Also unavailable while the camera offers no choice of resolution.
+
+        The bridge derives that from the option object itself being empty, which
+        is how this API says "no choice here" -- and from a separate server-side
+        veto flag. Either one takes the control away rather than leaving a
+        selector that cannot be applied.
+        """
+        return super().available and bool(self._video.get("supports_live_resolution"))
+
+    @property
+    def _values_by_label(self) -> dict[str, str]:
+        """The offered resolutions as {label shown: value written}.
+
+        Prefers the vendor's own labels ("Full High Definition (1440x1440)") and
+        falls back to the bare values, which are the geometries themselves and so
+        stay perfectly readable -- unlike the notification format, losing the
+        labels here costs clarity but not meaning.
+        """
+        labelled: dict[str, str] = {}
+        for choice in self._video.get("live_resolution_choices") or []:
+            value, label = choice.get("value"), choice.get("label")
+            if value is None or not label:
+                continue
+            labelled[str(label)] = str(value)
+        if labelled:
+            return labelled
+
+        return {str(value): str(value)
+                for value in self._video.get("live_resolution_options") or []
+                if value is not None}
+
+    @property
+    def options(self) -> list[str]:
+        """The resolutions this camera offers."""
+        return list(self._values_by_label)
+
+    @property
+    def current_option(self) -> str | None:
+        """The label matching the reported resolution, or None if none does."""
+        current = self._video.get("live_resolution")
+        if current is None:
+            return None
+        return next(
+            (label for label, value in self._values_by_label.items() if value == current),
+            None,
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        """Write the chosen resolution and adopt the video section that comes back.
+
+        Note the change reaches an already-running stream only when that stream is
+        renegotiated; an established session keeps the resolution it started with.
+        """
+        values = self._values_by_label
+        if option not in values:
+            raise HomeAssistantError(
+                f"This camera no longer offers the live resolution {option}."
+            )
+
+        video = await async_bridge_post(
+            self.hass,
+            CAMERA_BRIDGE_CAMERA_VIDEO_URL_TEMPLATE.format(camera_id=self._camera_id),
+            {"live_resolution": values[option]},
+        )
+        if video:
+            self.coordinator.async_apply_settings_section(self._camera_id, "video", video)
         else:
             await self.coordinator.async_request_refresh()
 
