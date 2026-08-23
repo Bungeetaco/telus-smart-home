@@ -197,6 +197,7 @@ from aiohttp import web
 
 from . import config as c
 from . import talk as talk_mod
+from . import talk_fullduplex
 from .telus_auth import relogin_if_stale
 from .telus_rest import (
     get_snapshot_url,
@@ -375,6 +376,9 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             body = await request.json()
             audio_url = (body.get("audio_url") or "").strip()
             audio_path = (body.get("audio_path") or "").strip()
+            codec = (body.get("codec") or "").strip().lower() or None
+            conditioning = body.get("conditioning")
+            audio_filter_req = body.get("audio_filter")
         except Exception:
             log.warning("Control endpoint: malformed talk request for %s", camera_id,
                         exc_info=True)
@@ -384,12 +388,29 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             return web.json_response({"error": "malformed"}, status=400)
         if audio_url and not audio_url.startswith(("http://", "https://")):
             return web.json_response({"error": "malformed"}, status=400)
+        if codec is not None and codec not in talk_fullduplex.CODECS:
+            return web.json_response({"error": "bad_codec"}, status=400)
+        # Audio conditioning is on by default (config.TALK_AUDIO_FILTER). A request
+        # may disable it ("conditioning": false) or override the chain
+        # ("audio_filter": "<ffmpeg -af string>"). audio_filter=None -> config default.
+        if conditioning is not None and not isinstance(conditioning, bool):
+            return web.json_response({"error": "malformed"}, status=400)
+        if audio_filter_req is not None and not isinstance(audio_filter_req, str):
+            return web.json_response({"error": "malformed"}, status=400)
+        if isinstance(audio_filter_req, str):
+            audio_filter = audio_filter_req            # explicit override (may be "")
+        elif conditioning is False:
+            audio_filter = ""                          # explicit disable
+        else:
+            audio_filter = None                        # config default
 
         try:
             result = await talk_manager.speak(
                 camera_id,
                 audio_url=audio_url or None,
                 audio_path=audio_path or None,
+                codec=codec,
+                audio_filter=audio_filter,
             )
         except talk_mod.TalkInProgress:
             return web.json_response({"error": "talk_in_progress"}, status=409)

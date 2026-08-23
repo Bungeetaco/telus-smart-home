@@ -95,7 +95,9 @@ class TalkManager:
         return self._camera_locks.setdefault(camera_id, asyncio.Lock())
 
     async def speak(self, camera_id: str, *, audio_url: str | None = None,
-                    audio_path: str | None = None) -> dict:
+                    audio_path: str | None = None,
+                    codec: str | None = None,
+                    audio_filter: str | None = None) -> dict:
         """Play one audio clip through the camera's speaker.
 
         Exactly one of audio_url / audio_path is used (url wins if both given).
@@ -126,7 +128,7 @@ class TalkManager:
                     # auth/start/end steps are each bounded inside
                     # _run_full_duplex; the doorbell imposes no session limit
                     # we've observed.
-                    return await self._run_full_duplex(doorbell, audio_bytes)
+                    return await self._run_full_duplex(doorbell, audio_bytes, codec=codec, audio_filter=audio_filter)
             endpoint = await self._resolve_endpoint(camera_id)
             return await asyncio.wait_for(
                 self._run_talk(endpoint, audio_bytes),
@@ -304,7 +306,9 @@ class TalkManager:
                 return kind, url
         return None, None
 
-    async def _run_full_duplex(self, doorbell: dict, audio_bytes: bytes) -> dict:
+    async def _run_full_duplex(self, doorbell: dict, audio_bytes: bytes, *,
+                               codec: str | None = None,
+                               audio_filter: str | None = None) -> dict:
         """StartFullDuplex -> chunked Digest mu-law PUT -> EndLiveStream.
 
         Modular: audio_bytes is any transcodable clip (TTS, music, ...);
@@ -337,10 +341,29 @@ class TalkManager:
 
         log.info("talkdown: full-duplex armed for %s via %s endpoint",
                  doorbell.get("global_device_id"), kind)
+        # Codec: prefer the configured/ requested one (L16 by default) and fall
+        # back to mu-law on a transport failure, so an L16-incompatible session
+        # still gets audio. NOTE: fallback triggers on a TalkdownError (e.g. an
+        # HTTP error), not on merely bad-sounding audio -- a 2xx L16 stream is
+        # taken as success. The default lives in config.TALK_CODEC.
+        primary = codec or c.TALK_CODEC
+        attempts = [primary]
+        if c.TALK_CODEC_FALLBACK and c.TALK_CODEC_FALLBACK != primary:
+            attempts.append(c.TALK_CODEC_FALLBACK)
         tmp_path = await self._spool_temp(audio_bytes)
         try:
-            return await talk_fullduplex.stream_talkdown(
-                put_url, password, tmp_path, username=username)
+            last_err: Exception | None = None
+            for i, cc in enumerate(attempts):
+                try:
+                    return await talk_fullduplex.stream_talkdown(
+                        put_url, password, tmp_path, username=username, codec=cc,
+                        audio_filter=audio_filter)
+                except talk_fullduplex.TalkdownError as e:
+                    last_err = e
+                    more = i + 1 < len(attempts)
+                    log.warning("talkdown: codec=%s failed: %s%s", cc, e,
+                                (" -- falling back to %s" % attempts[i + 1]) if more else "")
+            raise last_err if last_err else RuntimeError("talkdown: no codec attempted")
         finally:
             try:
                 await asyncio.wait_for(

@@ -265,6 +265,28 @@ TALK_PREFER_FULL_DUPLEX = True
 # ?camera_id= routing token) are WAN fallbacks. Values are
 # parse_doorbell_camera_list put_urls keys.
 TALK_PUT_ENDPOINT_ORDER = ("direct", "local", "public", "cloud")
+# Audio codec for the full-duplex PUT path.
+# On THIS doorbell (ADC-VDB750, fw 02091) the PUT path is mu-law ONLY: L16
+# (16-bit linear, skyL16pay/pt97) was tested over the PUT endpoint in both
+# endiannesses and came out as noise -- this device decodes the body as
+# mu-law regardless of Content-Type. This is a per-model/firmware limit, NOT
+# alarm.com-wide: other models may support L16 (newer ADC cameras carry it
+# via the webrtc/srtp path). So mu-law is the only working codec here; audio
+# quality is handled by TALK_AUDIO_FILTER (below), not the codec. The codec
+# plumbing (per-request "codec", primary/fallback) is kept so a working codec
+# can be added per device later. Overridable per request via POST "codec".
+TALK_CODEC = "mulaw"
+TALK_CODEC_FALLBACK = "mulaw"
+# ffmpeg audio-conditioning filter applied to ALL talkdown audio before it
+# is encoded to the doorbell codec. The VDB750's small speaker clips and
+# sounds harsh on raw full-range music/TTS, so by default we high-pass out
+# the bass it can't reproduce, low-pass the harsh top end (warmer), gently
+# compress the dynamics, and hard-limit below full scale (no clipping).
+# Tuned by ear on the live doorbell. Set to "" to disable (pass audio
+# through untouched, e.g. for already-conditioned sources).
+TALK_AUDIO_FILTER = ("highpass=f=250,lowpass=f=2800,"
+                     "acompressor=threshold=-18dB:ratio=3:attack=5:release=150:makeup=2,"
+                     "alimiter=level_out=0.5:limit=0.6")
 # Bound on GetLiveVideoStream so a wedged MWS call fails the one request instead
 # of pinning the per-camera talk lock.
 TALK_STREAM_LOOKUP_TIMEOUT_S = 20

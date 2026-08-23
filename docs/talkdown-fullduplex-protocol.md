@@ -256,8 +256,12 @@ Findings:
   jitter buffer at the doorbell so playback is continuous. (A "morse code" report
   during testing was actually an `apulsator` pulsing TEST TONE, not the transport
   -- a continuous tone plays smoothly.)
-- Audio is 8 kHz mono mu-law = telephone-grade; music plays but is lo-fi. The
-  session bound is now derived from the audio length (clip + margin), not a
+- Audio is 8 kHz mono mu-law = telephone-grade. Raw full-range music clipped/
+  sounded harsh on the small speaker, so a conditioning filter (E-COND) is
+  applied by default (band-limit + compress + hard-limit), tuned by ear and
+  toggleable per request -- music is clean, just lo-fi. L16 was tried for
+  higher fidelity but THIS doorbell's PUT path is mu-law only (E4). The
+  session bound is derived from the audio length (clip + margin), not a
   fixed/env timeout.
 
 ## Planned enhancements & known gaps
@@ -269,6 +273,20 @@ Add to this list whenever something is deferred, simplified, or noticed in
 passing. Rough priority order; IDs are stable references.
 
 ### High value
+_Implemented since live testing:_ **E-COND audio conditioning (with per-request
+toggle).** `config.TALK_AUDIO_FILTER` runs an ffmpeg chain on every clip before
+encoding -- high-pass 250 Hz (drop bass the small speaker overloads on),
+low-pass 2.8 kHz (warmth), gentle compression, hard limiter at 0.5/0.6 (no
+clipping). Tuned by ear on the live VDB750; fixed the clipping/harshness raw
+full-range music produced. Applied to EVERY clip on the doorbell (full-duplex)
+path regardless of source/format/URL (runs inside the encode step). Per-request
+control on `POST /control/cameras/{id}/talk`: `"conditioning": false` disables
+it, or `"audio_filter": "<ffmpeg -af chain>"` overrides it; omitted = the
+config default. Remaining (minor): **E19** the webrtc/srtp fallback path (other
+ADC cameras) does NOT yet apply the filter -- apply it there too so ALL talk
+audio is conditioned regardless of path; **E20** the tuned chain is
+VDB750-speaker-specific -- other speakers may want different cutoffs/levels.
+
 - **E1 Session renegotiation (long-duration + resilient streaming).** The `<cli>`
   port + stream password are PER-SESSION and expire around `cstet`; short clips
   finish inside that window but an arbitrarily long or interrupted stream will
@@ -290,9 +308,20 @@ passing. Rough priority order; IDs are stable references.
   tested end to end through HA. Sync + restart HA + verify the service.
 
 ### Audio quality / transport
-- **E4 Optional L16 codec** (pt97, 16-bit) instead of G.711 mu-law. The device
-  supports `skyL16pay` @ 8 kHz; L16 avoids mu-law companding loss (still 8 kHz,
-  but better for music).
+- **E4 L16 codec -- TESTED, unsupported on THIS doorbell's PUT path (device-
+  specific).** L16 (16-bit linear, `skyL16pay`/pt97) was implemented and fired at
+  the live ADC-VDB750 (fw 02091) over `/api/PutAudioStream` in BOTH endiannesses
+  (`s16be` and `s16le`, Content-Type `audio/L16;rate=8000;channels=1`): both came
+  out as **noise** -- this doorbell decodes the PUT body as mu-law regardless of
+  Content-Type. So mu-law is the only working codec on this device's PUT path.
+  **This is a per-model/firmware limit, NOT alarm.com-wide** -- other alarm.com
+  camera/doorbell models may support L16 (newer ADC cameras carry L16 via the
+  webrtc/srtp path, see `talk_srtp.py`). Remaining avenues for L16 on the VDB750:
+  the OSP/RTSP backchannel (`skyL16pay` lives there, a bigger RE effort), or an
+  undiscovered codec selector (query param / StartFullDuplex field). The `CODECS`
+  table + per-request `codec` plumbing + primary/fallback are kept in place so a
+  working codec can be dropped in per device. Quality on the VDB750 is instead
+  handled by E-COND below.
 - **E5 Streaming encode** -- pipe `ffmpeg` stdout straight into the PUT loop
   instead of buffering the whole mu-law clip in RAM and spooling a temp file.
   Lowers memory + latency-to-first-audio for long/large files and removes the
