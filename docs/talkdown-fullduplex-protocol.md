@@ -635,11 +635,37 @@ that look worth having.
   `shouldDisplayBatteryLevel` instead. Worth cross-checking against a
   battery-powered camera before trusting either.
 
-- **E34 Live-video resolution/quality is settable and unexposed.**
-  `CanSetResolutionAndQuality="true"` with `ResolutionAndQuality` and a
-  `<ResolutionAndQualityOptionList>`. Distinct from the clip settings the video
-  route already covers -- this is the LIVE stream, so it would directly affect
-  what the bridge restreams.
+- **E34 (DONE 2026-08-23) Live-video resolution is now a select, and it really
+  does change what this bridge restreams.**
+  As with E32, the entry was found by way of the MOBILE document
+  (`CanSetResolutionAndQuality`), but the WEBSITE has it too and that is what was
+  implemented: `videoConfigs` -> `liveVideoConfig` carries `webOptions`
+  (value -> label), `selectedWebOption` and an `isWebOptionsDisabled` veto. It is
+  the same document the video route already read-modify-writes, so it costs no
+  extra request.
+
+  **The premise was worth testing rather than asserting, and it held.** The bridge
+  fetches its stream from `liveVideoHighestResSources`, whose name reads like it
+  would ignore a resolution preference. It does not: selecting Standard
+  Definition and renegotiating took the bridge's own stream from
+  `1440x1440@15fps` to `480x480@15fps`, confirmed in its logs. "Highest available"
+  means highest under the current selection, not the camera's absolute maximum.
+  So this is the control for a camera's bandwidth -- and also a way to make every
+  Home Assistant view of that camera worse by accident.
+
+  The change reaches an already-running stream only on renegotiation; an
+  established session keeps what it started with.
+
+  Two gating notes: the capability flag IS the option object (`webOptions` empty
+  means "no choice offered", which is exactly what `mobileOptions` is on this
+  doorbell), and `isWebOptionsDisabled` is the one gate in `camera_settings`
+  phrased as a prohibition rather than a capability -- `_Field.forbids` was added
+  for it, where an absent flag means allowed rather than denied.
+
+  Only the KEYS of `webOptions` are settable here. That is narrower than the
+  general option rule, which has to accept either half of such an object because
+  this API is inconsistent about which half it means (see E28) -- so the field
+  names its own options key and gets the stricter treatment.
 
 - **E35 The outdoor chime level disagrees between the two APIs.**
   Mobile reports `ocl="3"`, website reports `outdoorToneVolumeValue: 0`, for what

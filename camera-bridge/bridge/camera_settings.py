@@ -110,6 +110,15 @@ class _Field(NamedTuple):
     # notification is gated both by the shared panel-notification enum AND by its
     # own isMotionNotificationEnabled. Absent counts as false, like `support`.
     requires: tuple[str, ...] = ()
+    # Flags that must all be FALSEY. Some of this API's gates are phrased as a
+    # prohibition rather than a capability (`isWebOptionsDisabled`), and an absent
+    # one is not a prohibition -- so unlike `support` and `requires`, absent here
+    # counts as permission.
+    forbids: tuple[str, ...] = ()
+    # Where this field's choices live, when they are not at `<base>Options`.
+    # A dict here maps VALUE -> LABEL and only its KEYS are settable, which is
+    # narrower than the ambiguous `<base>Options` case _options handles.
+    options_key: str | None = None
 
 
 # imageSettings. Key names, capability flags and bounds below are taken from
@@ -157,6 +166,23 @@ _VIDEO_FIELDS: dict[str, _Field] = {
         ("cameraTriggeredClipsFeatureSupport",), "int"),
     "pretrigger_enabled": _Field("savedVideoSetting", ("isPreTriggerRecordingEnabled",),
                                  ("preTriggerRecordingFeatureSupport",), "bool"),
+    # The LIVE stream's resolution, not a clip setting -- a different relationship
+    # of the same document. It lives here rather than in its own section because
+    # the video route already read-modify-writes this document.
+    #
+    # `webOptions` maps value -> label ("1440x1440" -> "Full High Definition
+    # (1440x1440)"), and an EMPTY object is how this API says "no choice offered",
+    # which is exactly what `mobileOptions` is on this doorbell. Using it as the
+    # support flag therefore gates on the thing that actually decides, and
+    # `isWebOptionsDisabled` is the server's separate veto.
+    #
+    # Deliberately the WEB option and not the mobile one: the bridge is a website
+    # API client. See get_video_config's note on what this does and does not
+    # change.
+    "live_resolution": _Field("liveVideoConfig", ("selectedWebOption",),
+                              ("webOptions",), "str",
+                              forbids=("isWebOptionsDisabled",),
+                              options_key="webOptions"),
 }
 
 
@@ -455,8 +481,28 @@ def _options(obj: dict, base: str) -> list | None:
     return None
 
 
+def _field_options(obj: dict, field: "_Field", value_key: str) -> list | None:
+    """The choices for one field, preferring its explicit options_key.
+
+    When a field names its own options key, that object maps VALUE -> LABEL and
+    only the keys are settable -- narrower and safer than the general _options
+    rule, which has to accept both halves because the API is inconsistent about
+    which one it means (see _options). Falling back keeps every other field on
+    the old behaviour.
+    """
+    if field.options_key:
+        raw = obj.get(field.options_key)
+        if isinstance(raw, dict) and raw:
+            return list(raw)
+        if isinstance(raw, list) and raw:
+            return list(raw)
+        return None
+    return _options(obj, _base(value_key))
+
+
 def _supported(obj: dict, support: tuple[str, ...],
-               requires: tuple[str, ...] = ()) -> bool:
+               requires: tuple[str, ...] = (),
+               forbids: tuple[str, ...] = ()) -> bool:
     """Whether the device advertises this field as editable.
 
     This API uses TWO capability spellings, and which one applies is decided by
@@ -474,10 +520,14 @@ def _supported(obj: dict, support: tuple[str, ...],
     unknown must not be offered or written (see the module docstring).
 
     `requires` names extra flags that must all be truthy as well -- see _Field.
-    An absent one is false for the same reason.
+    An absent one is false for the same reason. `forbids` names flags that must
+    all be falsey, where an absent one is permission rather than prohibition.
     """
     for name in requires:
         if not obj.get(name):
+            return False
+    for name in forbids:
+        if obj.get(name):
             return False
     for name in support:
         if name not in obj:
@@ -521,7 +571,7 @@ def _coerce(field_name: str, field: _Field, obj: dict, value_key: str, value: An
         return value
 
     base = _base(value_key)
-    options = _options(obj, base)
+    options = _field_options(obj, field, value_key)
 
     if field.kind == "int":
         if isinstance(value, bool) or not isinstance(value, int):
@@ -561,9 +611,18 @@ def _read_field(obj: dict, field: _Field) -> dict[str, Any]:
                 out[which.lower()] = bound
     elif field.kind == "bool":
         out["value"] = bool(obj.get(key))
-    options = _options(obj, base)
+    options = _field_options(obj, field, key)
     if options is not None:
         out["options"] = options
+    # When the field names an options object that maps value -> label, publish the
+    # labelled form too, so a caller can show what the vendor's own UI shows
+    # instead of a bare "1440x1440". Same {value, label} shape the chime type and
+    # notification format use.
+    if field.options_key:
+        raw = obj.get(field.options_key)
+        if isinstance(raw, dict) and raw:
+            out["choices"] = [{"value": value, "label": str(label)}
+                              for value, label in raw.items()]
     return out
 
 
@@ -574,12 +633,12 @@ def _parse_table(attrs: dict, table: dict[str, _Field]) -> dict[str, Any]:
         obj = _obj(attrs, field.container)
         read = _read_field(obj, field)
         parsed[f"supports_{name}"] = bool(read) and _supported(
-            obj, field.support, field.requires)
+            obj, field.support, field.requires, field.forbids)
         if not read:
             parsed[name] = None
             continue
         parsed[name] = read["value"]
-        for extra in ("min", "max", "options"):
+        for extra in ("min", "max", "options", "choices"):
             if extra in read:
                 parsed[f"{name}_{extra}"] = read[extra]
     parsed["raw"] = attrs
@@ -611,7 +670,8 @@ async def _apply_table(telus: TelusSession, url: str, table: dict[str, _Field],
         field = table[name]
         obj = _obj(attrs, field.container)
         key = _resolve(obj, field.names)
-        if key is None or not _supported(obj, field.support, field.requires):
+        if key is None or not _supported(obj, field.support, field.requires,
+                                         field.forbids):
             raise CameraSettingsError(f"this camera does not support {name}",
                                       unsupported=True, field=name)
         pending.append((obj, key, _coerce(name, field, obj, key, value)))

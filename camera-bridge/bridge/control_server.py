@@ -294,7 +294,10 @@ Contract (as implemented -- this is what callers must match):
     POST .../settings/video
     Body: at least one of clip_resolution (str, e.g. "960x960"), clip_quality
       (int or str), pretrigger_enabled (bool), keep_clips_days (int),
-      alarm_clip_duration (int). Response: the video config object.
+      alarm_clip_duration (int), live_resolution (str). The last one is the LIVE
+      stream's resolution rather than a clip setting -- see the route docs for
+      what it does and does not change about this bridge's own restream.
+      Response: the video config object.
 
       All six writes read the current settings first, purely to honour the
       FeatureSupport gate above (422 rather than a write TELUS would refuse);
@@ -412,6 +415,10 @@ _VIDEO_FIELDS: dict[str, type | tuple[type, ...]] = {
     "pretrigger_enabled": bool,
     "keep_clips_days": int,
     "alarm_clip_duration": int,
+    # The LIVE stream's resolution, not a clip setting. Must be one of the values
+    # in live_resolution_options; camera_settings checks it against the device's
+    # own webOptions before writing.
+    "live_resolution": str,
 }
 # generalSettings -> ledLightSetting: the device's STATUS indicator light, not the
 # infrared illuminator (that is `ir_led_enabled` on the image route).
