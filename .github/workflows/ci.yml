@@ -85,6 +85,11 @@ jobs:
         with:
           # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
           python-version: "3.12"
+      - name: Install ffmpeg
+        # The bridge image ships ffmpeg; GitHub runners do not. The talkdown
+        # transport shells out to it to encode each clip, so the tests need it to
+        # exercise the real code path rather than a stub.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Install bridge requirements
         run: |
           python -m pip install --upgrade pip
