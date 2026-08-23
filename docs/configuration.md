@@ -118,7 +118,7 @@ for the full talk mechanism.
 | `TALK_PUT_ENDPOINT_ORDER` | no | `("direct", "local", "public", "cloud")` | Order in which the full-duplex `PutAudioStream` endpoint variants are tried. The bridge shares the doorbell LAN, so the direct/local LAN URL is fastest and relay-free; public then cloud relay are WAN fallbacks. Values are keys in the parsed doorbell camera list `put_urls`. |
 | `TALK_CODEC` | no (per-request override via POST `codec`) | `mulaw` | Audio codec for the full-duplex PUT path. On the VDB750 (fw 02091) the PUT path is mu-law only — L16 was tested and came out as noise, because that device decodes the body as mu-law regardless of Content-Type. A per-model/firmware limit, not project-wide; the codec plumbing is kept so a working codec can be added per device later. |
 | `TALK_CODEC_FALLBACK` | no | `mulaw` | Fallback codec if the primary fails. Currently also mu-law for the same reason. |
-| `TALK_AUDIO_FILTER` | no | see below | ffmpeg audio-conditioning filter applied to **all** talkdown audio before encoding to the doorbell codec. Set to `""` to pass audio through untouched (e.g. for already-conditioned sources). |
+| `TALK_AUDIO_FILTER` | no | see below | ffmpeg audio-conditioning filter applied to **all** talkdown audio before encoding to the doorbell codec. Set to `""` to pass audio through untouched (e.g. for already-conditioned sources). Applied to every talk path (full-duplex folds it into its encode pass; the webrtc/srtp fallback applies it up front), and overridable per request via the `audio_filter` body field. |
 
 The default `TALK_AUDIO_FILTER` is tuned by ear for the doorbell's small speaker,
 which clips and sounds harsh on raw full-range music/TTS:
