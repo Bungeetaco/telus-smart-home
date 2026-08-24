@@ -47,7 +47,10 @@ Contract (as implemented -- this is what callers must match):
                                                  "last_frame_at": <unix ts or null>,
                                                  "fps": ..., "hardware_encode": ...,
                                                  "last_error": <str or null>,
-                                                 "dropped_frames": <int>}, ...}}
+                                                 "dropped_frames": <int>,
+                                                 "audio_consumed": <bool>,
+                                                 "audio_format": <str or null>,
+                                                 "dropped_audio_frames": <int>}, ...}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
       reconnect counts, last-frame age, and current encode mode, without
@@ -62,6 +65,22 @@ Contract (as implemented -- this is what callers must match):
       total as each session ends -- which also means the field updates on
       session end, not per frame, and lags the live session by up to one
       rotation.
+      The three audio fields are ADDITIVE and deliberately separate from "fps"
+      and "dropped_frames", which are a contract about the VIDEO stream that
+      callers already read: a number that quietly started counting two different
+      things would be worse than no number at all. "audio_consumed" is whether
+      JANUS_CONSUME_AUDIO resolved to on for this camera (which requires
+      JANUS_REQUEST_AUDIO to name it too -- if it does not, this reads false and
+      the bridge logged why once). "audio_format" is the raw PCM shape the
+      running ffmpeg's audio input was launched with, as
+      "<rate>Hz/<channels>ch/<sample format>", or null when audio is not being
+      published; it changes only when the publisher is rebuilt.
+      "dropped_audio_frames" is the lifetime total of decoded AUDIO frames
+      dropped because the consumer fell behind, accumulated across rotations
+      exactly like "dropped_frames".
+      NOTE for callers building health checks on this: the frame-silence
+      watchdog is video-only, so a camera whose audio has stopped still reports
+      state "streaming" with a fresh "last_frame_at".
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>

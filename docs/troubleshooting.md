@@ -20,6 +20,7 @@ the component READMEs.
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
+- [A camera's stream carries no audio, or the audio stops](#a-cameras-stream-carries-no-audio-or-the-audio-stops)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
 - [Talkdown audio sounds bad on the doorbell speaker](#talkdown-audio-sounds-bad-on-the-doorbell-speaker)
 - [Talkdown logs a certificate fingerprint mismatch](#talkdown-logs-a-certificate-fingerprint-mismatch)
@@ -349,6 +350,47 @@ because the consumer fell behind — a steadily climbing total on one camera say
 the encode side cannot keep up with that stream, where the picture alone just
 looks subtly choppy. It updates when each ~165 s session ends, so it can lag
 the live session by up to one rotation.
+
+---
+
+## A camera's stream carries no audio, or the audio stops
+
+**Symptom.** A camera published by the bridge plays video but no sound, or the
+sound stops while the picture keeps going.
+
+**Cause and fix.** Audio is off by default and needs **two** knobs, both naming
+the camera (see [configuration.md](configuration.md)):
+
+1. `JANUS_REQUEST_AUDIO` — asks the gateway for the track at all.
+2. `JANUS_CONSUME_AUDIO` — decodes it and publishes it.
+
+Naming a camera in only the second is a misconfiguration, not a partial setup:
+no audio track is ever offered for it, so the bridge logs
+`JANUS_CONSUME_AUDIO names this camera but JANUS_REQUEST_AUDIO does not` **once**
+and treats consumption as off. Check `/control/status` — `audio_consumed` is the
+resolved answer, `audio_format` is the shape the running encoder was launched
+with (`null` when audio is not being published).
+
+If `audio_consumed` is `true` and there is still no sound:
+
+- **The camera may not be sending any.** The gateway offers the track whether or
+  not the camera fills it. The stream still carries an audio track — the bridge
+  keeps it alive with silence — so a silent track is not a broken one.
+- **The consumer may not accept the codec.** The bridge publishes mono **AAC**
+  specifically because HA's HLS worker takes only aac/mp3 and Frigate's `-c copy`
+  preset needs an mp4-legal codec. A consumer configured to expect something else
+  will drop it.
+- **Audio dying is not detected.** The frame-silence watchdog is video-only, so a
+  camera whose audio has stopped still reports `state: "streaming"` with a fresh
+  `last_frame_at` and nothing reconnects. Watch `dropped_audio_frames` for a
+  consumer falling behind; a stream that simply went quiet leaves no counter at
+  all. Restarting the container is the blunt recovery.
+
+Two log lines worth grepping: `ffmpeg has stopped reading the audio pipe`
+(ffmpeg stopped draining input 1 — the publisher is rebuilt) and
+`audio format changed mid-session` (the decoded PCM shape changed, so the
+encoder is relaunched with the real one — expected at most once, on the first
+session that ever carries audio).
 
 ---
 

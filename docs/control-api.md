@@ -157,7 +157,10 @@ poll — costs no upstream requests.
       "fps": 15.0,
       "hardware_encode": true,
       "dropped_frames": 0,
-      "last_error": null
+      "last_error": null,
+      "audio_consumed": true,
+      "audio_format": "48000Hz/2ch/s16",
+      "dropped_audio_frames": 0
     }
   },
   "talk": {
@@ -183,11 +186,19 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 | `hardware_encode` | bool \| null | Whether the pipeline is using hardware encode; `null` until the camera first reaches the `streaming` state |
 | `dropped_frames` | int | Lifetime total, since process start, of frames dropped because the consumer fell behind the decoder (the ingest queue's latency-over-completeness drop — see [camera-bridge.md](camera-bridge.md)). Present (`0`) from the camera's first status entry. The total is accumulated when each ~165 s video session **ends** — on healthy rotation and on the failure paths alike — not per frame, so it can lag the live session's drops by up to one rotation. Resets with the process, like the rest of this response |
 | `last_error` | string \| null | Most recent error string, or `null` |
+| `audio_consumed` | bool | Whether the downstream audio track is being decoded and published on this camera's RTSP path. True only when `JANUS_CONSUME_AUDIO` **and** `JANUS_REQUEST_AUDIO` both name the camera; naming it in only the first is a misconfiguration that reads `false` here and is logged once (see [configuration.md](configuration.md)) |
+| `audio_format` | string \| null | The raw PCM shape the running ffmpeg's audio input was launched with, as `<rate>Hz/<channels>ch/<sample format>`, or `null` when audio is not being published. Changes only when the publisher is rebuilt |
+| `dropped_audio_frames` | int | Lifetime total, since process start, of decoded **audio** frames dropped because the consumer fell behind. Present (`0`) from the camera's first status entry, and accumulated across rotations exactly like `dropped_frames`. Deliberately a separate field: `fps` and `dropped_frames` are a contract about the video stream, and a number that quietly started counting two different things would be worse than no number at all |
 
 `state: "restart_deferred"` is the most informative value: the camera hit the
 `MAX_CONSECUTIVE_SESSION_FAILURES` escape hatch, but it has fired too often
 lately to be a local wedge, so `restart_guard.py` is holding the process before
 it exits.
+
+Building a health check on this: the frame-silence watchdog is **video-only**, so
+a camera whose audio has stopped still reports `state: "streaming"` with a fresh
+`last_frame_at`. Nothing in this response detects dead audio on a live video
+stream.
 
 **Example**
 

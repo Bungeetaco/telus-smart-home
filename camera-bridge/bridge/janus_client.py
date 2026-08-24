@@ -15,6 +15,9 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSession
 from aiortc.sdp import candidate_from_sdp
 
 from . import config as c
+# Single definition of "what shape is this decoded audio frame" -- the sink's raw
+# PCM guard compares against exactly this tuple, so it must not be re-derived here.
+from .ffmpeg_sink import audio_format_of
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +26,21 @@ log = logging.getLogger(__name__)
 # or an IANA codec name ("video", "9", "H264", "opus", "telephone-event"). A
 # token that does not match is reported as "?" rather than printed.
 _SDP_SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{0,23}\Z")
+
+
+class _AudioTimeout:
+    """Sentinel returned by next_audio_frame when nothing arrived in time.
+
+    A distinct object rather than None, because None already means "this session
+    is over" and the two need completely different responses: fill the gap with
+    silence, versus stop pumping.
+    """
+
+    def __repr__(self):
+        return "AUDIO_TIMEOUT"
+
+
+AUDIO_TIMEOUT = _AudioTimeout()
 
 
 def _sdp_media_summary(sdp_text) -> str:
@@ -118,9 +136,17 @@ def _create_reply_error(reply: dict) -> str | None:
 class JanusCameraSession:
     """One Janus streaming-plugin session for one camera. Yields decoded video frames."""
 
-    def __init__(self, camera: dict, video_source: dict):
+    def __init__(self, camera: dict, video_source: dict, consume_audio: bool = False):
         self.camera = camera
         self.vs = video_source
+        # Whether an offered audio track is PUMPED (queued for camera_session to
+        # publish) or drained and discarded. Passed in rather than read from
+        # config here, deliberately: camera_session resolves
+        # config.janus_consume_audio_for once and hands the answer down, so the
+        # component that builds the audio-enabled ffmpeg publisher and the
+        # component that decides what to do with the track cannot disagree about
+        # one camera. Default False keeps every existing construction video-only.
+        self.consume_audio = bool(consume_audio)
         self._txn = itertools.count()
         self._ws: websockets.asyncio.client.ClientConnection | None = None
         self._session_id = None
@@ -131,6 +157,12 @@ class JanusCameraSession:
         self._webrtcup = asyncio.Event()
         self._track_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
         self._dropped_frames = 0
+        # Bounded for exactly the reason the video queue is: a consumer that falls
+        # behind must drop and SAY SO, not grow. Only ever filled when
+        # consume_audio is set; an unconsumed track still goes to _drain_track.
+        self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=c.AUDIO_QUEUE_MAXSIZE)
+        self._dropped_audio_frames = 0
+        self._audio_format: tuple | None = None
         # Set on any sign this session has died (track ended, ICE/connection failed,
         # websocket closed) so frames() can stop blocking forever instead of hanging.
         self._dead = asyncio.Event()
@@ -177,6 +209,16 @@ class JanusCameraSession:
         def on_track(track):
             if track.kind == "video":
                 asyncio.ensure_future(self._pump_track(track))
+            elif track.kind == "audio" and self.consume_audio:
+                # The one case where an offered audio track is neither ignored nor
+                # discarded: it is decoded into a bounded queue that
+                # camera_session drains into the ffmpeg publisher's second input.
+                # Everything the drain branch below says about aiortc's unbounded
+                # RemoteStreamTrack._queue still applies -- pumping empties it just
+                # as draining does, it simply keeps the frames.
+                log.info("%s: consuming the offered audio track (JANUS_CONSUME_AUDIO)",
+                         self.camera["id"])
+                asyncio.ensure_future(self._pump_audio_track(track))
             else:
                 # A track this bridge does not consume must still be DRAINED, not
                 # merely ignored. aiortc 1.15 auto-creates a recvonly transceiver
@@ -186,9 +228,11 @@ class JanusCameraSession:
                 # RemoteStreamTrack._queue, an UNBOUNDED asyncio.Queue. Silently
                 # dropping the track (what this branch used to do implicitly) left
                 # that queue growing for the entire ~165s life of every session --
-                # a per-rotation memory sawtooth, once per camera, forever. Nothing
-                # here consumes audio; the JANUS_REQUEST_AUDIO experiment only asks
-                # whether the upstream WILL serve a downstream audio track.
+                # a per-rotation memory sawtooth, once per camera, forever. This is
+                # the path for a track this session was NOT told to consume: audio
+                # with JANUS_CONSUME_AUDIO off for this camera (JANUS_REQUEST_AUDIO
+                # alone only asks whether the upstream WILL serve one), or any
+                # other kind the gateway might offer.
                 #
                 # track.stop() is NOT the release, despite reading like it:
                 # aiortc's MediaStreamTrack.stop() only sets an ended flag, emits
@@ -203,9 +247,8 @@ class JanusCameraSession:
                 # anyway. Draining is what actually bounds the memory; the decoder
                 # thread itself is released by pc.close() at the end of the session
                 # (session.close() -> RTCPeerConnection.close() -> transceiver.stop()).
-                log.info("%s: upstream offered a %r track this bridge does not "
-                         "consume; draining it (audio consumption is not implemented)",
-                         self.camera["id"], track.kind)
+                log.info("%s: upstream offered a %r track this session does not "
+                         "consume; draining it", self.camera["id"], track.kind)
                 asyncio.ensure_future(self._drain_track(track))
 
         @self.pc.on("iceconnectionstatechange")
@@ -482,6 +525,52 @@ class JanusCameraSession:
                     self._track_queue.get_nowait()
                 self._track_queue.put_nowait(frame)
 
+    async def _pump_audio_track(self, track):
+        """Decode the offered audio track into the bounded queue audio_frames()
+        serves.
+
+        Deliberately NOT _pump_track, and deliberately not sharing its failure
+        handling: when this track ends it must NOT _mark_dead(). Only the video
+        track decides whether the session is alive -- an audio track that ends, or
+        never carries a packet at all, is not a session failure, and treating it as
+        one would force a reconnect on every session that is offered audio. That is
+        the same invariant _drain_track keeps; the only difference here is that the
+        frames are kept instead of thrown away.
+        """
+        while True:
+            try:
+                frame = await track.recv()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.debug("%s: audio track ended after %d dropped frame(s): %r",
+                          self.camera["id"], self._dropped_audio_frames, e)
+                return
+            if self._audio_format is None:
+                # Recorded on arrival so camera_session can size the ffmpeg audio
+                # input from a REAL frame rather than an assumption, without having
+                # to consume one to find out (see config.AUDIO_DEFAULT_FORMAT).
+                try:
+                    self._audio_format = audio_format_of(frame)
+                except Exception:
+                    log.debug("%s: could not read the decoded audio format",
+                              self.camera["id"], exc_info=True)
+            try:
+                self._audio_queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                # Drop the oldest, exactly as the video pump does and for the same
+                # reason: a live stream cares about staying near real time, not
+                # about completeness. Throttled logging so a sustained backlog does
+                # not itself become the problem.
+                self._dropped_audio_frames += 1
+                if self._dropped_audio_frames == 1 or self._dropped_audio_frames % 250 == 0:
+                    log.warning("%s: dropped %d audio frame(s) so far -- consumer "
+                                "falling behind (queue maxsize=%d)", self.camera["id"],
+                                self._dropped_audio_frames, self._audio_queue.maxsize)
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    self._audio_queue.get_nowait()
+                self._audio_queue.put_nowait(frame)
+
     async def _drain_track(self, track):
         """Discard frames from an offered track nothing consumes, so aiortc's
         unbounded RemoteStreamTrack._queue cannot accumulate them for the life of
@@ -529,6 +618,65 @@ class JanusCameraSession:
         total that /control/status serves -- otherwise the throttled log lines
         above were the only trace the drops ever left."""
         return self._dropped_frames
+
+    @property
+    def dropped_audio_frames(self) -> int:
+        """Audio frames _pump_audio_track dropped because the consumer fell behind.
+
+        Per-SESSION, like dropped_frames, and folded into the same kind of
+        per-camera lifetime total by camera_session. Kept separate from the video
+        counter on purpose: /control/status's `dropped_frames` is a documented
+        contract about VIDEO, and a number that silently started counting two
+        different things would be worse than no number at all."""
+        return self._dropped_audio_frames
+
+    @property
+    def audio_format(self) -> tuple | None:
+        """(sample format, rate, channels) of the first decoded audio frame, or
+        None if none has arrived yet.
+
+        A non-destructive peek: camera_session reads it after the first video
+        frames have been collected, so the ffmpeg audio input is sized from a real
+        decoded frame rather than an assumption -- without consuming the frame or
+        waiting for one (which would put an audio concern on the video path's
+        first-frame timing)."""
+        return self._audio_format
+
+    async def next_audio_frame(self, timeout: float):
+        """The next decoded audio frame, AUDIO_TIMEOUT if none arrived within
+        `timeout` seconds, or None once the session is dead.
+
+        Deliberately a single call rather than the `frames()`-style async
+        generator, because the consumer needs a BOUNDED wait (it tops the
+        publisher up with silence when audio goes quiet) and an async generator
+        cannot provide one: `asyncio.wait_for(gen.__anext__(), ...)` delivers the
+        cancellation INTO the generator, which terminates it -- so the first quiet
+        half-second would permanently end the audio stream. Racing the queue here
+        instead leaves nothing to tear down: asyncio.Queue.get() re-queues its
+        wakeup when cancelled, so no frame is lost either.
+
+        It also ends QUIETLY (None) where frames() raises: the video stream owns
+        whether a session succeeded or failed, and an audio read that raised would
+        either fail a healthy session or need a swallowing wrapper at the call site.
+        """
+        if self._dead.is_set():
+            return None
+        get_task = asyncio.ensure_future(self._audio_queue.get())
+        dead_task = asyncio.ensure_future(self._dead.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {get_task, dead_task}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if get_task in done:
+                return get_task.result()
+            if dead_task in done:
+                return None
+            return AUDIO_TIMEOUT
+        finally:
+            for t in (get_task, dead_task):
+                if not t.done():
+                    t.cancel()
 
     async def frames(self):
         """Yield decoded frames until the session dies (track end, ICE/connection

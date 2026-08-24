@@ -246,12 +246,12 @@ JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side;
 # given camera keeps delivering frames while an audio m-line is in the offer
 # (see the per-camera note below).
 #
-# CONSUMING audio is NOT implemented. Nothing decodes, publishes or plays a
-# downstream audio track: ffmpeg_sink.py publishes video only, and an offered
-# audio track is drained and discarded (see janus_client.on_track). Turning
-# this on cannot make the RTSP feed carry sound; it only changes what is asked
-# for and what the log reports. (Two-way audio TO the doorbell is a separate,
-# working path -- see TALKDOWN_ENABLED above.)
+# Requesting audio is only half of it: CONSUMING what comes back is a second,
+# separately-gated step (JANUS_CONSUME_AUDIO below). With this knob on but that
+# one off, an offered audio track is still drained and discarded (see
+# janus_client.on_track) and the RTSP feed still carries no sound -- this knob
+# only changes what is asked for and what the log reports. (Two-way audio TO the
+# doorbell is a separate, working path -- see TALKDOWN_ENABLED above.)
 #
 # It is safe to leave on ONLY because of the fallback in janus_client.py: if
 # the create-with-audio is rejected, the create is immediately retried once
@@ -322,6 +322,115 @@ def janus_request_audio_for(camera_id) -> bool:
     experiment it is not running.
     """
     return janus_request_audio_mode(camera_id) in ("all", "listed")
+
+
+# --- Consume the downstream AUDIO track and publish it on the RTSP path ------
+# OFF BY DEFAULT, and strictly downstream of JANUS_REQUEST_AUDIO above: this
+# knob decides what happens to a track that was already asked for and offered.
+# For a camera it applies to, janus_client.py PUMPS the offered audio track
+# instead of draining it, and camera_session.py gives the ffmpeg publisher a
+# second (audio) input so the same RTSP path carries video + AAC audio. A camera
+# it does not apply to keeps exactly today's behaviour: the track is drained and
+# discarded, and the published stream is video-only.
+#
+# CONSUMING REQUIRES REQUESTING. A camera named here but NOT named by
+# JANUS_REQUEST_AUDIO would never be offered an audio track at all, so consuming
+# it is meaningless -- and building an audio-enabled ffmpeg publisher for a
+# stream that can never carry audio is worse than meaningless: ffmpeg would sit
+# on a second input that only ever receives the silence fill. That combination
+# is therefore reported once per camera and treated as OFF (see
+# janus_consume_audio_for), rather than being silently accepted and doing
+# nothing visible.
+#
+# Same three value forms and the same whole-value keyword rule as
+# JANUS_REQUEST_AUDIO:
+#   unset / "false" / "0" / "no" / "off"   -- off for every camera (the DEFAULT;
+#                                             offered audio is drained exactly as
+#                                             it has always been)
+#   "true" / "1" / "yes" / "on" / "all"    -- on for every camera that also has
+#                                             audio REQUESTED
+#   "<id>[,<id>...]"                       -- on for exactly those camera ids,
+#                                             matched exactly, whitespace tolerated
+JANUS_CONSUME_AUDIO = os.environ.get("JANUS_CONSUME_AUDIO", "false").strip()
+
+# One warning per camera for the CONSUME-without-REQUEST combination. Module
+# state rather than a per-call log, because janus_consume_audio_for is consulted
+# on a path that runs once per camera start-up but could easily be moved onto a
+# per-session path later; a misconfiguration must be loud once, not every ~165s.
+_CONSUME_WITHOUT_REQUEST_WARNED: set = set()
+
+
+def janus_consume_audio_mode(camera_id) -> str:
+    """Which JANUS_CONSUME_AUDIO mode applies to one camera.
+
+    One of "off" / "all" / "listed" / "unlisted", with exactly the same meanings
+    and the same whole-value keyword rule as janus_request_audio_mode -- the two
+    knobs deliberately share their value grammar so an operator only has to learn
+    it once. Read live off the module attribute for the same reason.
+
+    This reports what the KNOB says in isolation. Whether audio is actually
+    consumed also depends on it having been requested; janus_consume_audio_for
+    is the answer to that question.
+    """
+    raw = str(JANUS_CONSUME_AUDIO).strip()
+    if raw.lower() in _JANUS_AUDIO_OFF_WORDS:
+        return "off"
+    if raw.lower() in _JANUS_AUDIO_ALL_WORDS:
+        return "all"
+    named = [token.strip() for token in raw.split(",")]
+    return "listed" if str(camera_id) in named else "unlisted"
+
+
+def janus_consume_audio_for(camera_id) -> bool:
+    """Should this camera's offered audio track be consumed and published?
+
+    Single source of truth for every consumer of the decision -- camera_session
+    passes the answer down into JanusCameraSession rather than letting the
+    session re-read the knob, so the component that builds the audio-enabled
+    ffmpeg publisher and the component that decides whether to pump or drain the
+    track cannot possibly disagree about one camera.
+
+    Degrades to False (with a one-time warning) when consumption is asked for
+    without JANUS_REQUEST_AUDIO naming the same camera: there is no audio track
+    to consume in that configuration, and quietly returning True would build an
+    audio input ffmpeg only ever receives silence on.
+    """
+    if janus_consume_audio_mode(camera_id) not in ("all", "listed"):
+        return False
+    if not janus_request_audio_for(camera_id):
+        key = str(camera_id)
+        if key not in _CONSUME_WITHOUT_REQUEST_WARNED:
+            _CONSUME_WITHOUT_REQUEST_WARNED.add(key)
+            logging.getLogger(__name__).warning(
+                "%s: JANUS_CONSUME_AUDIO names this camera but JANUS_REQUEST_AUDIO "
+                "does not, so no audio track is ever offered for it -- treating "
+                "audio consumption as OFF for this camera; add it to "
+                "JANUS_REQUEST_AUDIO as well to actually publish audio", key)
+        return False
+    return True
+
+
+# Sample format assumed for the audio input while NO audio frame has been decoded
+# yet. It is only ever a bootstrap value: camera_session takes the real format off
+# the first decoded frame and rebuilds the publisher if this guess was wrong (the
+# raw-PCM pipe guard in ffmpeg_sink.write_audio is what forces that). It matches
+# what the gateway negotiates -- the offer is `audio(port=9,opus)`, and aiortc
+# decodes Opus to 48 kHz stereo signed-16 -- so in practice the guess is right and
+# no rebuild happens.
+AUDIO_DEFAULT_FORMAT = ("s16", 48000, 2)
+# Bound on the per-session decoded-audio queue in janus_client. Audio arrives in
+# 20 ms frames, so this is ~1s of buffer: enough to ride out an encode hiccup,
+# short enough that a stalled consumer drops audio (and says so) instead of
+# growing without limit, exactly as the video queue does.
+AUDIO_QUEUE_MAXSIZE = 50
+# How long the per-session audio pump waits for a decoded frame before topping the
+# publisher up with silence. This is NOT a failure timeout -- nothing is declared
+# dead, no session is failed. It exists because the ffmpeg mux has two inputs and
+# one output: a stream that stops producing packets makes the muxer hold the other
+# stream's packets back until max_interleave_delta expires, so a camera that was
+# offered audio and then never sends any would add latency and jitter to the
+# VIDEO. Topping up keeps packets flowing on both inputs.
+AUDIO_SILENCE_TOPUP_S = 0.5
 
 # How often to re-poll TELUS for the camera list after startup, so a camera
 # added to the account later gets picked up (and streaming started

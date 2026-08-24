@@ -267,8 +267,16 @@ Load-bearing ffmpeg flags, found empirically against this exact stack:
 | `-bf 0` | No B-frames — HA's PyAV stream worker must not have to reorder frames without DTS info. |
 | `-g <fps>` | GOP tied to the measured fps (not a fixed frame count) → consistent ~1s keyframe interval regardless of camera frame rate, and clean alignment with HA's 2.0s HLS segmenter. |
 | `-pkt_size 1200` | Keep RTP payloads under MediaMTX's repacketization threshold; letting MediaMTX repacketize strips DTS continuity ("No dts in N consecutive packets" in HA). |
-| `-use_wallclock_as_timestamps 1` | Keeps PTS advancing, including while held frames are repeated during a rotation gap. |
+| `-use_wallclock_as_timestamps 1` | Keeps PTS advancing, including while held frames are repeated during a rotation gap. **Video input only.** Setting it on the audio input as well looks like the obvious symmetry and is measurably wrong: ffmpeg then stops reading input 1 within a couple of seconds and never resumes, so the audio pipe backs up at real-time rate forever (1.4 MB in 8 s, measured against ffmpeg n9). The same input keeps up perfectly audio-only — it is specifically the two-input combination that breaks. Without the flag, the audio stream's PTS come from its sample count and the pipe stays drained. |
 | `-rtsp_transport tcp` | RTSP over TCP to MediaMTX. |
+
+When `JANUS_CONSUME_AUDIO` applies to the camera, the same subprocess gets a
+second raw-PCM input on its own fd and the output gains
+`-map 0:v:0 -map 1:a:0 -c:a aac -ac 1 -ar <rate> -b:a 64k -af aresample=async=1`.
+The audio input also carries `-analyzeduration 0 -probesize 32`: raw PCM's
+parameters are fully described by `-f`/`-ar`/`-ac`, so there is nothing to probe
+for, and without it ffmpeg would wait on input 1 before starting the output at
+all. See "Downstream (listen) audio" below for the rest of that path.
 
 Frames larger than `MAX_ENCODE_DIMENSION` (960px on the larger side) are
 downscaled at the encode step. Some cameras publish natively at 1440×1440, which
@@ -521,20 +529,101 @@ per rotation, per camera):
 
 ### Downstream (listen) audio
 
-The bridge publishes **video only**, and by default the Janus mountpoint it
-creates asks for video only. A camera that offers an audio track anyway has that track
+By default the bridge publishes **video only**, and the Janus mountpoint it
+creates asks for video only. Two independent per-camera knobs move it off that
+default, and they are separate on purpose — asking for the track and publishing
+it have different risks:
+
+| Knob | What it does |
+| --- | --- |
+| `JANUS_REQUEST_AUDIO` | adds the audio keys to the mountpoint-create body, so the gateway offers a downstream audio track |
+| `JANUS_CONSUME_AUDIO` | decodes that track and publishes it on the same RTSP path as the video |
+
+A camera that offers an audio track nothing is consuming has that track
 **drained and discarded** rather than merely ignored: aiortc auto-accepts every
 media section the remote offers and decodes it on its own thread into an
 unbounded queue, so a track nobody reads would grow for the whole life of each
 session — a per-rotation memory sawtooth. Draining holds it at zero; the
 decoder thread itself is released when the session closes. (Stopping the track
 instead would be worse than doing nothing: it stops the queue being readable
-without stopping it being filled.)
+without stopping it being filled.) Consuming empties the same queue; it just
+keeps the frames.
 
-`JANUS_REQUEST_AUDIO` (see [configuration.md](configuration.md)) is the
-experiment that asks for a downstream audio track anyway, and reads the answer
-off the offer summary above. It is a **per-camera** knob, and that is the part
-worth knowing before turning it on: asking is not free for every camera.
+`JANUS_CONSUME_AUDIO` **requires** `JANUS_REQUEST_AUDIO` to name the same
+camera. A camera named only by the consume knob is never offered an audio track
+at all, so that combination is logged once and treated as off — building an
+audio-enabled publisher whose second input can only ever carry silence would be
+worse than doing nothing, because the mux then has to interleave the video
+against a stream that carries no content.
+
+#### The audio path
+
+The decoded audio track is pumped into a bounded per-session queue (drop-oldest,
+with its own counter — a live stream cares about staying near real time, not
+about completeness) and written into a **second input on the same ffmpeg
+process** that is already publishing the video. Output is **mono AAC** at the
+sample rate the decoded frames actually carry — never an assumed one. AAC is
+forced by the consumers, not chosen for quality: HA's HLS stream worker accepts
+only aac/mp3, and Frigate's `-c copy` recording preset needs an mp4-legal codec.
+
+Three properties of that path are load-bearing:
+
+- **One publisher, two inputs — the audio fd outlives every session.** The
+  ffmpeg process deliberately survives the ~165 s rotations (see the rotation
+  section below for why tearing it down blacks the path), and ffmpeg opens each
+  input exactly once and cannot reopen one. So the audio pipe is opened **with
+  the sink and never closed or reopened per session**: closing it at the end of
+  a session would EOF that input permanently, with no way to attach the next
+  session's audio to the running publisher. It is an anonymous `os.pipe()`
+  passed to the child through `pass_fds` and addressed as `-i pipe:<n>`, not a
+  FIFO — opening a FIFO for write blocks until a reader opens it, and ffmpeg
+  only reaches input 1 after input 0 has produced a frame, which is a real
+  deadlock rather than a theoretical one.
+- **Rotation gaps are filled with silence, sized by the wall clock.** The video
+  side bridges a gap by repeating the last frame; there is no audio equivalent,
+  and without a fill the video would advance while the audio stalled. On a
+  single-output mux that is not "a silence" — it is a permanently growing A/V
+  offset, and it also holds the video back while the muxer waits on the quiet
+  input. The fill therefore writes exactly
+  `elapsed_seconds × sample_rate − samples_already_written` samples, derived
+  from elapsed real time rather than from counting loop iterations: a repeated
+  video frame is one frame whenever it lands, so `asyncio.sleep` jitter is
+  invisible there, but a sample stream's duration *is* its length, so the same
+  jitter accumulates as real drift. It rides the existing frame-hold lifecycle,
+  which also guarantees the previous session's audio pump has stopped before the
+  fill starts — one writer on the pipe at a time. A camera that is offered audio
+  and then sends none gets the same top-up from the pump itself, so the muxer
+  never waits on a permanently quiet input.
+- **A changed raw PCM shape rebuilds the publisher**, exactly as a changed frame
+  size does. ffmpeg is told the pipe's sample format, rate and channel count once
+  on the command line and reads it as a fixed-size sample stream; a frame in a
+  different shape does not fail, it reinterprets every later sample from the
+  wrong offset — noise, plus permanent drift on a changed rate. The input is
+  normally sized from a real decoded frame (read off the session after the first
+  video frames land, without consuming it); when no audio has arrived yet it
+  starts from the negotiated 48 kHz stereo signed-16 shape and rebuilds if that
+  guess was wrong.
+
+The audio stream's timeline is its own sample count (the video's is the wall
+clock — see the flag table above for why the two cannot both be wallclock), which
+is what makes the wallclock-derived silence count load-bearing rather than
+cosmetic: that count is the only thing tying the audio to real time, and
+therefore to the video beside it. `-af aresample=async=1` (fill-and-trim only, no
+stretching) absorbs what is left. The audio input and encoder are
+spliced into the `common_in`/`common_out` fragments every encoder variant is
+built from, so a hardware path that publishes audio while the software fallback
+silently does not is not expressible.
+
+`/control/status` reports `audio_consumed`, `audio_format` and
+`dropped_audio_frames` per camera (see [control-api.md](control-api.md)). Note
+that the frame-silence watchdog is **video-only**: audio can stop while a camera
+still reports `streaming`.
+
+#### What is established about asking for the track
+
+`JANUS_REQUEST_AUDIO` (see [configuration.md](configuration.md)) is a
+**per-camera** knob, and that is the part worth knowing before turning it on:
+asking is not free for every camera.
 
 What is established: asked for audio, this gateway *does* offer one — the offer
 comes back as `audio(port=9,opus) video(port=9,H264,rtx)`, with the audio
