@@ -90,6 +90,24 @@ Pinned here:
                           the full timeout and got nothing", "aborted at once"
                           and "ICE never came up" all used to print the same
                           five words.
+ 13. audio consumption -- JANUS_CONSUME_AUDIO (default OFF) leaves the ffmpeg
+                          command line byte-identical, the session video-only and
+                          an offered track drained. With it on, the SAME
+                          publisher grows a second input and the decoded audio is
+                          written into it -- rebuilding the publisher to add
+                          audio would black the RTSP path on every rotation. The
+                          rotation gap is filled with silence whose sample count
+                          comes from ELAPSED WALLCLOCK, because a sample stream's
+                          duration is its length and counting loop iterations
+                          turns sleep jitter into permanent A/V offset. A changed
+                          raw PCM shape forces a rebuild exactly as a changed
+                          frame size does (writing it would desynchronise the
+                          pipe into noise rather than fail). Every encoder
+                          variant gets the audio input and encoder, since a
+                          hardware path with audio and a software fallback
+                          without it is the bug class this suite keeps catching.
+                          CONSUME without REQUEST is a misconfiguration, not a
+                          smaller feature: it degrades to off and says so once.
  11. dropped frames    -- each session's drop counter is folded into a
                           per-camera lifetime total in the status dict when the
                           session ends (healthy rotation and failure path
@@ -105,6 +123,7 @@ import pathlib
 import re
 import sys
 import time
+import types
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
@@ -112,6 +131,8 @@ os.environ.setdefault("TELUS_PASSWORD", "unused")
 
 from bridge import config as c              # noqa: E402
 from bridge import camera_session as cs     # noqa: E402
+from bridge import ffmpeg_sink as fs        # noqa: E402
+from bridge.janus_client import AUDIO_TIMEOUT  # noqa: E402
 from bridge.telus_auth import RateLimited   # noqa: E402
 
 if not os.environ.get("TEST_VERBOSE"):
@@ -171,9 +192,37 @@ class FakeProc:
         self.returncode = None
 
 
+class FakeAudioFormat:
+    def __init__(self, name):
+        self.name = name
+        self.is_planar = False
+
+
+class FakeAudioFrame:
+    """av.AudioFrame's surface as the audio path reads it: format name, sample
+    rate, channel layout and sample count. That tuple IS the raw pipe's wire
+    format (see ffmpeg_sink.audio_format_of), which is why it is what the guard
+    compares."""
+
+    def __init__(self, fmt, samples):
+        name, rate, channels = fmt
+        self.format = FakeAudioFormat(name)
+        self.sample_rate = rate
+        self.layout = types.SimpleNamespace(channels=tuple(range(channels)))
+        self.samples = samples
+
+
 class FakeSink:
     """FfmpegSink's surface as camera_session.py uses it: proc, fps,
-    hardware_encode, start(), write_frame() -> bool, stop()."""
+    hardware_encode, audio_format/audio_enabled, start(), write_frame() -> bool,
+    write_audio() -> bool, write_silence_to() -> bool, stop().
+
+    write_silence_to is the REAL FfmpegSink method, bound to this object. That is
+    deliberate: the invariant under test is the arithmetic that turns elapsed
+    wallclock into a sample count, and a fake reimplementation of it would only
+    ever test itself. Everything it needs is modelled below -- the accounting
+    fields and a _write_audio_bytes that records instead of writing to a pipe.
+    """
 
     def __init__(self, camera_id):
         self.camera_id = camera_id
@@ -186,14 +235,56 @@ class FakeSink:
         self.stopped = 0
         self.write_result = True
         self.write_error = None
+        # --- audio ---
+        self.audio_format = None
+        self.audio_writes = []    # (monotonic, samples) -- REAL decoded audio only
+        self.pcm_writes = []      # (monotonic, samples) -- everything, silence included
+        self._audio_transport = None      # only its truthiness is consulted
+        self._audio_bytes_per_sample = 0
+        self._audio_samples_written = 0
+        self._audio_started_at = None
         CTX.sinks.append(self)
 
-    async def start(self, width, height, fps=15):
-        self.start_calls.append((width, height, fps))
+    write_silence_to = fs.FfmpegSink.write_silence_to
+
+    @property
+    def audio_enabled(self):
+        return self._audio_transport is not None
+
+    async def start(self, width, height, fps=15, audio_format=None):
+        self.start_calls.append((width, height, fps, audio_format))
         if CTX.sink_start_hook is not None:
             CTX.sink_start_hook(self, width, height, fps)
         self.proc = FakeProc()
         self.fps, self.wh = fps, (width, height)
+        if audio_format is not None:
+            self.audio_format = tuple(audio_format)
+            self._audio_bytes_per_sample = 2 * self.audio_format[2]
+            self._audio_transport = object()
+            # The real sink primes the pipe with a little silence the instant it
+            # opens it, and starts its wallclock accounting from that moment.
+            self._audio_started_at = time.monotonic()
+            primed = int(self.audio_format[1] * fs._AUDIO_PRIME_MS / 1000)
+            self._write_audio_bytes(bytes(primed * self._audio_bytes_per_sample), primed)
+
+    def _write_audio_bytes(self, data, samples):
+        if self.proc is None or self.proc.returncode is not None:
+            return False
+        self.pcm_writes.append((time.monotonic(), samples))
+        self._audio_samples_written += samples
+        return True
+
+    async def write_audio(self, frame):
+        """Mirrors the real guard: a frame whose PCM shape is not the one ffmpeg
+        was launched with is REFUSED, because writing it would silently
+        reinterpret every later sample from the wrong offset rather than fail."""
+        if self._audio_transport is None:
+            return False
+        if fs.audio_format_of(frame) != self.audio_format:
+            return False
+        self.audio_writes.append((time.monotonic(), frame.samples))
+        return self._write_audio_bytes(b"\0" * (frame.samples * self._audio_bytes_per_sample),
+                                       frame.samples)
 
     async def write_frame(self, frame):
         # A sink whose start() raised, or whose process has exited, reports a
@@ -203,12 +294,15 @@ class FakeSink:
         if self.proc is None or self.proc.returncode is not None:
             return False
         self.writes.append((time.monotonic(), frame.seq))
+        if CTX.write_frame_hook is not None:
+            await CTX.write_frame_hook(self)
         if self.write_error is not None:
             raise self.write_error
         return self.write_result
 
     async def stop(self):
         self.stopped += 1
+        self._audio_transport = None
         if self.proc is not None:
             self.proc.returncode = 0
 
@@ -223,11 +317,30 @@ class Plan:
             frame), "end" (StopAsyncIteration), or ("repeat", interval, w, h).
     dropped_frames: what this session's drop counter reads when it ends (the
             real counter lives in janus_client._pump_track and is per-session).
+    audio_interval: seconds between decoded audio frames, or None for a session
+            that is offered no audio at all (every next_audio_frame call then
+            times out, which is what the silence top-up exists for).
+    audio_fmt: the (sample format, rate, channels) the DELIVERED frames carry.
+    audio_peek: what session.audio_format reports when camera_session reads it to
+            size the ffmpeg audio input -- i.e. whether a frame had already been
+            decoded by then. `None` models "no audio yet", which is the case the
+            AUDIO_DEFAULT_FORMAT bootstrap (and the guard behind it) exists for.
     """
+
+    _UNSET = object()
 
     def __init__(self, frames=(), tail="stall", connect_error=None,
                  connect_delay=0.0, close_error=None, close_hang=False,
-                 on_frame=None, dropped_frames=0, webrtcup_seen=True):
+                 on_frame=None, dropped_frames=0, webrtcup_seen=True,
+                 audio_interval=None, audio_fmt=("s16", 48000, 2),
+                 audio_peek=_UNSET, audio_samples=960, dropped_audio_frames=0):
+        self.audio_interval = audio_interval
+        self.audio_fmt = audio_fmt
+        self.audio_samples = audio_samples
+        self.dropped_audio_frames = dropped_audio_frames
+        self.audio_peek = (
+            (audio_fmt if audio_interval is not None else None)
+            if audio_peek is Plan._UNSET else audio_peek)
         self.frames = list(frames)
         self.tail = tail
         self.connect_error = connect_error
@@ -246,7 +359,7 @@ class Plan:
 
 
 class FakeSession:
-    def __init__(self, camera, video_source):
+    def __init__(self, camera, video_source, consume_audio=False):
         self.camera, self.video_source = camera, video_source
         self.plan = CTX.next_plan()
         self.created_at = time.monotonic()
@@ -256,7 +369,34 @@ class FakeSession:
         self._pending = list(self.plan.frames)
         self.dropped_frames = self.plan.dropped_frames   # the real one is a property
         self.webrtcup_seen = self.plan.webrtcup_seen     # ...as is this one
+        # Passed DOWN by camera_session rather than read from config here -- the
+        # real JanusCameraSession takes it the same way, so that one decision
+        # cannot fork into two.
+        self.consume_audio = consume_audio
+        self.dropped_audio_frames = self.plan.dropped_audio_frames
+        self.audio_format = self.plan.audio_peek         # ...also a property, really
+        self.audio_sent = 0
+        self._next_audio_at = None
         CTX.sessions.append(self)
+
+    async def next_audio_frame(self, timeout):
+        """The real signature: a decoded frame, AUDIO_TIMEOUT if none arrived
+        within `timeout`, or None once the session is dead."""
+        if not self.consume_audio or self.plan.audio_interval is None:
+            await asyncio.sleep(timeout)
+            return AUDIO_TIMEOUT
+        now = time.monotonic()
+        if self._next_audio_at is None:
+            self._next_audio_at = now + self.plan.audio_interval
+        wait = self._next_audio_at - now
+        if wait > timeout:
+            await asyncio.sleep(timeout)
+            return AUDIO_TIMEOUT
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._next_audio_at = time.monotonic() + self.plan.audio_interval
+        self.audio_sent += 1
+        return FakeAudioFrame(self.plan.audio_fmt, self.plan.audio_samples)
 
     async def connect_and_watch(self):
         if self.plan.connect_delay:
@@ -324,6 +464,7 @@ class Ctx:
         self.gvs_calls = []          # monotonic time of each get_video_source
         self.gvs_hook = None         # async (index) -> None, may raise
         self.sink_start_hook = None  # (sink, w, h, fps) -> None, may raise
+        self.write_frame_hook = None # async (sink) -> None; slows the frame hold
         self.os = FakeOs()
         self.guard = FakeGuard()
         self.seq = 0
@@ -1677,6 +1818,544 @@ async def test_an_offered_track_we_do_not_consume_is_drained_not_ignored():
 
 
 # --------------------------------------------------------------------------
+# 6c. JANUS_CONSUME_AUDIO: publishing the downstream audio track
+# --------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def consume_knob(consume, request="all"):
+    """Set both audio knobs to raw setting STRINGS, as the env vars carry them,
+    and reset the one-time CONSUME-without-REQUEST warning bookkeeping so a test
+    that asserts on that warning is not silenced by an earlier test."""
+    saved = (c.JANUS_CONSUME_AUDIO, c.JANUS_REQUEST_AUDIO,
+             set(c._CONSUME_WITHOUT_REQUEST_WARNED))
+    c.JANUS_CONSUME_AUDIO, c.JANUS_REQUEST_AUDIO = consume, request
+    c._CONSUME_WITHOUT_REQUEST_WARNED.clear()
+    try:
+        yield
+    finally:
+        c.JANUS_CONSUME_AUDIO, c.JANUS_REQUEST_AUDIO = saved[0], saved[1]
+        c._CONSUME_WITHOUT_REQUEST_WARNED.clear()
+        c._CONSUME_WITHOUT_REQUEST_WARNED.update(saved[2])
+
+
+def _subsequence_at(haystack, needle):
+    """Index where `needle` appears as a CONTIGUOUS run inside `haystack`, or -1.
+
+    Contiguous, not merely "all present": ffmpeg's option grammar is positional
+    -- an input option that drifts past its `-i` silently becomes an option for
+    the next input, or for the output.
+    """
+    for i in range(len(haystack) - len(needle) + 1):
+        if haystack[i:i + len(needle)] == needle:
+            return i
+    return -1
+
+
+async def _captured_ffmpeg_args(backend, audio_format):
+    """Every argv FfmpegSink.start would launch, without launching anything."""
+    captured = []
+
+    async def fake_try_start(self, args, pass_fds=()):
+        captured.append((list(args), tuple(pass_fds)))
+        return True
+
+    saved_backend, saved_try = c.ENCODE_BACKEND, fs.FfmpegSink._try_start
+    c.ENCODE_BACKEND = backend
+    fs.FfmpegSink._try_start = fake_try_start
+    try:
+        sink = fs.FfmpegSink("cam")
+        await sink.start(1280, 720, 15, audio_format=audio_format)
+        await sink.stop()
+    finally:
+        c.ENCODE_BACKEND, fs.FfmpegSink._try_start = saved_backend, saved_try
+    return captured
+
+
+async def test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour():
+    """The default must be indistinguishable from the bridge that had no audio
+    path at all -- on the ffmpeg command line, in the session it builds, and in
+    what happens to an offered track.
+
+    This is the whole basis for shipping the feature: a camera nobody opted in
+    for keeps publishing exactly the video-only stream it always did, from
+    exactly the same argv. An audio input that appears "just in case" would be a
+    second stream the muxer has to interleave, which changes video timing for
+    everyone.
+    """
+    assert c.janus_consume_audio_mode("any-camera") == "off", (
+        f"JANUS_CONSUME_AUDIO defaults to {c.JANUS_CONSUME_AUDIO!r}, which is not off")
+    assert c.janus_consume_audio_for("any-camera") is False
+
+    # The argv, for every encoder variant: not one audio token anywhere, and no
+    # fd is handed to the child.
+    for backend in ("vaapi", "nvenc", "software"):
+        for args, pass_fds in await _captured_ffmpeg_args(backend, None):
+            assert pass_fds == (), (backend, pass_fds)
+            for token in ("-map", "-c:a", "-af", "-b:a", "-analyzeduration"):
+                assert token not in args, (backend, token, args)
+            assert [a for a in args if a.startswith("pipe:")] == ["pipe:0"], args
+    # ...and the software variant in full, byte for byte, because "no audio
+    # tokens" would also be true of an argv that had quietly changed some other way.
+    (software_args, _), = await _captured_ffmpeg_args("software", None)
+    assert software_args == [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "1280x720",
+        "-r", "15", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
+        "-vf", "scale=960:540",
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-g", "15", "-bf", "0",
+        "-f", "rtsp", "-rtsp_transport", "tcp", "-pkt_size", "1200",
+        c.rtsp_publish_url("cam"),
+    ], software_args
+
+    # And in the loop: a video-only sink, a session told not to consume, an
+    # offered track still drained, and the status saying so.
+    with consume_knob("false", request="all"):
+        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02)],
+                      SESSION_MAX_LIFETIME_S=5.0) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                            timeout=8.0, why="a streaming session")
+            await asyncio.sleep(0.3)
+            sink, session = ctx.sink, ctx.sessions[0]
+            state = dict(ctx.state)
+            start_call, audio_writes = sink.start_calls[0], list(sink.audio_writes)
+            pcm_writes = list(sink.pcm_writes)
+            consumed = session.consume_audio
+            await stop(ctx)
+
+    assert start_call[3] is None, (
+        f"the publisher was built with an audio input for a camera that never "
+        f"opted in: {start_call}")
+    assert consumed is False, "the Janus session was told to consume audio"
+    assert not audio_writes and not pcm_writes, (
+        f"audio reached the publisher with consumption off: {audio_writes}")
+    assert state.get("audio_consumed") is False, state
+    assert state.get("audio_format") is None, state
+    assert state.get("dropped_audio_frames") == 0, state
+
+
+async def test_a_consume_enabled_camera_publishes_its_audio():
+    """The feature itself: a camera the knob names gets a publisher with a second
+    (audio) input, and its decoded audio frames are written into it alongside the
+    video -- on the SAME sink, which is the point. Anything that published audio
+    by rebuilding or replacing the publisher would black the RTSP path on every
+    rotation, which is the bug camera_session.py's outlives-sessions comment
+    exists to prevent."""
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02, audio_fmt=("s16", 48000, 2),
+                            audio_samples=960)],
+                      SESSION_MAX_LIFETIME_S=0.4) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: len(x.sessions) >= 3, timeout=10.0,
+                            why="3 sessions")
+            sinks = len(ctx.sinks)
+            sink = ctx.sink
+            start_calls = list(sink.start_calls)
+            audio_writes = list(sink.audio_writes)
+            stops = sink.stopped
+            consumed = [s.consume_audio for s in ctx.sessions[:3]]
+            state = dict(ctx.state)
+            await stop(ctx)
+
+    assert consumed == [True, True, True], consumed
+    assert sinks == 1 and stops == 0, (
+        f"the publisher was rebuilt to carry audio ({sinks} sinks, {stops} stops) -- "
+        "readers would be kicked off the RTSP path on every rotation")
+    assert len(start_calls) == 1, start_calls
+    assert start_calls[0][3] == ("s16", 48000, 2), (
+        f"the audio input was not sized from the decoded frames: {start_calls[0]}")
+    assert len(audio_writes) > 10, (
+        f"only {len(audio_writes)} decoded audio frames reached the publisher across "
+        "three sessions -- audio is not being published")
+    assert state.get("audio_consumed") is True, state
+    assert state.get("audio_format") == "48000Hz/2ch/s16", state
+
+
+async def test_the_rotation_gap_is_filled_with_wallclock_derived_silence():
+    """The audio counterpart of the frame hold, and it cannot be built the same way.
+
+    A repeated video frame is self-describing: whenever it lands it is one frame,
+    so the hold loop's sleep jitter is invisible. A sample stream's duration IS
+    its length, so filling a gap by writing "one interval's worth of samples per
+    iteration" makes every bit of that jitter a permanent, accumulating A/V
+    offset -- and on a single-output RTSP mux there is no separate audio timeline
+    to absorb it. The count has to come from elapsed real time.
+
+    The scenario forces the two answers far apart rather than relying on a tight
+    numeric bound: every hold iteration is slowed to roughly four times its
+    nominal interval, so a sleep-counting implementation writes about a quarter
+    of the samples the wall clock calls for. That gap is wide enough that a
+    loaded CI runner cannot turn a pass into a fail.
+    """
+    gap = {}
+
+    async def very_slow_second_attempt(idx):
+        if idx == 1:
+            gap["start"] = time.monotonic()
+            await asyncio.sleep(1.5)
+            gap["end"] = time.monotonic()
+
+    async def slow_writes(sink):
+        # Each hold iteration now takes ~0.25s + the nominal 1/15s interval.
+        await asyncio.sleep(0.25)
+
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02)],
+                      SESSION_MAX_LIFETIME_S=0.3, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      FRAME_HOLD_MAX_S=5.0, AUDIO_SILENCE_TOPUP_S=0.1) as ctx:
+            ctx.gvs_hook = very_slow_second_attempt
+            ctx.write_frame_hook = slow_writes
+            start(ctx)
+            await run_until(ctx, lambda x: "end" in gap, timeout=12.0,
+                            why="the reconnect gap")
+            sink = ctx.sink
+            rate = sink.audio_format[1]
+            # The window starts a beat after the gap is recorded. The instant the
+            # gap begins is the same event-loop tick on which the previous
+            # session's audio pump is being torn down, so a single in-flight write
+            # can land exactly on the boundary. A pump that was genuinely still
+            # running alongside the hold would write every 20ms for the whole
+            # 1.5s gap, so nothing interesting is excluded.
+            began = gap["start"] + 0.2
+            in_gap = [(t, n) for t, n in sink.pcm_writes if began <= t <= gap["end"]]
+            audio_in_gap = [t for t, _ in sink.audio_writes if began <= t <= gap["end"]]
+            await stop(ctx)
+
+    assert len(in_gap) >= 3, (
+        f"only {len(in_gap)} audio writes during a {gap['end'] - gap['start']:.2f}s "
+        "rotation gap -- the audio input went silent while video kept advancing, "
+        "which on one mux is a permanently growing A/V offset, not 'a silence'")
+    assert not audio_in_gap, (
+        "real decoded audio was written during the gap -- the previous session's "
+        "pump was still running alongside the hold, so two writers shared the pipe")
+
+    covered = sum(n for _, n in in_gap)
+    spanned = in_gap[-1][0] - in_gap[0][0]
+    expected = spanned * rate
+    # A sleep-counting fill writes ~1/4 of this (the write hook above makes each
+    # iteration ~4x its nominal interval); the wallclock-derived one writes ~all
+    # of it. The bound sits in the middle of that gulf, nowhere near either.
+    assert covered >= 0.6 * expected, (
+        f"{covered} samples cover {spanned:.2f}s of gap at {rate}Hz, where elapsed "
+        f"real time calls for ~{expected:.0f} -- the fill is counting its own "
+        "iterations, not the wall clock")
+    assert covered <= 1.6 * expected, (
+        f"{covered} samples for {spanned:.2f}s at {rate}Hz is far more than elapsed "
+        f"real time (~{expected:.0f}) -- the fill overruns the wall clock")
+
+
+async def test_an_audio_format_change_forces_a_publisher_rebuild():
+    """The raw-PCM twin of the frame-size guard.
+
+    ffmpeg is told the audio pipe's sample format, rate and channel count once,
+    on the command line, and then reads the pipe as a fixed-size sample stream.
+    A frame in a different shape does not fail -- it permanently reinterprets
+    every later sample from the wrong offset, so the audio becomes noise and (on
+    a changed rate) drifts against the video forever. Exactly like a changed
+    frame size, the only clean recovery is to relaunch ffmpeg with the real
+    shape.
+
+    The scenario is the one that actually happens: no audio frame had been
+    decoded yet when the publisher was sized, so it came up on the
+    AUDIO_DEFAULT_FORMAT bootstrap and the first real frame disagreed.
+    """
+    # The guard itself, on the REAL sink -- the fake mirrors it, but the thing
+    # that has to refuse the write in production is this.
+    real = fs.FfmpegSink("cam")
+    real._audio_transport = types.SimpleNamespace(
+        is_closing=lambda: False, get_write_buffer_size=lambda: 0,
+        write=lambda data: None)
+    real._audio_protocol = types.SimpleNamespace(lost=False)
+    real.audio_format = ("s16", 48000, 2)
+    real._audio_bytes_per_sample = 4
+    assert await real.write_audio(FakeAudioFrame(("s16", 16000, 1), 320)) is False, (
+        "the real sink accepted a frame in a different PCM shape than ffmpeg was "
+        "launched with -- the raw pipe is now permanently desynchronised")
+
+    # ...and the loop's response to that refusal: rebuild, with the learned shape.
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02, audio_fmt=("s16", 16000, 1),
+                            audio_peek=None, audio_samples=320)],
+                      SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].audio_writes,
+                            timeout=10.0, why="a rebuilt publisher carrying audio")
+            first, second = ctx.sinks[0], ctx.sinks[1]
+            first_fmt = first.start_calls[0][3]
+            second_fmt = second.start_calls[0][3]
+            first_stopped, first_audio = first.stopped, list(first.audio_writes)
+            state = dict(ctx.state)
+            await stop(ctx)
+
+    assert first_fmt == c.AUDIO_DEFAULT_FORMAT, (
+        f"the first publisher was not sized from the documented bootstrap: {first_fmt}")
+    assert not first_audio, (
+        "a mismatched frame was written into a pipe ffmpeg reads at a different "
+        "sample size -- this is silent corruption, not a failure")
+    assert first_stopped == 1, "the mis-sized publisher was left running"
+    assert second_fmt == ("s16", 16000, 1), (
+        f"the rebuilt publisher did not adopt the shape the real frames carry: "
+        f"{second_fmt}")
+    assert state.get("audio_format") == "16000Hz/1ch/s16", state
+
+
+async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
+    """A hardware path that publishes audio while the software fallback silently
+    does not is the exact class of bug this codebase keeps finding -- and the
+    fallback is not exotic here, it fires on every start() where /dev/dri is
+    missing or the driver has reset. So all three variants are built from the
+    same input/output fragments, and this pins that they still are.
+
+    It also pins ffmpeg's positional option grammar: the audio input options must
+    sit contiguously in front of their own `-i`, and the maps/encoder after the
+    last input. An option that drifts past its `-i` silently belongs to something
+    else.
+    """
+    audio_format = ("s16", 48000, 2)
+    seen = {}
+    for backend in ("vaapi", "nvenc", "software"):
+        captured = await _captured_ffmpeg_args(backend, audio_format)
+        assert captured, backend
+        for args, pass_fds in captured:
+            assert len(pass_fds) == 1, (
+                f"{backend}: the audio pipe's read end was not handed to ffmpeg: "
+                f"{pass_fds}")
+            fd = pass_fds[0]
+            # No -use_wallclock_as_timestamps on this input, deliberately: with
+            # it on both inputs, ffmpeg stops reading input 1 entirely a couple
+            # of seconds in and the audio pipe backs up at real-time rate
+            # forever. Pinned here because the flag reads like an obvious
+            # symmetry with the video input above it.
+            audio_in = ["-f", "s16le", "-ar", "48000", "-ac", "2",
+                        "-analyzeduration", "0", "-probesize", "32",
+                        "-i", f"pipe:{fd}"]
+            assert args.count("-use_wallclock_as_timestamps") == 1, (
+                f"{backend}: the audio input was given -use_wallclock_as_timestamps "
+                f"as well as the video input -- ffmpeg then stops draining it: {args}")
+            audio_out = ["-map", "0:v:0", "-map", "1:a:0",
+                         "-c:a", "aac", "-ac", "1", "-ar", "48000", "-b:a", "64k",
+                         "-af", "aresample=async=1"]
+            at_in = _subsequence_at(args, audio_in)
+            at_out = _subsequence_at(args, audio_out)
+            assert at_in > 0, (
+                f"{backend}: the audio input is missing or not contiguous: {args}")
+            assert at_out > at_in, (
+                f"{backend}: the audio maps/encoder are missing or precede the "
+                f"input they map: {args}")
+            # The video input still comes first (input 0), the audio maps/encoder
+            # sit in the OUTPUT section, and the publish URL is still last.
+            assert args.index("pipe:0") < at_in, args
+            assert at_out < _subsequence_at(args, ["-f", "rtsp"]), args
+            assert args[-7:] == ["-f", "rtsp", "-rtsp_transport", "tcp",
+                                 "-pkt_size", "1200", c.rtsp_publish_url("cam")], args
+        seen[backend] = [a for a, _ in captured]
+
+    # vaapi and nvenc each launch once (their attempt "succeeds" here); the point
+    # is that the software argv -- the fallback every hardware failure lands on --
+    # carries the identical audio fragments, not a subset of them.
+    for backend, arglists in seen.items():
+        for args in arglists:
+            assert args.count("-c:a") == 1 and args.count("-map") == 2, (backend, args)
+
+
+async def test_consume_without_request_degrades_to_off_and_says_so_once():
+    """Consuming audio that was never asked for is not a smaller version of the
+    feature, it is a different bug: no audio track is ever offered, so the
+    publisher would come up with a second input that only ever receives the
+    silence fill -- a stream that exists, carries nothing, and makes the muxer
+    interleave against it forever. There is no way for an operator to see that
+    from the outside, so the misconfiguration is reported rather than absorbed.
+
+    Once per camera, not once per session: the resolution sits on a path that
+    runs at camera start-up today, and a warning that repeated every ~165s would
+    be noise rather than a signal.
+    """
+    with consume_knob("cam-a,cam-b", request="false"):
+        with capture_logs("bridge.config", level=logging.WARNING) as lines:
+            first = c.janus_consume_audio_for("cam-a")
+            again = c.janus_consume_audio_for("cam-a")
+            other = c.janus_consume_audio_for("cam-b")
+            unnamed = c.janus_consume_audio_for("cam-c")
+        warnings_for_a = [ln for ln in lines if "cam-a" in ln]
+        warnings_for_b = [ln for ln in lines if "cam-b" in ln]
+        warnings_for_c = [ln for ln in lines if "cam-c" in ln]
+
+    assert first is False and again is False and other is False, (first, again, other)
+    assert unnamed is False, "a camera the knob does not name consumed audio"
+    assert len(warnings_for_a) == 1, (
+        f"the CONSUME-without-REQUEST misconfiguration was reported "
+        f"{len(warnings_for_a)} times for one camera: {warnings_for_a}")
+    assert "JANUS_REQUEST_AUDIO" in warnings_for_a[0], warnings_for_a[0]
+    assert len(warnings_for_b) == 1, warnings_for_b
+    assert not warnings_for_c, (
+        f"a camera the knob does not name produced a misconfiguration warning: "
+        f"{warnings_for_c}")
+
+    # Requesting it too is what turns it on -- nothing else changed.
+    with consume_knob("cam-a", request="cam-a"):
+        assert c.janus_consume_audio_for("cam-a") is True
+        assert c.janus_consume_audio_for("cam-b") is False
+
+    # ...and the loop honours the degradation end to end: no audio input, no pump.
+    with consume_knob("all", request="false"):
+        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02)],
+                      SESSION_MAX_LIFETIME_S=5.0) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                            timeout=8.0, why="a streaming session")
+            await asyncio.sleep(0.2)
+            start_call = ctx.sink.start_calls[0]
+            pcm = list(ctx.sink.pcm_writes)
+            state = dict(ctx.state)
+            consumed = ctx.sessions[0].consume_audio
+            await stop(ctx)
+
+    assert start_call[3] is None, (
+        f"a publisher was given an audio input for audio that is never offered: "
+        f"{start_call}")
+    assert consumed is False and not pcm, (state, pcm)
+    assert state.get("audio_consumed") is False, state
+
+
+async def test_the_consume_knob_takes_the_same_three_value_forms():
+    """One value grammar across both audio knobs, including the rule that keeps
+    it safe: `all` is only ever recognised as the WHOLE setting, never as one
+    entry of a list, or a camera literally called "all" would silently turn
+    consumption on for every camera on the account."""
+    for off in ("false", "0", "no", "off", "", "  ", "FALSE"):
+        with consume_knob(off, request="all"):
+            assert c.janus_consume_audio_mode("cam-a") == "off", off
+            assert c.janus_consume_audio_for("cam-a") is False, off
+    for on in ("true", "1", "yes", "on", "all", "  true  "):
+        with consume_knob(on, request="all"):
+            assert c.janus_consume_audio_mode("cam-a") == "all", on
+            assert c.janus_consume_audio_for("cam-a") is True, on
+    with consume_knob(" doorbell-2048 , indoor-2049x ", request="all"):
+        assert c.janus_consume_audio_mode("doorbell-2048") == "listed"
+        # Exact match: an id that merely PREFIXES a listed one is not a match.
+        assert c.janus_consume_audio_mode("indoor-2049") == "unlisted"
+        assert c.janus_consume_audio_for("doorbell-2048") is True
+        assert c.janus_consume_audio_for("indoor-2049") is False
+    with consume_knob("all,doorbell-2048", request="all"):
+        assert c.janus_consume_audio_for("some-other-camera") is False, (
+            "'all' was honoured as one entry of a list -- a camera literally called "
+            "'all' would then turn consumption on for every camera on the account")
+
+
+async def test_the_offered_audio_track_is_pumped_only_when_the_session_consumes():
+    """The REAL JanusCameraSession's on_track, both ways round.
+
+    With consumption off the track must still be DRAINED -- aiortc decodes it
+    into an unbounded queue regardless, so ignoring it leaks for the whole ~165s
+    life of every session. With consumption on the same queue must still reach
+    zero (pumping empties it exactly as draining does), the frames must actually
+    be kept, and an audio track ENDING must still not mark the session dead:
+    only the video track decides that.
+    """
+    gateway = ScriptedGateway()
+    session = await _watch_once(gateway)
+    assert session.consume_audio is False, "sessions consume audio by default"
+    on_track = session.pc.handlers["track"]
+    ignored = FakeRemoteTrack("audio")
+    on_track(ignored)
+    for i in range(50):
+        ignored.queue.put_nowait(f"frame{i}")
+    for _ in range(400):
+        if ignored.queue.qsize() == 0:
+            break
+        await asyncio.sleep(0.005)
+    assert ignored.queue.qsize() == 0, "an unconsumed audio track was not drained"
+    assert session._audio_queue.qsize() == 0, (
+        "an unconsumed audio track was queued for publishing anyway")
+    await session.close()
+
+    from bridge import janus_client as jc
+    gateway = ScriptedGateway()
+    with janus_rig(gateway):
+        session = jc.JanusCameraSession(
+            {"id": "cam", "mac_address": "AA:BB:CC:DD:EE:FF", "model": "ADC-V",
+             "firmware": "1"},
+            {"proxy_url": "rtsp://relay.invalid/stream",
+             "janus_gateway_url": "wss://gw.invalid",
+             "janus_token": "TOKEN", "ice_servers": []},
+            consume_audio=True)
+        await asyncio.wait_for(session.connect_and_watch(), timeout=10)
+    on_track = session.pc.handlers["track"]
+    audio = FakeRemoteTrack("audio")
+    on_track(audio)
+    frame = FakeAudioFrame(("s16", 48000, 2), 960)
+    audio.queue.put_nowait(frame)
+    got = await asyncio.wait_for(session.next_audio_frame(2.0), timeout=5.0)
+    assert got is frame, f"a consumed audio track did not deliver its frame: {got!r}"
+    assert session.audio_format == ("s16", 48000, 2), (
+        f"the decoded audio shape was not recorded for the publisher to be sized "
+        f"from: {session.audio_format}")
+    # A quiet stretch is a timeout, not an end -- the publisher fills it with
+    # silence rather than tearing anything down.
+    quiet = await asyncio.wait_for(session.next_audio_frame(0.05), timeout=5.0)
+    assert quiet is AUDIO_TIMEOUT, quiet
+    # ...and the reader survives it. An implementation that wrapped an async
+    # generator in wait_for would have killed the generator on that timeout, so
+    # this second frame would never arrive.
+    audio.queue.put_nowait(frame)
+    again = await asyncio.wait_for(session.next_audio_frame(2.0), timeout=5.0)
+    assert again is frame, (
+        "the audio stream ended at the first quiet interval -- a bounded wait must "
+        "not tear down the reader it is waiting on")
+
+    audio.queue.put_nowait(None)          # the decoder stopping, as at pc.close()
+    await asyncio.sleep(0.05)
+    assert not session._dead.is_set(), (
+        "a consumed audio track ending marked the whole session dead -- it would "
+        "force a video reconnect every time the audio stopped")
+    await session.close()
+
+
+async def test_audio_drops_accumulate_separately_from_the_video_count():
+    """`fps` and `dropped_frames` are a documented /control/status contract about
+    the VIDEO stream. A caller that has always read dropped_frames as "video
+    frames lost" must not silently start getting a mixed count, so audio drops
+    get a field of their own -- accumulated across rotations the same way, on the
+    healthy path and the failure path alike."""
+    plans = [
+        Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720),
+             audio_interval=0.02, dropped_frames=7, dropped_audio_frames=9),
+        Plan(connect_error=RuntimeError("no frames received before timeout"),
+             dropped_frames=5, dropped_audio_frames=4),
+        Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720),
+             audio_interval=0.02),
+    ]
+    with consume_knob("all", request="all"):
+        with scenario(plans, SESSION_MAX_LIFETIME_S=0.3,
+                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+            start(ctx)
+            await asyncio.sleep(0.05)
+            early = ctx.state.get("dropped_audio_frames", "absent")
+            await run_until(ctx, lambda x: x.state.get("dropped_audio_frames", 0) >= 13,
+                            timeout=10.0, why="both retired sessions' audio drops")
+            state = dict(ctx.state)
+            await stop(ctx)
+
+    assert early == 0, (
+        f"dropped_audio_frames must exist as 0 from the first status entry, got "
+        f"{early!r} -- the status shape is a contract and a key that appears later "
+        "is a different shape")
+    assert state.get("dropped_audio_frames") == 13, (
+        f"9 (rotated) + 4 (failed) should accumulate to 13, got "
+        f"{state.get('dropped_audio_frames')!r}")
+    assert state.get("dropped_frames") == 12, (
+        f"the VIDEO counter changed meaning: expected 7 + 5 = 12, got "
+        f"{state.get('dropped_frames')!r}")
+
+
+# --------------------------------------------------------------------------
 # 7. Backoff
 # --------------------------------------------------------------------------
 
@@ -1759,6 +2438,15 @@ TESTS = [
     test_a_rejected_audio_create_falls_back_instead_of_failing_the_session,
     test_the_audio_knob_names_the_cameras_it_applies_to,
     test_an_offered_track_we_do_not_consume_is_drained_not_ignored,
+    test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour,
+    test_a_consume_enabled_camera_publishes_its_audio,
+    test_the_rotation_gap_is_filled_with_wallclock_derived_silence,
+    test_an_audio_format_change_forces_a_publisher_rebuild,
+    test_every_encoder_variant_gets_the_audio_input_and_encoder,
+    test_consume_without_request_degrades_to_off_and_says_so_once,
+    test_the_consume_knob_takes_the_same_three_value_forms,
+    test_the_offered_audio_track_is_pumped_only_when_the_session_consumes,
+    test_audio_drops_accumulate_separately_from_the_video_count,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,
 ]

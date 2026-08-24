@@ -4,8 +4,9 @@ import os
 import time
 
 from . import config as c
+from . import ffmpeg_sink
 from . import restart_guard
-from .janus_client import JanusCameraSession
+from .janus_client import AUDIO_TIMEOUT, JanusCameraSession
 from .ffmpeg_sink import FfmpegSink
 from .telus_auth import RateLimited
 
@@ -48,6 +49,15 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     known_fps = None  # learned once, reused across rotations for this camera
 
     camera_id = camera["id"]
+    # Resolved ONCE for this camera, here, and handed down to every component
+    # that needs it (the Janus session, which decides whether to pump or drain
+    # the offered track, and the sink, which is built with or without a second
+    # input). Reading the knob independently in each of those places is how the
+    # two could end up disagreeing -- a session pumping audio into a publisher
+    # that has nowhere to put it, or a publisher with an audio input nothing ever
+    # writes to. config.janus_consume_audio_for also folds in the
+    # CONSUME-without-REQUEST degradation (warned once, then treated as off).
+    consume_audio = c.janus_consume_audio_for(camera_id)
     # Live diagnostics surfaced read-only via control_server.py's
     # /control/status -- deferred item from the original design ("no /status
     # endpoint yet"), now backed by this loop updating its own entry directly
@@ -56,6 +66,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         "state": "connecting", "consecutive_failures": 0, "last_frame_at": None,
         "fps": None, "hardware_encode": None, "last_error": None,
         "dropped_frames": 0,
+        # Audio fields are deliberately SEPARATE from fps/dropped_frames rather
+        # than folded into them: those two are a documented /control/status
+        # contract about the video stream, and a caller that has always read
+        # dropped_frames as "video frames lost" must not silently start getting a
+        # mixed count.
+        "audio_consumed": consume_audio, "audio_format": None,
+        "dropped_audio_frames": 0,
     }
 
     def _update_status(**fields):
@@ -67,15 +84,18 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # lines were the only trace -- now /control/status carries the running
     # total per camera.
     dropped_frames_total = 0
+    dropped_audio_frames_total = 0
 
     async def _retire_session(sess):
         # The single exit for a finished/failed session: fold its drop counter
         # into the lifetime total BEFORE the close, which is bounded but can
         # time out and abandon the session object entirely. Close ordering,
         # bounding and error handling are unchanged (_close_with_timeout).
-        nonlocal dropped_frames_total
+        nonlocal dropped_frames_total, dropped_audio_frames_total
         dropped_frames_total += sess.dropped_frames
-        _update_status(dropped_frames=dropped_frames_total)
+        dropped_audio_frames_total += getattr(sess, "dropped_audio_frames", 0)
+        _update_status(dropped_frames=dropped_frames_total,
+                       dropped_audio_frames=dropped_audio_frames_total)
         await _close_with_timeout(sess, camera_id)
 
     # The ffmpeg/RTSP publisher deliberately outlives individual Janus sessions.
@@ -93,9 +113,74 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # readers just see a brief freeze.
     sink: FfmpegSink | None = None
     sink_wh: tuple[int, int] | None = None
+    # The audio format the RUNNING ffmpeg was launched with, and the one learned
+    # from real decoded frames -- the audio counterparts of sink_wh and the (w, h)
+    # read off each session's first frames. known_audio_fmt persists across
+    # rotations for the same reason known_fps does: a camera's audio shape does
+    # not change between sessions, and re-guessing it every rotation would risk
+    # rebuilding the publisher for nothing.
+    sink_audio_fmt: tuple | None = None
+    known_audio_fmt: tuple | None = None
+    audio_rebuild_needed = False
     last_frame = None
     last_live = 0.0  # monotonic time a real (non-repeated) frame last arrived
     hold_task: asyncio.Task | None = None
+    audio_task: asyncio.Task | None = None
+
+    async def _pump_audio(sess):
+        # Per-session: drains this session's decoded audio into the publisher's
+        # second input. It may not raise into its ensure_future (asyncio would log
+        # a never-retrieved exception at GC time) and it may not fail the session
+        # directly -- a sink that refuses a frame sets the rebuild flag and the
+        # VIDEO loop acts on it, so the repair goes through exactly the same path
+        # a frame-size change does.
+        nonlocal known_audio_fmt, audio_rebuild_needed
+        try:
+            while True:
+                frame = await sess.next_audio_frame(c.AUDIO_SILENCE_TOPUP_S)
+                if frame is None:
+                    return                      # session over; the hold takes it from here
+                if frame is AUDIO_TIMEOUT:
+                    # No audio this interval. Keep the input alive with silence
+                    # rather than letting the mux hold the VIDEO back waiting on
+                    # it (see config.AUDIO_SILENCE_TOPUP_S); the sample count is
+                    # derived from the wallclock inside the sink, so a top-up can
+                    # neither over- nor under-fill.
+                    if sink is not None and sink.audio_enabled \
+                            and not await sink.write_silence_to():
+                        audio_rebuild_needed = True
+                        return
+                    continue
+                observed = ffmpeg_sink.audio_format_of(frame)
+                if observed != known_audio_fmt:
+                    # Purely an observation, exactly like reading (w, h) off a
+                    # video frame -- the GUARD that stops a mismatched frame
+                    # corrupting the pipe lives in sink.write_audio.
+                    known_audio_fmt = observed
+                if sink is None or not await sink.write_audio(frame):
+                    audio_rebuild_needed = True
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("%s: audio pump failed; publishing video only until the "
+                          "next session", camera["id"])
+
+    async def _stop_audio_pump():
+        # asyncio.wait rather than `await task`: this is itself called from inside
+        # the hold task, so a plain await would make the pump's CancelledError
+        # indistinguishable from the hold task's OWN cancellation and the hold
+        # would swallow its cancellation and keep running. wait() never re-raises
+        # the inner task's outcome; task.exception() is read purely so nothing is
+        # left unretrieved for asyncio to complain about at GC time.
+        nonlocal audio_task
+        task, audio_task = audio_task, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.wait({task})
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("%s: audio pump ended with %r", camera["id"], task.exception())
 
     async def _hold_frames():
         # Repeat the most recent real frame at the camera's fps while the Janus
@@ -104,10 +189,29 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # time-since-last-real-frame, not per-invocation, so a genuinely
         # offline camera (e.g. the 2026-07-17 doorbell outage) stops
         # masquerading as live after FRAME_HOLD_MAX_S and fails honestly.
+        #
+        # The previous session's audio pump is stopped HERE, as this task's very
+        # first act, rather than by the (synchronous) _start_hold: it makes the
+        # two writers to the audio pipe mutually exclusive by construction --
+        # nothing can be mid-write when the silence below starts, and the next
+        # session's pump is not started until _stop_hold has finished.
+        await _stop_audio_pump()
         interval = 1.0 / max(1, min(int(known_fps or 15), 30))
         while time.monotonic() - last_live < c.FRAME_HOLD_MAX_S:
             if not await sink.write_frame(last_frame):
                 return  # ffmpeg died; next successful session start replaces it
+            # The audio analogue of the repeated frame, and it cannot be built the
+            # same way. A repeated video frame is self-describing: whenever it
+            # lands, it is one frame, so asyncio.sleep jitter is invisible. A
+            # sample stream's duration IS its length, so filling a gap by writing
+            # "one interval's worth of samples per loop" accumulates every bit of
+            # that jitter as a permanent, growing A/V offset -- and on a single-
+            # output RTSP mux there is no separate audio timeline to absorb it.
+            # write_silence_to derives the count from elapsed real time instead,
+            # so the gap is filled with exactly as many samples as the wall clock
+            # says passed, however irregularly this loop actually ran.
+            if sink.audio_enabled and not await sink.write_silence_to():
+                return
             await asyncio.sleep(interval)
         log.warning("%s: no live frames for %ss, ending frame-hold -- letting "
                     "the stream go dark until the camera recovers",
@@ -138,13 +242,17 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 log.exception("%s: frame-hold task failed; continuing with this session",
                               camera["id"])
             hold_task = None
+        # Also here, not only inside the hold task: _start_hold declines to start
+        # at all when there is no sink or no frame yet, so this is the one place
+        # guaranteed to run before the next session's pump is created. Idempotent.
+        await _stop_audio_pump()
 
     try:
         while True:
             session = None
             try:
                 vs = await get_video_source(telus, camera["id"])
-                session = JanusCameraSession(camera, vs)
+                session = JanusCameraSession(camera, vs, consume_audio=consume_audio)
                 await asyncio.wait_for(session.connect_and_watch(), timeout=c.WEBRTCUP_TIMEOUT_S + 10)
 
                 # Collect frames for up to ~1s (or 10 frames) to learn actual size/fps --
@@ -253,6 +361,21 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # corrupt the encode) -- otherwise the same RTSP session
                 # carries straight on and readers never notice the rotation.
                 await _stop_hold()
+                # Size the audio input from a REAL decoded frame wherever possible.
+                # The audio m-line comes first in the offer and its RTP starts with
+                # the video's, so by the time ten video frames have been collected
+                # a decoded audio frame has almost always already been queued --
+                # this reads its shape without consuming it and without making the
+                # video path wait on audio. AUDIO_DEFAULT_FORMAT is only the
+                # bootstrap for the case where none has arrived yet; if it turns
+                # out to be wrong, write_audio's guard forces a rebuild.
+                if consume_audio:
+                    observed_audio = getattr(session, "audio_format", None)
+                    if observed_audio is not None:
+                        known_audio_fmt = observed_audio
+                desired_audio_fmt = (
+                    (known_audio_fmt or c.AUDIO_DEFAULT_FORMAT) if consume_audio else None)
+                audio_rebuild_needed = False
                 # `sink.proc is None` means a previous start() raised partway through
                 # (both encoders failed to survive the startup grace period -- what an
                 # RTSP ANNOUNCE to a momentarily-down MediaMTX looks like). Such a sink
@@ -264,15 +387,33 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 if sink is not None and (
                         sink.proc is None
                         or sink.proc.returncode is not None
-                        or sink_wh != (w, h)):
+                        or sink_wh != (w, h)
+                        # A changed raw AUDIO format is a rebuild for exactly the
+                        # same reason a changed frame size is: ffmpeg was told the
+                        # pipe's shape once, on the command line, and cannot be
+                        # told again.
+                        or sink_audio_fmt != desired_audio_fmt):
                     await sink.stop()
                     sink = None
                 if sink is None:
                     # Adopt the new sink only once start() has actually succeeded --
                     # assigning first is what left the poisoned proc=None sink behind.
                     new_sink = FfmpegSink(camera["id"])
-                    await new_sink.start(w, h, fps)
+                    await new_sink.start(w, h, fps, audio_format=desired_audio_fmt)
                     sink, sink_wh = new_sink, (w, h)
+                    # What this ffmpeg was LAUNCHED with -- the command line is
+                    # what the rebuild check above is really about, and start()
+                    # can legitimately come up video-only anyway (an unsupported
+                    # sample format, a pipe that would not open). Recording what
+                    # the sink ended up with instead would make every rotation
+                    # see a mismatch and rebuild the publisher forever, which is
+                    # the one thing this loop exists to avoid.
+                    sink_audio_fmt = desired_audio_fmt
+                    live = sink.audio_format
+                    _update_status(audio_format=(
+                        f"{live[1]}Hz/{live[2]}ch/{live[0]}" if live else None))
+                if consume_audio and sink.audio_enabled:
+                    audio_task = asyncio.ensure_future(_pump_audio(session))
 
                 for _, frame in first_frames:
                     last_frame = frame
@@ -309,6 +450,15 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 rotate_deadline = time.monotonic() + c.SESSION_MAX_LIFETIME_S
                 frame_iter = session.frames()
                 while True:
+                    if audio_rebuild_needed:
+                        # Set by the audio pump when the sink refused a frame --
+                        # a changed PCM format, or a pipe ffmpeg has stopped
+                        # reading. Raised from HERE rather than from the pump so
+                        # the repair runs through the identical path a frame-size
+                        # change takes: fail the session, close it, then let the
+                        # sink-repair block above rebuild the publisher with the
+                        # format learned from the real frames.
+                        raise RuntimeError("audio input needs rebuilding, restarting sink")
                     remaining_to_rotate = rotate_deadline - time.monotonic()
                     if remaining_to_rotate <= 0:
                         log.info("%s: proactive session rotation", camera["id"])
@@ -457,6 +607,6 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 if session:
                     await _retire_session(session)
     finally:
-        await _stop_hold()
+        await _stop_hold()          # also stops the audio pump
         if sink:
             await sink.stop()
