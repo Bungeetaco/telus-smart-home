@@ -25,7 +25,8 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 - **Bridge:** `cd camera-bridge && docker compose up -d --build`. Code is baked into the image, so **any code change needs a rebuild** (`--build`), not just a restart. Health check: `curl -s http://127.0.0.1:8199/control/health` → `{"status":"ok"}`. Requires `--network host` and (for hardware encode) a GPU render node.
 - **Integration:** copy `custom_components/telus_smarthome/` into HA's `config/custom_components/`; **integration code changes require a full Home Assistant restart** to load (a config-entry reload does not re-import modules).
 - **Syntax check** Python before proposing changes: `python3 -m py_compile <file>`.
-- **CI** (`.github/workflows/ci.yml`) runs on PRs: it imports `telus_auth_patch.py` to prove the pyalarmdotcomajax monkeypatch still applies (a compatibility guard fails loudly if an upstream internal moved), and installs the bridge deps wheels-only. There is no broader unit-test suite; otherwise verify by reading the code, compiling, and checking bridge/HA logs.
+- **CI** (`.github/workflows/ci.yml`) runs on PRs: it imports `telus_auth_patch.py` to prove the pyalarmdotcomajax monkeypatch still applies (a compatibility guard fails loudly if an upstream internal moved), installs the bridge deps wheels-only, and runs **every** `camera-bridge/tests/test_*.py`.
+- **Tests** use local fakes only — no network, no account, no hardware — so run them before proposing a bridge change: `cd camera-bridge && TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py` (each file is a script and ends in `RESULT: PASS`). They cover the bridge; the integration has none, so verify it by reading the code, compiling, and checking HA logs. New behaviour in a covered module gets a test in the same change — the suites exist for failures that are otherwise silent. See `docs/development.md`.
 
 ## Conventions you MUST follow
 
@@ -69,13 +70,42 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   hardware this account does not have". That is not history; it is the current
   state of the evidence, and it is what stops the next person trusting a guess or
   re-deriving a settled question.
+- **Tests are part of the change too, on the same terms as the docs.** The bridge
+  has a real regression suite (`camera-bridge/tests/`, ten files, run in full by
+  CI) covering behaviour that fails *silently* in production — a camera that
+  freezes instead of erroring, a setting that reads back a value it never wrote,
+  an audio stream that drifts. **Run it before proposing a bridge change**, and
+  when the change touches something a suite covers, update the suite in the SAME
+  commit:
+
+  | Situation | What the change must include |
+  | --- | --- |
+  | New behaviour in a module a suite already covers | a test for it, in that suite |
+  | An invariant deliberately changed (a timeout, a wire shape, a refusal) | the test updated to pin the NEW invariant, and its docstring rewritten to say why |
+  | A test starts failing | either the code is wrong and gets fixed, or the invariant genuinely moved and the test is rewritten — **deliberately, and stated in the commit message** |
+  | A new module with behaviour that can fail quietly | a new suite, following the conventions below, plus its row in `docs/development.md`'s test table |
+  | A fixture's upstream shape changes | the fixture recaptured and re-anonymized, never hand-edited to fit |
+
+  **Never make a test pass by weakening what it asserts** — not by deleting it,
+  skipping it, loosening a bound until it stops complaining, or narrowing a
+  scenario until the interesting case is gone. A red test is information; the
+  only honest responses are to fix the code or to change the invariant on
+  purpose and say so.
+
+  Conventions: no network, no account, no hardware (local aiohttp fakes or
+  scripted stand-in classes); each file is a plain script ending in
+  `RESULT: PASS` / `RESULT: FAIL (n)` and exiting non-zero; fixtures are captured
+  and anonymized, never invented; and **each suite's docstring names the
+  invisible failure it exists to catch**, because "what does this look like in
+  production" is the part that is expensive to rediscover. A new suite is picked
+  up by CI automatically (it globs `tests/test_*.py`).
 - **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes** — fixes, tuning, tests, docs, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes** — a new capability, a changed default, anything a user would notice or react to. Bias towards patch. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)
 
 - **Rate limits can lock the account.** Alarm.com's limits are undocumented; a stampede of logins or polls can trigger `429` and, worse, an account lock. Honor `Retry-After`, never tight-retry against the edge, and don't lower poll intervals casually. The code already funnels 429s into a backoff — preserve that.
 - **The push websocket drops ~every 6 minutes.** That's a server-side token lifetime, not a bug or an idle timeout. The reconnect/keepalive logic is intentional; don't "fix" it by mirroring a browser's websocket URL params (tested, rejected by the server).
-- **Session rotation is load-bearing.** The bridge proactively rotates each camera's video session (~165s) ahead of the server's forced close, with several redundant safety nets and a disk-persisted restart guard (`restart_guard.py`). Read `camera_session.py` and its comments fully before touching it — the comments document previously-shipped bugs and why the current logic looks the way it does.
+- **Session rotation is load-bearing.** The bridge proactively rotates each camera's video session (~165s) ahead of the server's forced close, with several redundant safety nets and a disk-persisted restart guard (`restart_guard.py`). Read `camera_session.py` and its comments fully before touching it — the comments document previously-shipped bugs and why the current logic looks the way it does. `camera-bridge/tests/test_camera_session.py` turns those comments into assertions; run it after any change there.
 - **Talkdown opens a real device audio session** and is enabled by default (`TALKDOWN_ENABLED`). It only plays what a caller explicitly asks it to, but firing it makes real audio come out of a doorbell in someone's home -- don't trigger it casually while testing. It's device-specific (confirmed on the ADC-VDB750).
 - **Two auth stacks, on purpose.** The website AJAX API (state + video) and the legacy mobile "MWS" XML API (two-way audio) are separate flows with separate quirks — see `docs/alarm-com-api.md` before changing either.
 

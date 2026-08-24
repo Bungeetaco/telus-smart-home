@@ -43,6 +43,80 @@ A bridge-only change still rides in the same integration version bump — note i
 - **Camera bridge:** `cd camera-bridge && docker compose up -d --build` (needs `--network host` and a GPU render node for hardware encode — see [setup.md](setup.md) and [configuration.md](configuration.md)). Code is baked into the image, so a code change needs a rebuild.
 - **Integration:** copy `custom_components/telus_smarthome/` into Home Assistant's `config/custom_components/` and add it via the UI, or install through HACS as a custom repository (see [setup.md](setup.md)). Integration code changes require a Home Assistant restart to load.
 
+## Tests
+
+`camera-bridge/tests/` holds the bridge's regression suites. CI runs **every**
+`tests/test_*.py` on each pull request; run one locally exactly the way CI does:
+
+```bash
+cd camera-bridge
+TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py
+```
+
+Conventions every suite follows:
+
+- **No network, no account, no hardware.** Upstream is either a local aiohttp
+  fake that enforces the real protocol (including HTTP Digest, where the device
+  does) or a scripted stand-in class. Credentials are dummies — `config.py` only
+  checks that they are present at import.
+- **Each file is a plain script**, not a pytest module: it prints one line per
+  test and ends in `RESULT: PASS` or `RESULT: FAIL (n)`, exiting non-zero on
+  failure. There is no test runner to install.
+- **Fixtures are captured, not invented.** `tests/fixtures/` holds anonymized
+  request/response bodies taken from real HAR captures, and a guard test fails if
+  an account identifier ever lands in one.
+- **Every suite's docstring names the invisible failure it exists to catch.**
+  These cover behaviour that fails *silently* — a camera that freezes instead of
+  erroring, a setting that reads back a value it never wrote — so "what would
+  this look like in production" is stated up front rather than left to be
+  rediscovered.
+
+| Suite | What it pins |
+|---|---|
+| `test_camera_session.py` | The per-camera reconnect loop: rotation before Alarm.com's ~180s server-side kill, the ffmpeg publisher that outlives it, the frame hold that bridges reconnect gaps, fps measurement, sink repair, and the consecutive-failure escape hatch. |
+| `test_camera_settings.py` | The website settings wire shape — JSON:API on read, a flat object on write — reconstructed from captured fixtures, plus capability gating, bounds and option-list handling. |
+| `test_control_server_routes.py` | The camera-settings, siren and privacy control routes: status codes, error vocabulary, and the fields the integration reads back. |
+| `test_arming_devices.py` | The Bluetooth arming-device client and its routes, including the irreversible unpair. |
+| `test_partitions.py` | Selective sensor bypass — above all the refusals, each of which is a case where writing anyway would leave a zone silently unprotected. |
+| `test_mws_json_actions.py` | The JSON-envelope MWS actions (camera siren, privacy mode) and the dual XML/JSON ack dispatcher. |
+| `test_parsers.py` | The pure parsers that turn Alarm.com's XML into the values the bridge acts on. |
+| `test_talkdown_streaming.py` | Talkdown's streaming encode, schedule-based pacing, in-place recovery, certificate pinning and endpoint selection. |
+| `test_talkdown_renegotiation.py` | Talkdown session renegotiation, against a fake doorbell that really checks Digest auth. |
+| `test_metrics.py` | The talkdown metrics counters. |
+
+The integration (`custom_components/`) has no suite of its own; verify it by
+reading the code, compiling it, and checking Home Assistant's logs.
+
+### Keeping the tests current
+
+Tests are part of a change on the same terms as the docs: **anything that alters
+behaviour a suite covers updates that suite in the same commit.** The whole point
+of these suites is that the behaviour underneath them fails quietly — a frozen
+camera, a setting that reads back a value it never wrote — so a suite that has
+drifted out of step with the code is not merely stale, it is actively
+misleading: it reports green over the exact class of bug it was written to catch.
+
+| Situation | What the change must include |
+|---|---|
+| New behaviour in a module a suite already covers | a test for it, in that suite |
+| An invariant deliberately changed — a timeout, a wire shape, a refusal | the test updated to pin the **new** invariant, and its docstring rewritten to say why |
+| A test starts failing | either the code is wrong and gets fixed, or the invariant genuinely moved and the test is rewritten — deliberately, and said out loud in the commit message |
+| A new module whose failures would be quiet | a new suite following the conventions above, and its row added to the table |
+| An upstream response shape changes | the fixture recaptured and re-anonymized, never hand-edited to fit |
+
+**Never make a test pass by weakening what it asserts.** Not by deleting it, not
+by skipping it, not by loosening a bound until it stops complaining, not by
+narrowing a scenario until the interesting case is gone. A red test is
+information. The only two honest responses are to fix the code, or to change the
+invariant on purpose and say so.
+
+Two practical notes. A new `tests/test_*.py` is picked up by CI automatically —
+there is no list to add it to, which is why the table above is the thing that
+goes stale and has to be updated by hand. And a test asserting on timing needs
+enough margin to survive a loaded CI runner while still failing loudly on the
+regression it targets; prefer a scenario where the right and wrong answers are
+far apart over a tight numeric bound that merely looks precise.
+
 ## Anonymization note for docs
 
 The docs in this folder are written to be shareable: they describe the software generically and use placeholders (`<ha-host>`, `<doorbell-ip>`, `<unit-id>`, `<did>`, `<mac>`, …) instead of any real deployment's IPs, account/device IDs, hostnames, paths, or secrets. Keep new docs to the same standard.

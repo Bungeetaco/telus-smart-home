@@ -35,8 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 import av
 import websockets
 from aiortc import (MediaStreamError, MediaStreamTrack, RTCConfiguration,
-                    RTCIceCandidate, RTCIceServer, RTCPeerConnection,
-                    RTCSessionDescription)
+                    RTCIceServer, RTCPeerConnection, RTCSessionDescription)
 from aiortc.sdp import candidate_from_sdp
 
 log = logging.getLogger(__name__)
