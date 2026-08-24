@@ -232,6 +232,16 @@
                         }
                     }
                 }
+            },
+            "doorbell_press": {
+                "name": "বোতাম চাপ",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "press": "চাপা হয়েছে"
+                        }
+                    }
+                }
             }
         }
     },

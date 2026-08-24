@@ -267,7 +267,8 @@ Load-bearing ffmpeg flags, found empirically against this exact stack:
 | `-bf 0` | No B-frames — HA's PyAV stream worker must not have to reorder frames without DTS info. |
 | `-g <fps>` | GOP tied to the measured fps (not a fixed frame count) → consistent ~1s keyframe interval regardless of camera frame rate, and clean alignment with HA's 2.0s HLS segmenter. |
 | `-pkt_size 1200` | Keep RTP payloads under MediaMTX's repacketization threshold; letting MediaMTX repacketize strips DTS continuity ("No dts in N consecutive packets" in HA). |
-| `-use_wallclock_as_timestamps 1` | Keeps PTS advancing, including while held frames are repeated during a rotation gap. **Video input only.** Setting it on the audio input as well looks like the obvious symmetry and is measurably wrong: ffmpeg then stops reading input 1 within a couple of seconds and never resumes, so the audio pipe backs up at real-time rate forever (1.4 MB in 8 s, measured against ffmpeg n9). The same input keeps up perfectly audio-only — it is specifically the two-input combination that breaks. Without the flag, the audio stream's PTS come from its sample count and the pipe stays drained. |
+| `-use_wallclock_as_timestamps 1` | Makes the video timeline advance with real time, including while held frames are repeated during a rotation gap. **Video input only** — the audio input's timeline is its own sample count (see "Downstream (listen) audio"). |
+| `-r <fps>` before `-i` | **Video-only publishes only.** It declares the raw input's frame rate, and in doing so it *overrides* `-use_wallclock_as_timestamps`: the timeline then advances by 1/fps per frame **written** instead of per second **elapsed**, so a camera delivering fewer frames than the fps ffmpeg was told produces proportionally less media than wall time. With nothing else sharing that timeline this is invisible, which is why it is kept for the long-proven video-only command line. With a second input it is fatal — see below. |
 | `-rtsp_transport tcp` | RTSP over TCP to MediaMTX. |
 
 When `JANUS_CONSUME_AUDIO` applies to the camera, the same subprocess gets a
@@ -277,6 +278,32 @@ The audio input also carries `-analyzeduration 0 -probesize 32`: raw PCM's
 parameters are fully described by `-f`/`-ar`/`-ac`, so there is nothing to probe
 for, and without it ffmpeg would wait on input 1 before starting the output at
 all. See "Downstream (listen) audio" below for the rest of that path.
+
+The audio-enabled command line also **drops `-r <fps>` from the video input**,
+and that single omission is what makes a two-input publish survive. The two
+inputs have to share one clock: the audio timeline is real time (the silence fill
+is sized from the wallclock), so the video timeline must be too. `-r` prevents
+that, and the two then diverge by exactly the shortfall between the fps ffmpeg
+was declared and the rate frames actually arrive at — a dropped frame, or a
+burst-contaminated fps measurement. Audio outruns video, the muxer's interleaver
+stops accepting audio packets, ffmpeg stops draining the pipe, and the sink
+rebuilds the publisher every few seconds (kicking every RTSP reader each time).
+
+Measured inside the deployed container image (ffmpeg 7.1.5, `h264_vaapi`), both
+pipes fed at real-time pacing with the input declared `-r 25` while frames were
+written at 15 fps: as shipped, the audio backlog crossed the sink's 512 kB limit
+in ~10 s on every run — to `-f null`, to a file, and to a live RTSP publish — and
+11 s of wall time produced 6.2 s of video (exactly the 15/25 ratio). Without
+`-r`, the backlog stayed at zero across a 100 s RTSP publish and 22 s of wall
+time produced 21.96 s of video. **This is not a quirk of the image's ffmpeg
+version:** the same reproduction and the same fix hold on ffmpeg n9.0.1.
+Everything else that looks like a candidate still stalls at ~10 s on both builds
+— `-thread_queue_size` on either or both inputs, dropping
+`-analyzeduration`/`-probesize`, `-use_wallclock_as_timestamps` on both inputs or
+on neither, `-fps_mode passthrough`/`vfr`, `-max_interleave_delta 0`, dropping
+`-af aresample`, and swapping the input order. The frame *count* is unchanged:
+ffmpeg still encodes one output frame per frame written, so `-g`'s
+keyframe-every-fps-frames behaviour and the encode cost are what they were.
 
 Frames larger than `MAX_ENCODE_DIMENSION` (960px on the larger side) are
 downscaled at the encode step. Some cameras publish natively at 1440×1440, which
@@ -604,11 +631,16 @@ Three properties of that path are load-bearing:
   starts from the negotiated 48 kHz stereo signed-16 shape and rebuilds if that
   guess was wrong.
 
-The audio stream's timeline is its own sample count (the video's is the wall
-clock — see the flag table above for why the two cannot both be wallclock), which
-is what makes the wallclock-derived silence count load-bearing rather than
-cosmetic: that count is the only thing tying the audio to real time, and
-therefore to the video beside it. `-af aresample=async=1` (fill-and-trim only, no
+The audio stream's timeline is its own sample count, and the video's is the wall
+clock (which is why the audio-enabled video input drops `-r` — see the flag table
+above). Stamping the audio input with the wallclock too would tie its timeline to
+*when a write happened to be flushed* rather than to how many samples exist, so a
+burst after a stall would compress into no time at all. That is what makes the
+wallclock-derived silence count load-bearing rather than cosmetic: the sample
+count is the only thing tying the audio to real time, and therefore to the video
+beside it. The asymmetry is a design choice, not a workaround — with `-r` gone
+the pipeline also stays drained with the flag on both inputs (measured on 7.1.5;
+never run live that way). `-af aresample=async=1` (fill-and-trim only, no
 stretching) absorbs what is left. The audio input and encoder are
 spliced into the `common_in`/`common_out` fragments every encoder variant is
 built from, so a hardware path that publishes audio while the software fallback

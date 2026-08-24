@@ -232,6 +232,16 @@
                         }
                     }
                 }
+            },
+            "doorbell_press": {
+                "name": "Нажатие кнопки",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "press": "Нажата"
+                        }
+                    }
+                }
             }
         }
     },

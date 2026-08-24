@@ -16,6 +16,7 @@ TELUS doesn't publish an API, and their portal logs in through TELUS's own SSO/O
 - **The whole security panel as HA entities** — arm and disarm, lock and unlock, and read every door, motion, and glass-break sensor natively.
 - **Live camera video** — cameras show up as ordinary HA camera entities. Behind the scenes a bridge translates Alarm.com's proprietary WebRTC into plain RTSP that HA (and its bundled go2rtc) can play. There's nothing to wire up by hand; the integration reads the stream URLs, password included, from the bridge. Video only by default; the camera's own **listen** audio can be published on the same stream per camera, opt-in — see `JANUS_REQUEST_AUDIO`/`JANUS_CONSUME_AUDIO` in [docs/configuration.md](docs/configuration.md).
 - **Two-way audio ("talkdown")** — speak through the doorbell's speaker from HA: a text-to-speech phrase, or any audio clip you point it at, via a `telus_smarthome.speak` service, and stop it early with `telus_smarthome.stop_speaking`. See [Two-way audio](#two-way-audio-talkdown) below.
+- **The doorbell press, as a real trigger** — pressing the button fires a proper Home Assistant event entity with the `doorbell` device class, so a ring automation triggers on a press instead of scraping the wording out of the activity feed. That distinction matters more than it looks: TELUS renders the activity feed's text in the account's own language, and this project's reference account has produced both French and English descriptions for the same kinds of event — so a text match is an automation that stops working one day with no error anywhere. The entity matches TELUS's own untranslated event code instead. It's created for cameras that report having a chime, attaches to the camera it belongs to, and fires exactly once per press — a restart won't re-ring you for the last person who called. See [Ringing the doorbell as a trigger](#ringing-the-doorbell-as-a-trigger) below.
 - **The alarm side, where it was worth having** — a switch per paired phone for whether it may auto-disarm the panel on approach, and, on a system with more than one partition, a picker for which partition that phone opens. The panel's own Bluetooth settings are there too: whether it accepts pairing at all, so a phone that isn't already enrolled can't be added, and how long it stays disarmable once a paired phone is seen — 1, 5, 10, 20 or 30 minutes, which are the only windows TELUS offers. Removing a phone for good is a service (`unpair_arming_device`) rather than a button, because it can't be undone from Home Assistant: re-pairing needs physical access to both the phone and the panel. Alongside them a `bypass_sensors` service for skipping specific zones — also deliberately a service and not a per-sensor toggle, since a bypassed zone stops triggering the alarm until you put it back, and that is not something a stray tap should do.
 - **The camera's own settings, as entities** — how loud the doorbell speaks (the same volume talkdown is heard at), privacy mode, and the siren, from Home Assistant instead of the TELUS app. Alongside them, per-camera signal strength, battery and status, so a camera drifting onto bad Wi-Fi becomes a number you can alert on rather than a picture that quietly gets worse — plus, on a camera with the hardware to answer the question, whether a solar panel is attached. Controls only show up for cameras that report supporting them, so a capability your camera lacks leaves no broken button behind. The doorbell's chime is there too: switches for the indoor chime and the outdoor tone, and a picker for the kind of chime the doorbell is wired to — mechanical, digital, or none — with the names coming from TELUS rather than guessed at. There's a switch for the device's status LED as well — the little light on the front — for anyone who'd rather it weren't lit, and switches for TELUS's own push notifications, which are handy if you'd rather your doorbell told you about visitors once rather than twice. There's also a picker for the live video resolution, which is the honest lever on how much bandwidth a camera uses — it changes what the bridge itself receives, not just what the TELUS app shows. Picture and clip settings are reachable through the bridge's control API but do not have entities yet — see [docs/control-api.md](docs/control-api.md).
 - **Credentials that stay in sync** — change your TELUS password once, in HA's Reconfigure flow, and both the integration and the separate bridge process pick it up. No more silently-stale bridge login after a password change.
@@ -45,6 +46,43 @@ cd telus-smart-home
 ```
 
 The installer handles the network pre-flight, your TELUS credentials, the shared directory, and building the container. If you'd rather do it by hand, or want every knob explained, the [setup guide](docs/setup.md) and [configuration reference](docs/configuration.md) cover it.
+
+## Ringing the doorbell as a trigger
+
+Each doorbell gets an event entity — `event.<doorbell>_button_press` — that fires
+when someone presses the button. Trigger on its state change:
+
+```yaml
+automation:
+  - alias: Someone is at the door
+    triggers:
+      - trigger: state
+        entity_id: event.doorbell_button_press
+        # Not to: — an event entity's state is the timestamp of the last
+        # event, so every press is a new state. `not_to` filters out the
+        # startup transition from unavailable/unknown, which is not a press.
+        not_to:
+          - unavailable
+          - unknown
+    actions:
+      - action: notify.mobile_app_phone
+        data:
+          message: Someone is at the front door
+```
+
+Check the entity's actual id under **Settings → Devices & services → Entities**;
+it is named from the camera's own name, so a doorbell called "Front Door"
+produces `event.front_door_button_press`.
+
+The event's attributes carry `event_id`, `timestamp`, `camera_id`,
+`device_description` and the untranslated `event_type_name`, plus the clip
+fields (`clip_link`, `video_event_id`, `thumbnail_url`, …) when TELUS has already
+attached a recording. It often hasn't yet — the clip is linked a poll or two
+after the press itself lands, and this entity deliberately does not fire a second
+time when that happens, because a doorbell that rings your automation twice for
+one visitor is worse than a first notification without a thumbnail. If you want
+the clip in the notification, trigger on the account-wide `Activity` event
+entity, which does re-fire exactly once when a clip arrives.
 
 ## Two-way audio (talkdown)
 

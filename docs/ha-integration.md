@@ -528,7 +528,7 @@ Two screens (`async_step_init` → `async_step_modes`):
 | `climate` | library thermostats | HVAC mode (heat/cool/auto/fan-only/off), setpoints, fan mode, humidity readout |
 | `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status; per-camera **Stream state** and **Dropped frames** stream-health diagnostics (bridge-backed) |
 | `camera` | camera bridge | Live RTSP stream + on-demand snapshots (bridge-backed) |
-| `event` | camera bridge | Per-camera video-clip events + a system-wide activity event (bridge-backed) |
+| `event` | camera bridge | Per-camera video-clip events, a system-wide activity event, and a per-doorbell **button press** event (device class `doorbell`) — all bridge-backed |
 
 Most platforms follow the same shape: an `async_setup_entry` that reads the
 controller from `hass.data`, then creates one entity per matching device in
@@ -682,9 +682,9 @@ a real error.
 | --- | --- | --- | --- |
 | `CameraBridgeCoordinator` (camera.py) | `/control/cameras` | 60 s | camera.py, event.py |
 | `VideoEventsCoordinator` (event.py) | `/control/events` | 30 s | per-camera event entities |
-| `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, activity-feed sensor |
+| `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, doorbell-press event entities, activity-feed sensor |
 | `AutomationRulesCoordinator` (switch.py) | `/control/automations` | 300 s | automation-rule switches |
-| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors |
+| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors, and *which cameras are doorbells* (creation gate only — the doorbell event entity itself rides the activity coordinator) |
 | `StreamHealthCoordinator` (sensor.py) | `/control/status` | 30 s | per-camera stream-health sensors, camera-bridge connectivity binary sensor |
 | `TalkMetricsCoordinator` (sensor.py) | `/control/metrics` | 120 s | talkdown status/failure sensors |
 
@@ -720,7 +720,8 @@ coordinator health plus whether the bridge still reports that specific camera.
 
 ### Event platform
 
-Three entity kinds:
+Three entity kinds. The `CameraSettingsCoordinator` also appears here, but only
+to decide *which* cameras get a doorbell entity — see below.
 
 - **`TelusCameraEvent`** — one `EventEntity` per camera (sharing the camera's
   device via identical identifiers, so it appears as a second entity on the
@@ -740,11 +741,94 @@ Three entity kinds:
   clip it lacked when first seen (`_fired_with_clip`) — TELUS attaches the media
   relationship a poll or two after the entry first appears, so this avoids
   permanently losing a doorbell clip notification. Both sets are re-based onto the
-  current (bounded, 20-entry) page each poll so they can't grow unbounded.
-- Both entity kinds attach a durable, signed **`clip_link`** (via `_clip_link_for`
-  → `clip_view.py`) alongside the raw `download_url`. The raw URL expires within
-  minutes; the `clip_link` re-mints a fresh URL at click time and is what
-  notifications should put behind their tap action.
+  current (bounded, 20-entry) page each poll so they can't grow unbounded. Its
+  attributes carry `event_type_name` — TELUS's untranslated server-side enum for
+  what the entry *is* — so a template or condition on this catch-all entity can
+  key off something the account's language does not change.
+- **`TelusDoorbellEvent`** — one `EventEntity` per doorbell, device class
+  **`doorbell`**, attached to that camera's existing device. Fires the single
+  event type `press`. This is what a ring-triggered automation should trigger
+  on; see [Triggering on a doorbell press](#triggering-on-a-doorbell-press)
+  below for the mechanics and the rationale.
+- All three entity kinds attach a durable, signed **`clip_link`** (via
+  `_clip_link_for` → `clip_view.py`) alongside the raw `download_url`. The raw
+  URL expires within minutes; the `clip_link` re-mints a fresh URL at click time
+  and is what notifications should put behind their tap action.
+
+### Triggering on a doorbell press
+
+A press is also visible in `TelusActivityEvent`'s feed, but only as a generic
+`other` event whose `description` is free text — so before this entity existed,
+every ring automation had to pattern-match that text.
+
+**Matching is on `event_type_name == "DoorbellButtonPress"`, never on the
+description.** This account's activity descriptions have been observed in both
+French (`Déclenché par caméra (Une personne)`, `Mouvement détecté`) and English
+(`Button Push`, `Locked (Manually locked)`). The language is a server-side
+account property, so a text match is a latent failure that would surface as the
+doorbell simply never firing again — no error, no log line. `event_type_name` is
+a server-side enum and is not translated. The bridge already carries it through
+`/control/history` (see [control-api.md](control-api.md#get-controlhistory)); the
+entity reads it straight off the coordinator, and
+`camera-bridge/tests/test_history_events.py` pins the rename it depends on.
+
+**Which cameras get one.** `_is_doorbell()` gates on the chime capability flags
+in the camera's `/settings` `audio` section — `supports_indoor_chime`,
+`supports_outdoor_tone` or `supports_chime_type` (any one of the three; they are
+independent). A chime is what a camera with no bell to ring does not have. Two
+plausible-looking alternatives are deliberately rejected:
+
+- **`notifications.supports_button_press`** resolves from
+  `panelNotificationEnableDisableFeatureSupport`, the *same* upstream enum behind
+  the motion-notification toggle, so it reads true for any camera that can push a
+  notification at all — doorbell or not.
+- **"has a press ever been seen for this camera"** is a direct signal but an
+  unstable one: the feed is a bounded 20-entry page, so it answers "no" for a
+  doorbell nobody has rung lately. The entity would appear and vanish across
+  restarts, taking its history and breaking any automation referencing it, and
+  the press that created the entity could not fire it.
+
+Creation therefore goes through `async_add_camera_entities` (the same
+capability-gated path the siren buttons and chime switches use), so a doorbell
+added to the account later gets its entity with no restart, while *firing* is
+driven by the activity coordinator — the only feed carrying presses.
+
+**Attribution to a camera** is by `device_id`, which the history feed reports as
+the alarm.com device id (`<unit>-<did>`) — the same id shape `/control/cameras`
+uses, and therefore expected to be the same id the entity was constructed with.
+Never by `device_description`, which is a user-editable label.
+
+**Unverified:** a press and its camera's `/control/cameras` entry have not been
+observed side by side, so the two ids being byte-identical is inferred from the
+shared id scheme rather than confirmed against a capture. If a doorbell entity
+exists but never fires on a real press, check that equality first.
+
+**Firing exactly once.** Dedup reuses `TelusActivityEvent`'s mechanism rather
+than inventing a second one: a set of the press ids present on the current page,
+re-based each poll. Activity ids are opaque strings so they cannot be compared
+for recency, and a timestamp high-water mark is worse — a strict `>` permanently
+discards anything sharing the newest timestamp, and one press reliably produces
+several feed entries inside the same second. The set is bounded by the page size
+because anything that scrolls off is older than everything still on the page and
+can never legitimately return.
+
+**A restart cannot re-fire an old press.** The baseline is re-derived at entity
+creation and nothing is persisted, so every press already in the feed when the
+integration loads is history. The empty-page case is handled the same way
+`TelusCameraEvent` handles it: an empty first page means "the bridge isn't up
+yet", not "no presses exist", so the first *non-empty* page is adopted as the
+baseline instead of firing everything on it.
+
+**Attributes:** `event_id`, `timestamp`, `camera_id`, `device_description`,
+`description` (display only), `event_type_name`, plus the same
+`thumbnail_url` / `download_url` / `clip_duration_ms` / `video_event_id` /
+`clip_link` clip shape as the other two event entities. Expect the clip fields to
+be `null` more often here: TELUS attaches the media relationship a poll or two
+*after* the history entry appears, and this entity deliberately does **not**
+re-fire when it does. A doorbell that rings an automation twice for one press is
+worse than one whose first notification carries no thumbnail — use
+`TelusActivityEvent`, which does re-fire exactly once on clip arrival, for a
+clip-carrying notification.
 
 ---
 

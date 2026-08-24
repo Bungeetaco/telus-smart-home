@@ -8,13 +8,20 @@ identical device identifiers, so it shows up as a second entity on the same
 device rather than a separate one), and fires whenever a clip newer than
 whatever existed at entity-creation time appears in a poll -- so a restart
 never replays old history as "new" events.
+
+Three entity kinds live here: the per-camera video-clip event, the
+system-wide Activity event, and the per-doorbell button-press event
+(EventDeviceClass.DOORBELL) -- the last of which is what a ring-triggered
+automation should trigger on, since it matches TELUS's stable server-side
+event_type_name enum rather than the localized description text the other
+two classify on.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -33,6 +40,10 @@ from homeassistant.util import dt as dt_util
 
 from .bridge_client import bridge_get
 from .camera import CameraBridgeCoordinator
+from .camera_settings_coordinator import (
+    async_add_camera_entities,
+    async_get_camera_settings_coordinator,
+)
 from .clip_view import make_clip_link
 from .const import (
     CAMERA_BRIDGE_EVENTS_URL,
@@ -48,6 +59,27 @@ from .const import (
 LOGGER = logging.getLogger(__name__)
 
 EVENT_TYPES = ["person", "vehicle", "animal", "other"]
+
+# TELUS's server-side event-type enum for a doorbell button press, captured live
+# from /control/history:
+#
+#   {"description": "Button Push", "device_id": "<unit>-<did>",
+#    "device_description": "Doorbell", "event_type_name": "DoorbellButtonPress"}
+#
+# Matched on INSTEAD of the description text, deliberately and permanently. This
+# account's activity descriptions have been observed in both French ("Déclenché
+# par caméra (Une personne)", "Mouvement détecté") and English ("Button Push",
+# "Locked (Manually locked)") -- the locale is a server-side account property
+# that can change without anything on this side being touched. A free-text match
+# would then simply stop firing, with no error anywhere to say so: the exact
+# silent failure the bridge's regression suites exist to prevent elsewhere.
+# event_type_name is an enum and is not translated.
+DOORBELL_PRESS_EVENT_TYPE_NAME = "DoorbellButtonPress"
+
+# The one event type the doorbell entity fires. EventDeviceClass.DOORBELL
+# imposes no vocabulary of its own, so this is ours; a single member because
+# TELUS's feed reports one press event with no long/double-press distinction.
+DOORBELL_EVENT_TYPES = ["press"]
 
 
 def _clip_link_for(config_entry: ConfigEntry, video_event_id: str | None) -> str | None:
@@ -69,6 +101,57 @@ def _clip_link_for(config_entry: ConfigEntry, video_event_id: str | None) -> str
     # notification delivered now stays tappable for the whole TTL window.
     expiry = int(dt_util.utcnow().timestamp()) + CLIP_LINK_TTL_SECONDS
     return make_clip_link(secret, str(video_event_id), expiry)
+
+
+def _event_time(event: dict[str, Any]) -> datetime:
+    """Parsed timestamp of one Activity-feed entry, for ordering.
+
+    Always returns a datetime -- epoch 0 for a missing or unparseable value --
+    so a sort key is uniform in type and one malformed entry can't raise
+    TypeError mid-sort.
+
+    Sorting on this rather than on the raw string is load-bearing: TELUS emits
+    two timestamp formats (with and without fractional seconds), and
+    "...T10:00:00Z" sorts BELOW "...T10:00:00.5Z" as a string, so a string sort
+    reorders events across that boundary.
+    """
+    return dt_util.parse_datetime(event.get("timestamp") or "") or dt_util.utc_from_timestamp(0)
+
+
+def _is_doorbell(camera_data: dict[str, Any]) -> bool:
+    """Whether one camera is a doorbell, from capabilities the bridge already reports.
+
+    A chime is what makes a doorbell a doorbell. The `audio` section's
+    `supports_indoor_chime` / `supports_outdoor_tone` / `supports_chime_type`
+    resolve alarm.com's `indoorChimeEnableDisableFeatureSupport`,
+    `outdoorToneEnableDisableFeatureSupport` and `indoorChimeTypeFeatureSupport`
+    -- flags a camera with no bell to ring does not report. Any ONE of the three
+    is enough: they are independent of each other (switch.py's `_build_chime`
+    gates its two toggles on them separately for that reason), so a unit with an
+    outdoor tone but no wired-chime support still counts.
+
+    Deliberately NOT `notifications.supports_button_press`, which looks like the
+    obvious flag and is not one: the bridge resolves it from
+    `panelNotificationEnableDisableFeatureSupport`, the SAME upstream enum behind
+    the motion-notification toggle (see camera-bridge/bridge/camera_settings.py's
+    _NOTIFICATION_FIELDS), so it reads true for any camera that can push a
+    notification at all.
+
+    Deliberately NOT "has a DoorbellButtonPress ever been seen for this camera"
+    either, tempting though it is as a direct signal. The activity feed is a
+    bounded 20-entry page, so that test answers "no" for a doorbell nobody has
+    rung lately -- the entity would appear and vanish across restarts, taking
+    its history and breaking any automation that references it, and the very
+    press that created it could not fire it (a freshly created entity baselines
+    on the page it was born from). A capability flag is stable, is known at
+    startup, and needs nobody to ring the bell first.
+    """
+    audio = (camera_data.get("settings") or {}).get("audio") or {}
+    return bool(
+        audio.get("supports_indoor_chime")
+        or audio.get("supports_outdoor_tone")
+        or audio.get("supports_chime_type")
+    )
 
 
 def _classify(description: str) -> str:
@@ -165,6 +248,27 @@ async def async_setup_entry(
         DATA_ACTIVITY_COORDINATOR
     ]
     async_add_entities([TelusActivityEvent(activity_coordinator, config_entry)])
+
+    # Per-doorbell button-press entity. Two coordinators, on purpose:
+    #  * WHICH cameras get one is decided by the camera-settings coordinator,
+    #    because that is where the chime capability flags live -- the same
+    #    capability-gated creation path switch.py/number.py/button.py use, via
+    #    async_add_camera_entities (a camera is re-offered to the builder every
+    #    poll until it yields, so a doorbell added later needs no restart).
+    #  * WHEN it fires comes from the activity coordinator, the only feed that
+    #    carries presses. So the entity itself is a CoordinatorEntity on the
+    #    activity coordinator, and its availability follows that feed's health
+    #    rather than the settings poll's.
+    settings_coordinator = await async_get_camera_settings_coordinator(hass, config_entry)
+
+    @core.callback
+    def _build_doorbell(camera_id: str, camera_data: dict[str, Any]) -> list[EventEntity]:
+        """One doorbell-press entity per camera that reports a chime."""
+        if not _is_doorbell(camera_data):
+            return []
+        return [TelusDoorbellEvent(activity_coordinator, camera_id)]
+
+    async_add_camera_entities(config_entry, settings_coordinator, async_add_entities, _build_doorbell)
 
 
 class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
@@ -375,20 +479,22 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
         new_events = [e for e in events if _needs_fire(e)]
         if new_events:
             # TELUS returns the page newest-first; fire oldest-first so a listener
-            # sees them in the order they actually happened. Sort by PARSED
-            # datetime, not the raw string: TELUS emits two timestamp formats
-            # (with and without fractional seconds), and "...T10:00:00Z" sorts
-            # BELOW "...T10:00:00.5Z" as a string -- the same unsoundness the
-            # _seen_ids comment documents for equality. Always return a datetime
-            # (epoch 0 for an unparseable value) so the key type is uniform and a
-            # single malformed entry can't raise TypeError mid-sort.
-            def _when(ev: dict[str, Any]):
-                return dt_util.parse_datetime(ev["timestamp"]) or dt_util.utc_from_timestamp(0)
-
-            for event in sorted(new_events, key=_when):
+            # sees them in the order they actually happened. Sorted on the parsed
+            # datetime rather than the raw string -- see _event_time for why the
+            # string is unsound here, the same unsoundness the _seen_ids comment
+            # documents for equality.
+            for event in sorted(new_events, key=_event_time):
                 self._trigger_event(_classify(event["description"]), {
                     "description": event["description"],
                     "device_description": event.get("device_description"),
+                    # TELUS's stable server-side enum for what this entry IS
+                    # ("DoorbellButtonPress", "AccessControlUnlocked", ...),
+                    # unlike `description` above, which is free text and arrives
+                    # in the account's own language. Carried so a template or a
+                    # condition on this catch-all entity can key off something
+                    # that does not translate. A press specifically has its own
+                    # entity (TelusDoorbellEvent) and should trigger on that.
+                    "event_type_name": event.get("event_type_name"),
                     "thumbnail_url": event.get("thumbnail_url"),
                     "download_url": event.get("download_url"),
                     "clip_duration_ms": event.get("clip_duration_ms"),
@@ -412,5 +518,149 @@ class TelusActivityEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEnt
             # Keep _fired_with_clip bounded to the current page too, so it can't
             # grow without bound over the process lifetime.
             self._fired_with_clip &= self._seen_ids
+
+        super()._handle_coordinator_update()
+
+
+class TelusDoorbellEvent(CoordinatorEntity[ActivityHistoryCoordinator], EventEntity):
+    """Fires when someone presses the button on one doorbell camera.
+
+    The point of this entity is to be the thing a ring-triggered automation
+    triggers ON. A press is already visible in TelusActivityEvent's feed, but
+    only as a generic `other` event whose description is free text in whatever
+    language the account is set to -- so every automation had to pattern-match
+    that text, and would have failed silently the day the locale changed. This
+    entity matches TELUS's `event_type_name` enum instead
+    (DOORBELL_PRESS_EVENT_TYPE_NAME), which does not translate.
+
+    Created only for cameras that report a chime (see `_is_doorbell`), and
+    attached to that camera's existing device via the identifier camera.py
+    registers it under -- so it appears as another entity on the doorbell, not
+    as a device of its own.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "doorbell_press"
+    _attr_device_class = EventDeviceClass.DOORBELL
+    _attr_event_types = DOORBELL_EVENT_TYPES
+
+    def __init__(self, coordinator: ActivityHistoryCoordinator, camera_id: str) -> None:
+        """Initialize the entity for one doorbell camera."""
+        super().__init__(coordinator)
+
+        self._camera_id = camera_id
+        self._attr_unique_id = f"{camera_id}_doorbell_press"
+        # Same identifier camera.py's TelusCamera registers, so HA merges this
+        # onto the existing camera device. Identifier only -- name/model/firmware
+        # belong to camera.py, and repeating them here would let this entity
+        # fight it over the registry entry.
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, camera_id)})
+
+        # Dedup + restart safety, reusing TelusActivityEvent's mechanism rather
+        # than inventing a second one: the set of press ids on the page as it
+        # stands right now is the baseline, and only an id absent from it fires.
+        #
+        # Why membership in the current page and not a high-water mark: activity
+        # ids are opaque strings ("M-1723220865386") so they can't be compared
+        # for recency, and a timestamp mark is worse -- a strict ">" permanently
+        # discards anything sharing the newest timestamp, and a doorbell press
+        # reliably produces several feed entries inside the same second, so the
+        # first one seen would suppress its siblings forever.
+        #
+        # Because the baseline is re-derived at entity creation -- which happens
+        # afresh on every HA start, since nothing here is persisted -- a press
+        # that is already in the feed when the integration loads is history, not
+        # news. That is what stops a restart re-firing the last press (and every
+        # automation hanging off it) just because it is the newest thing in the
+        # feed.
+        self._seen_ids: set[str] = {e["id"] for e in self._presses(coordinator.data or [])}
+        # ...unless there was nothing to take a baseline FROM. An empty page
+        # means "the bridge isn't up yet / that poll failed", not "no presses
+        # exist", and treating it as a baseline would fire every press on the
+        # first page that does arrive. Adopt that first non-empty page instead.
+        # Same reasoning as TelusCameraEvent's own _baseline_pending.
+        self._baseline_pending = not (coordinator.data or [])
+
+    def _presses(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """This camera's button-press entries out of one Activity page.
+
+        Correlated to the camera by `device_id`, which the history feed reports
+        as the alarm.com device id ("<unit>-<did>") -- the same id shape the
+        bridge's /control/cameras route uses, and therefore expected to be the
+        same id this entity was constructed with. Never by `device_description`,
+        which is a user-editable label.
+
+        Limit of the evidence: the captured press carries a device_id in that
+        shape, but a press and that camera's /control/cameras entry have not been
+        observed side by side, so the two ids being byte-identical is inferred
+        from the shared id scheme rather than confirmed. If a doorbell entity is
+        created and never fires on a real press, this equality is the first thing
+        to check -- compare the device_id on a /control/history press against the
+        camera's id in /control/cameras.
+        """
+        return [
+            e for e in events
+            if e.get("event_type_name") == DOORBELL_PRESS_EVENT_TYPE_NAME
+            and e.get("device_id") == self._camera_id
+        ]
+
+    @core.callback
+    def _handle_coordinator_update(self) -> None:
+        """Fire once for each press not on the previous page, oldest-first."""
+
+        events = self.coordinator.data or []
+
+        if self._baseline_pending:
+            if events:
+                self._baseline_pending = False
+                self._seen_ids = {e["id"] for e in self._presses(events)}
+            super()._handle_coordinator_update()
+            return
+
+        presses = self._presses(events)
+        new_presses = [e for e in presses if e["id"] not in self._seen_ids]
+        # Oldest-first, so two presses landing in one poll reach a listener in
+        # the order they were actually made.
+        for press in sorted(new_presses, key=_event_time):
+            self._trigger_event(DOORBELL_EVENT_TYPES[0], {
+                "event_id": press["id"],
+                "timestamp": press.get("timestamp"),
+                "camera_id": self._camera_id,
+                "device_description": press.get("device_description"),
+                # Free text, in the account's language -- carried for display
+                # only. Nothing here matches on it; see the module constant.
+                "description": press.get("description"),
+                "event_type_name": press.get("event_type_name"),
+                # Clip fields, same shape as the other two event entities so a
+                # dashboard card or notification can treat all three alike.
+                # Expect them to be null more often here than on
+                # TelusActivityEvent: TELUS attaches the media relationship a
+                # poll or two AFTER the history entry appears, and this entity
+                # deliberately does not re-fire when it does (a doorbell that
+                # rings an automation twice for one press is worse than one
+                # whose first notification carries no thumbnail). Use
+                # TelusActivityEvent, which does re-fire exactly once on clip
+                # arrival, for a clip-carrying notification.
+                "thumbnail_url": press.get("thumbnail_url"),
+                "download_url": press.get("download_url"),
+                "clip_duration_ms": press.get("clip_duration_ms"),
+                "video_event_id": press.get("video_event_id"),
+                "clip_link": _clip_link_for(
+                    self.coordinator.config_entry, press.get("video_event_id")),
+            })
+            # One state write per press, not one at the end: _trigger_event only
+            # stores the attributes, so a single trailing write would collapse a
+            # two-press poll into one state_changed and lose the earlier ring.
+            self.async_write_ha_state()
+
+        # Rebase onto the presses on the current page. Anything that has scrolled
+        # off is older than everything still on it and can never legitimately
+        # come back as new, so dropping it can't cause a re-fire -- and this is
+        # what keeps the set bounded by the page size (20) forever. Guarded on
+        # the raw page being non-empty, not on `presses`: a page with no press on
+        # it is a real answer (every earlier press has aged out), while an empty
+        # page is a failed poll and must not clear the baseline.
+        if events:
+            self._seen_ids = {e["id"] for e in presses}
 
         super()._handle_coordinator_update()

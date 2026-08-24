@@ -1,10 +1,16 @@
 """Shared poller for the camera-bridge's per-camera settings and diagnostics.
 
-number.py (speaker volume), switch.py (privacy mode), button.py (siren) and
-sensor.py (signal strength / battery / device status) all need the same two
-bridge routes for the same set of cameras. One coordinator serves all four:
+number.py (speaker volume), switch.py (privacy mode), button.py (siren),
+sensor.py (signal strength / battery / device status) and event.py (which
+cameras are doorbells, from the chime capability flags) all need the same two
+bridge routes for the same set of cameras. One coordinator serves all five:
 polling per platform would multiply into that many live TELUS round trips per
 cycle against an account whose rate limits are undocumented and can lock it.
+
+event.py is the odd one out and worth knowing about: it reads this coordinator
+only to decide WHICH cameras get a doorbell-press entity. The entity it creates
+is a CoordinatorEntity on the activity-history coordinator instead, because that
+is the feed a press actually arrives on.
 
 The camera list itself is not re-fetched here -- it is read off the existing
 CameraBridgeCoordinator, so a camera discovered later gets its settings polled
@@ -226,7 +232,7 @@ async def async_get_camera_settings_coordinator(
     """Return this config entry's shared camera settings coordinator, creating it once.
 
     Created lazily here instead of in __init__.py because this coordinator is
-    owned by four entity platforms and by nothing else; __init__.py pops the
+    owned by five entity platforms and by nothing else; __init__.py pops the
     per-entry hass.data dict on unload, so the instance needs no teardown.
 
     The first poll is scheduled as a BACKGROUND task and deliberately never

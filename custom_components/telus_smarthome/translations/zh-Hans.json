@@ -232,6 +232,16 @@
                         }
                     }
                 }
+            },
+            "doorbell_press": {
+                "name": "按钮按下",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "press": "已按下"
+                        }
+                    }
+                }
             }
         }
     },
