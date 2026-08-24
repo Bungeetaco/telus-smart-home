@@ -96,6 +96,23 @@
                     "reauth_required": "Reautenticação necessária",
                     "telus_error": "Erro TELUS/Alarm.com"
                 }
+            },
+            "camera_stream_state": {
+                "name": "Estado da transmissão",
+                "state": {
+                    "connecting": "A ligar",
+                    "streaming": "A transmitir",
+                    "reconnecting": "A restabelecer ligação",
+                    "restart_deferred": "Reinício adiado"
+                }
+            },
+            "camera_dropped_frames": {
+                "name": "Fotogramas descartados"
+            }
+        },
+        "binary_sensor": {
+            "camera_bridge": {
+                "name": "Ponte de câmaras"
             }
         },
         "event": {
@@ -123,6 +140,20 @@
                             "other": "Outro"
                         }
                     }
+                }
+            }
+        }
+    },
+    "services": {
+        "speak": {
+            "fields": {
+                "conditioning": {
+                    "name": "Condicionamento de áudio",
+                    "description": "Se a ponte aplica a sua cadeia de condicionamento ffmpeg predefinida ao áudio antes de o reproduzir. Defina como false para reproduzir o clipe tal como é descodificado. Deixe por definir para manter a predefinição da ponte."
+                },
+                "audio_filter": {
+                    "name": "Filtro de áudio",
+                    "description": "Uma cadeia de filtros ffmpeg `-af` explícita que a ponte executa em vez do condicionamento predefinido (tem prioridade sobre `conditioning`). Uma cadeia vazia desativa completamente o condicionamento. Deixe por definir para manter a predefinição da ponte."
                 }
             }
         }

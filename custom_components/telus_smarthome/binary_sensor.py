@@ -1,4 +1,11 @@
-"""Alarmdotcom implementation of an HA binary sensor."""
+"""Alarmdotcom implementation of an HA binary sensor.
+
+Mostly the pyalarmdotcomajax device-model platform (contact/motion/smoke/etc
+sensors plus the virtual battery and malfunction ones). The one exception is
+CameraBridgeConnectivitySensor, which reports whether the local camera-bridge
+container is answering at all -- see its docstring for why it deliberately
+breaks the usual coordinator-availability contract.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +23,10 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from pyalarmdotcomajax.devices.registry import AllDevices_t
 from pyalarmdotcomajax.devices.sensor import Sensor as libSensor
 from pyalarmdotcomajax.devices.water_sensor import WaterSensor as libWaterSensor
@@ -25,6 +35,7 @@ from .base_device import AttributeBaseDevice, BaseDevice, HardwareBaseDevice
 from .const import DATA_CONTROLLER, DOMAIN, SENSOR_SUBTYPE_BLACKLIST
 from .controller import AlarmIntegrationController
 from .device_type_langs import LANG_DOOR, LANG_WINDOW
+from .sensor import StreamHealthCoordinator, async_get_stream_health_coordinator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -111,6 +122,12 @@ async def async_setup_entry(
             and device.has_state
         )
     )
+
+    # Bridge connectivity, on the same StreamHealthCoordinator sensor.py's
+    # per-camera stream-health sensors poll -- the lazy getter is what keeps
+    # the two concurrently-set-up platforms on ONE poller.
+    stream_health_coordinator = await async_get_stream_health_coordinator(hass, config_entry)
+    async_add_entities([CameraBridgeConnectivitySensor(stream_health_coordinator, config_entry)])
 
 
 class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore
@@ -247,3 +264,52 @@ class AttributeBinarySensor(AttributeBaseDevice, BinarySensorEntity):  # type: i
         """Return true if the binary sensor is on."""
 
         return self.entity_description.value_fn(self)
+
+
+class CameraBridgeConnectivitySensor(
+    CoordinatorEntity[StreamHealthCoordinator], BinarySensorEntity
+):
+    """Whether the local camera-bridge container is answering its control API.
+
+    ON while the coordinator's last /control/status poll got an answer out of
+    the bridge, OFF while it did not (container down, mid-restart, or its
+    control secret not on the shared mount yet). Grouped under the same
+    synthetic Integration service device as the auth-health and talkdown
+    sensors -- it reports on the integration's own plumbing, not on any
+    TELUS device.
+
+    Deliberately NOT the plain CoordinatorEntity availability contract: a
+    coordinator whose poll fails marks its entities unavailable, and for a
+    connectivity sensor "the bridge is down" IS the reportable state, not a
+    reason to stop reporting -- an entity that goes unavailable exactly when
+    it should say "off" can never say "off" at all. So availability is gated
+    only on at least one poll attempt having completed (last_poll_ok is None
+    until then), never on the poll having succeeded.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_translation_key = "camera_bridge"
+
+    def __init__(self, coordinator: StreamHealthCoordinator, config_entry: ConfigEntry) -> None:
+        """Pass coordinator to CoordinatorEntity."""
+        super().__init__(coordinator)
+
+        self._attr_unique_id = f"{config_entry.entry_id}_camera_bridge"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{config_entry.entry_id}_integration")},
+            name="TELUS Smart Home Integration",
+            manufacturer="TELUS",
+            entry_type=dr.DeviceEntryType.SERVICE,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Available once a poll attempt has COMPLETED, successful or not."""
+        return self.coordinator.last_poll_ok is not None
+
+    @property
+    def is_on(self) -> bool:
+        """True while the bridge answered the most recent status poll."""
+        return bool(self.coordinator.last_poll_ok)

@@ -349,8 +349,11 @@ asks it to. Only doorbell-class cameras with an upstream-audio path support it.
      media_content_id: "media-source://tts/google_translate?message=Hello"
    ```
 
-See [configuration.md](configuration.md) for the `speak` service's full field
-reference and the audio-conditioning tunables the bridge applies before playback.
+The service also takes optional `conditioning` / `audio_filter` fields to
+control the bridge's audio-conditioning chain per call — see
+[ha-integration.md](ha-integration.md) for the full field reference and
+[configuration.md](configuration.md) for the conditioning tunables the bridge
+applies before playback.
 
 ## Verifying each piece
 

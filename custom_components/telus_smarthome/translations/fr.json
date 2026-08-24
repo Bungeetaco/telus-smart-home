@@ -96,6 +96,23 @@
                     "reauth_required": "Réauthentification requise",
                     "telus_error": "Erreur TELUS/Alarm.com"
                 }
+            },
+            "camera_stream_state": {
+                "name": "État du flux",
+                "state": {
+                    "connecting": "Connexion en cours",
+                    "streaming": "Diffusion en cours",
+                    "reconnecting": "Reconnexion en cours",
+                    "restart_deferred": "Redémarrage différé"
+                }
+            },
+            "camera_dropped_frames": {
+                "name": "Images perdues"
+            }
+        },
+        "binary_sensor": {
+            "camera_bridge": {
+                "name": "Passerelle caméra"
             }
         },
         "event": {
@@ -123,6 +140,20 @@
                             "other": "Autre"
                         }
                     }
+                }
+            }
+        }
+    },
+    "services": {
+        "speak": {
+            "fields": {
+                "conditioning": {
+                    "name": "Conditionnement audio",
+                    "description": "Indique si la passerelle applique sa chaîne de conditionnement ffmpeg par défaut à l'audio avant de le lire. Définissez false pour lire le clip tel qu'il est décodé. Laissez vide pour conserver la valeur par défaut de la passerelle."
+                },
+                "audio_filter": {
+                    "name": "Filtre audio",
+                    "description": "Une chaîne de filtres ffmpeg `-af` explicite que la passerelle exécute à la place du conditionnement par défaut (prioritaire sur `conditioning`). Une chaîne vide désactive complètement le conditionnement. Laissez vide pour conserver la valeur par défaut de la passerelle."
                 }
             }
         }

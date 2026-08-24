@@ -105,6 +105,13 @@ DATA_CAMERA_SETTINGS_COORDINATOR = "camera_settings_coordinator"
 # concurrently, so two locals would be two pollers and double the request rate
 # against a rate-limited account.
 DATA_ARMING_DEVICES_COORDINATOR = "arming_devices_coordinator"
+# Shared StreamHealthCoordinator instance, created on first use by
+# sensor.async_get_stream_health_coordinator() with the same lazy pattern as
+# the settings/arming coordinators above. sensor.py (the per-camera stream
+# state / dropped-frames sensors) and binary_sensor.py (the bridge
+# connectivity sensor) both read it, and platforms are set up concurrently,
+# so two locals would be two pollers of the same route.
+DATA_STREAM_HEALTH_COORDINATOR = "stream_health_coordinator"
 # Shared PanelBluetoothCoordinator instance (backlog E41), same lazy-creation
 # pattern and shared for the same reason -- switch.py owns the system-wide
 # pairing toggle and number.py the timeout, and they are set up concurrently.
@@ -293,6 +300,20 @@ CAMERA_BRIDGE_METRICS_URL = "http://127.0.0.1:8199/control/metrics"
 # triggers a talk, which is rare, so this is deliberately slow -- it exists to
 # notice failures, not to watch a clip play.
 TALK_METRICS_POLL_INTERVAL_SECONDS = 120
+
+# Live per-camera video-pipeline diagnostics (stream state, reconnect counts,
+# fps, encode mode, dropped frames), maintained by the bridge's own
+# run_camera_forever loops -- see camera-bridge/bridge/control_server.py for
+# the response shape. Also carries a short talk summary; the stream-health
+# sensors read only the "cameras" dict.
+CAMERA_BRIDGE_STATUS_URL = "http://127.0.0.1:8199/control/status"
+
+# How often sensor.py polls that status. 30s where the other intervals above
+# are cautious, and safely so: the route answers from an in-memory dict the
+# bridge's camera loops keep current themselves, entirely over loopback --
+# zero alarm.com requests per cycle, so the short interval buys "the stream
+# died" being visible within half a minute at no rate-limit cost at all.
+STREAM_HEALTH_POLL_INTERVAL_SECONDS = 30
 
 # Recent video clip events across all cameras -- see
 # camera-bridge/bridge/control_server.py for the response shape.

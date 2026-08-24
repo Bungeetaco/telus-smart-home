@@ -96,6 +96,23 @@
                     "reauth_required": "需要重新验证",
                     "telus_error": "TELUS/Alarm.com 错误"
                 }
+            },
+            "camera_stream_state": {
+                "name": "视频流状态",
+                "state": {
+                    "connecting": "正在连接",
+                    "streaming": "正在传输",
+                    "reconnecting": "正在重连",
+                    "restart_deferred": "重启已推迟"
+                }
+            },
+            "camera_dropped_frames": {
+                "name": "丢帧数"
+            }
+        },
+        "binary_sensor": {
+            "camera_bridge": {
+                "name": "摄像头桥接"
             }
         },
         "event": {
@@ -123,6 +140,20 @@
                             "other": "其他"
                         }
                     }
+                }
+            }
+        }
+    },
+    "services": {
+        "speak": {
+            "fields": {
+                "conditioning": {
+                    "name": "音频预处理",
+                    "description": "桥接服务在播放前是否对音频应用其默认的 ffmpeg 处理链。设为 false 时按解码后的原样播放。留空则保持桥接服务的默认设置。"
+                },
+                "audio_filter": {
+                    "name": "音频滤镜",
+                    "description": "桥接服务用来替代默认预处理的显式 ffmpeg `-af` 滤镜链（优先于 `conditioning`）。空字符串会完全禁用预处理。留空则保持桥接服务的默认设置。"
                 }
             }
         }

@@ -49,6 +49,26 @@ speak:
       required: false
       selector:
         text:
+    conditioning:
+      name: Audio conditioning
+      description: >-
+        Whether the bridge runs its default ffmpeg conditioning chain over the
+        audio before playing it. Set to false to play the clip exactly as
+        decoded. Leave unset to keep the bridge's own default.
+      required: false
+      selector:
+        boolean:
+    audio_filter:
+      name: Audio filter
+      description: >-
+        An explicit ffmpeg `-af` filter chain the bridge runs instead of the
+        default conditioning (overrides `conditioning`). An empty string
+        disables conditioning entirely. Leave unset to keep the bridge's own
+        default.
+      required: false
+      example: "volume=6dB,highpass=f=200"
+      selector:
+        text:
 
 bypass_sensors:
   name: Bypass sensors

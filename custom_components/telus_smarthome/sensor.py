@@ -16,6 +16,13 @@ worse -- which is what these exist to make visible. CameraSolarPanelSensor joins
 them from the settings side rather than the diagnostics one (E39), and is
 expected to appear on NO camera on most accounts.
 
+The stream-health sensors (CameraStreamStateSensor, CameraDroppedFramesSensor)
+also attach to the camera devices, but read the bridge's own /control/status
+pipeline diagnostics rather than TELUS-side data -- a stream stuck reconnecting
+is otherwise only visible in the bridge's container logs. Their
+StreamHealthCoordinator is shared with binary_sensor.py's bridge-connectivity
+entity via async_get_stream_health_coordinator.
+
 ActivityFeedSensor exposes the full recent Activity list (not just the
 single latest entry event.py's TelusActivityEvent tracks) as an attribute,
 for a dashboard card to render as a scrollable feed -- see that entity's
@@ -57,9 +64,12 @@ from .camera_settings_coordinator import (
 )
 from .const import (
     CAMERA_BRIDGE_METRICS_URL,
+    CAMERA_BRIDGE_STATUS_URL,
     DATA_ACTIVITY_COORDINATOR,
     DATA_CONTROLLER,
+    DATA_STREAM_HEALTH_COORDINATOR,
     DOMAIN,
+    STREAM_HEALTH_POLL_INTERVAL_SECONDS,
     TALK_METRICS_POLL_INTERVAL_SECONDS,
 )
 from .controller import AlarmIntegrationController
@@ -76,6 +86,17 @@ AUTH_HEALTH_STATES = ["ok", "reauth_required", "telus_error"]
 SOLAR_PANEL_CONNECTED = "connected"
 SOLAR_PANEL_NOT_CONNECTED = "not_connected"
 SOLAR_PANEL_STATES = [SOLAR_PANEL_CONNECTED, SOLAR_PANEL_NOT_CONNECTED]
+
+# Every state camera-bridge/bridge/camera_session.py's run_camera_forever can
+# put in a /control/status entry: "connecting" is the initial dict, the other
+# three are its _update_status(state=...) calls. Pinned as a list for the same
+# reason as SOLAR_PANEL_STATES above -- an ENUM sensor whose state is not in
+# its own options logs an error on every update -- but this vocabulary is
+# owned by a separately-deployed bridge, so CameraStreamStateSensor maps a
+# value outside this list (a future bridge with a new state) to None instead
+# of erroring, with the verbatim value still visible in its raw_state
+# attribute.
+STREAM_STATES = ["connecting", "streaming", "reconnecting", "restart_deferred"]
 
 
 async def async_setup_entry(
@@ -104,6 +125,34 @@ async def async_setup_entry(
         TalkdownStatusSensor(metrics_coordinator, config_entry),
         TalkdownFailuresSensor(metrics_coordinator, config_entry),
     ])
+
+    # Per-camera stream-health diagnostics, read off the bridge's own in-memory
+    # /control/status dict (loopback-only -- see
+    # STREAM_HEALTH_POLL_INTERVAL_SECONDS in const.py). The coordinator is
+    # shared with binary_sensor.py's bridge-connectivity entity, hence the
+    # lazy getter. The camera set is the status payload's keys, and entities
+    # are added from a coordinator listener (camera.py's _add_new_cameras
+    # pattern) so a camera the bridge starts reporting later -- or a bridge
+    # that comes up after HA -- gets its sensors with no restart.
+    stream_health_coordinator = await async_get_stream_health_coordinator(hass, config_entry)
+    known_stream_ids: set[str] = set()
+
+    @core.callback
+    def _add_stream_health_sensors() -> None:
+        """Create the two stream-health sensors for any camera id not seen before."""
+        new_ids = set(stream_health_coordinator.data or {}) - known_stream_ids
+        if not new_ids:
+            return
+        known_stream_ids.update(new_ids)
+        entities: list[Entity] = []
+        for camera_id in sorted(new_ids):
+            entities.append(CameraStreamStateSensor(stream_health_coordinator, camera_id))
+            entities.append(CameraDroppedFramesSensor(stream_health_coordinator, camera_id))
+        async_add_entities(entities)
+
+    _add_stream_health_sensors()
+    config_entry.async_on_unload(
+        stream_health_coordinator.async_add_listener(_add_stream_health_sensors))
 
     # Per-camera diagnostics, served by the camera-bridge and attached to the
     # camera devices rather than the synthetic integration device above.
@@ -363,6 +412,9 @@ class TalkdownStatusSensor(_TalkMetricsEntity):
             "last_failure_at": m.get("last_failure_at"),
             "last_played_seconds": last.get("played_seconds"),
             "last_camera_id": last.get("camera_id"),
+            # Talks per transport path (full_duplex / webrtc / srtp) -- which
+            # audio path is actually being used is otherwise invisible from HA.
+            "by_path": m.get("by_path"),
             # Trimmed: the full window is on the bridge; a handful is plenty for a
             # card and keeps the state machine's attribute payload small.
             "recent": recent[-5:],
@@ -402,6 +454,201 @@ class TalkdownFailuresSensor(_TalkMetricsEntity):
             "audio_seconds_played": m.get("audio_seconds_played"),
             "bridge_uptime_seconds": m.get("uptime_seconds"),
         }
+
+
+class StreamHealthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Polls the camera-bridge's /control/status endpoint.
+
+    `data` is the payload's "cameras" dict, keyed by camera id -- the same ids
+    the camera platform gets from /control/cameras. The route answers from an
+    in-memory dict the bridge's own camera loops maintain, entirely over
+    loopback with zero alarm.com cost, which is why this polls at 30s where
+    the TELUS-backed coordinators are deliberately slow.
+
+    Also the truth source for binary_sensor.py's bridge-connectivity entity:
+    `last_poll_ok` records whether the most recent completed poll actually got
+    an answer out of the bridge (None until one completes at all). Its own
+    flag rather than a read of last_update_success, because a missing control
+    secret is a *successful* update here -- the sensors keep their last data,
+    see _async_update_data -- while for connectivity it must read as "the
+    bridge is not answering".
+    """
+
+    def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            LOGGER,
+            config_entry=config_entry,
+            name="TELUS camera stream health",
+            update_interval=timedelta(seconds=STREAM_HEALTH_POLL_INTERVAL_SECONDS),
+        )
+        self.last_poll_ok: bool | None = None
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        try:
+            payload = await bridge_get(self.hass, CAMERA_BRIDGE_STATUS_URL)
+        except Exception as err:  # noqa: BLE001 - aiohttp/timeout variants
+            self.last_poll_ok = False
+            raise UpdateFailed(f"camera bridge status unavailable: {err}") from err
+        if payload is None:
+            # Bridge hasn't written its control secret yet (normal right after a
+            # restart) -- keep whatever we had rather than flapping to unavailable.
+            self.last_poll_ok = False
+            return self.data or {}
+        self.last_poll_ok = True
+        return payload.get("cameras") or {}
+
+    async def async_config_entry_first_refresh_soft(self) -> None:
+        """First refresh that never blocks setup.
+
+        Same promise as TalkMetricsCoordinator's: a bridge that is down (or
+        older than this endpoint) must not abort a whole platform -- these are
+        diagnostics, so they start out unavailable (or, for the connectivity
+        entity, report the outage) and recover on a later poll."""
+        try:
+            await self.async_refresh()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Initial stream health refresh failed; stream-health "
+                         "sensors start unavailable", exc_info=True)
+
+
+async def async_get_stream_health_coordinator(
+    hass: core.HomeAssistant, config_entry: ConfigEntry
+) -> StreamHealthCoordinator:
+    """Return this config entry's shared stream-health coordinator, creating it once.
+
+    Same lazy-stash mechanism as async_get_arming_devices_coordinator /
+    async_get_camera_settings_coordinator: created here by whichever of
+    sensor.py / binary_sensor.py runs first, published to hass.data before any
+    await, popped with the whole per-entry dict on unload so it needs no
+    teardown of its own.
+
+    Unlike those two, the soft first refresh IS awaited inline: it is one
+    loopback request against an in-memory dict, bounded by bridge_client's 10s
+    timeout -- nowhere near the 60s platform budget, with no live Alarm.com
+    fan-out behind it -- and awaiting it means the per-camera sensors exist at
+    setup time on the common path (bridge already up) rather than one poll
+    interval later. The second platform to call this may still get the
+    coordinator with no data yet, which both consumers tolerate: sensor.py
+    adds entities from a listener, and the connectivity entity is unavailable
+    until a poll attempt completes.
+    """
+    store: dict[str, Any] = hass.data[DOMAIN][config_entry.entry_id]
+
+    if (coordinator := store.get(DATA_STREAM_HEALTH_COORDINATOR)) is not None:
+        return coordinator
+
+    coordinator = StreamHealthCoordinator(hass, config_entry)
+    # Published before the refresh is awaited: platforms are set up
+    # concurrently, so a suspension point between the lookup above and this
+    # assignment would let binary_sensor.py build a second poller.
+    store[DATA_STREAM_HEALTH_COORDINATOR] = coordinator
+    await coordinator.async_config_entry_first_refresh_soft()
+    return coordinator
+
+
+class _StreamHealthEntity(CoordinatorEntity[StreamHealthCoordinator], SensorEntity):
+    """Shared plumbing for the per-camera stream-health sensors.
+
+    Attaches to the EXISTING bridge-served camera device by reusing the
+    identifier camera.py registers it under (the same convention as
+    CameraSettingsEntity, including the identifier-only DeviceInfo:
+    name/model/firmware belong to camera.py, and repeating them here would let
+    this entity fight it over the device's registry entry). unique_id and
+    translation_key follow CameraSettingsEntity's shapes too, so these land on
+    the same device card as the camera's other diagnostics.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: StreamHealthCoordinator, camera_id: str, key: str) -> None:
+        """Initialize the entity for one camera."""
+        super().__init__(coordinator)
+
+        self._camera_id = camera_id
+        self._attr_unique_id = f"{camera_id}_{key}"
+        self._attr_translation_key = f"camera_{key}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, camera_id)})
+
+    @property
+    def _status(self) -> dict[str, Any] | None:
+        """This camera's /control/status entry, or None once the bridge drops it."""
+        return (self.coordinator.data or {}).get(self._camera_id)
+
+    @property
+    def available(self) -> bool:
+        """Unavailable when the coordinator has no data at all, or the bridge
+        stops reporting this specific camera."""
+        return super().available and self._status is not None
+
+
+class CameraStreamStateSensor(_StreamHealthEntity):
+    """Where one camera's video pipeline currently is in its lifecycle:
+    `connecting`, `streaming`, `reconnecting` or `restart_deferred` (the
+    bridge's escape hatch fired but restart_guard is holding the process).
+
+    The pipeline's supporting numbers ride along as attributes rather than as
+    more entities -- fps in particular is an attribute BY DESIGN: it is a
+    pinned encoder property the bridge learns once per camera, not a live
+    measurement worth a recorder series of its own.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = STREAM_STATES
+
+    def __init__(self, coordinator: StreamHealthCoordinator, camera_id: str) -> None:
+        super().__init__(coordinator, camera_id, "stream_state")
+
+    @property
+    def native_value(self) -> str | None:
+        """The bridge-reported state, or None for one this build doesn't know.
+
+        The vocabulary is owned by a separately-deployed bridge, and an ENUM
+        sensor whose state is outside its own options errors on every single
+        update -- so an unknown future state degrades to None (unknown) here,
+        with the verbatim value still readable in raw_state below.
+        """
+        state = (self._status or {}).get("state")
+        return state if state in STREAM_STATES else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        status = self._status or {}
+        return {
+            "fps": status.get("fps"),
+            "hardware_encode": status.get("hardware_encode"),
+            "consecutive_failures": status.get("consecutive_failures"),
+            "last_error": status.get("last_error"),
+            "last_frame_at": status.get("last_frame_at"),
+            # The bridge's verbatim state, so a future value this build maps
+            # to None is still visible rather than silently indistinguishable
+            # from "no data".
+            "raw_state": status.get("state"),
+        }
+
+
+class CameraDroppedFramesSensor(_StreamHealthEntity):
+    """Lifetime count of frames the bridge dropped for one camera because the
+    consumer fell behind (janus_client's latency-over-completeness drop).
+
+    Numeric and total_increasing so an automation can trigger on it climbing --
+    sustained drops are a quietly-degrading stream that otherwise only shows as
+    throttled bridge log lines. It resets to 0 when the bridge restarts, which
+    total_increasing handles as a reset rather than a spike (the same reasoning
+    as TalkdownFailuresSensor). The bridge folds each ~165s session's counter
+    into the total as the session ends, so the value lags the live session by
+    up to one rotation.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(self, coordinator: StreamHealthCoordinator, camera_id: str) -> None:
+        super().__init__(coordinator, camera_id, "dropped_frames")
+
+    @property
+    def native_value(self) -> int:
+        return int((self._status or {}).get("dropped_frames") or 0)
 
 
 def _scalar_or_none(value: Any) -> str | float | int | None:

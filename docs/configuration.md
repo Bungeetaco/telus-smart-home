@@ -385,6 +385,7 @@ they define how the integration reaches the camera bridge on loopback:
 | `CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/privacy` |
 | `CAMERA_BRIDGE_TALK_STOP_URL_TEMPLATE` | `http://127.0.0.1:8199/control/cameras/{camera_id}/talk/stop` |
 | `CAMERA_BRIDGE_METRICS_URL` | `http://127.0.0.1:8199/control/metrics` |
+| `CAMERA_BRIDGE_STATUS_URL` | `http://127.0.0.1:8199/control/status` |
 | `CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE` | `http://127.0.0.1:8199/control/automations/{rule_id}/pause` |
 | `CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/automations/{rule_id}/resume` |
 | `CAMERA_BRIDGE_ARMING_DEVICES_URL` | `http://127.0.0.1:8199/control/arming-devices` |
@@ -411,6 +412,7 @@ patch these).
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | see `const.py` | How often clip/event history is re-read, backing the recent-activity sensors and event entities. |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | see `const.py` | How often the automation rules are re-read, backing the rule pause/resume switches. |
 | `TALK_METRICS_POLL_INTERVAL_SECONDS` | see `const.py` | How often the bridge's talkdown counters are re-read, backing the talkdown status and failure sensors. |
+| `STREAM_HEALTH_POLL_INTERVAL_SECONDS` | `30` | How often the bridge's `/control/status` per-camera pipeline diagnostics are re-read, backing the per-camera stream-health sensors and the camera-bridge connectivity entity. Deliberately short where the TELUS-backed polls are cautious, and safely so: the route answers from an in-memory dict the bridge's own camera loops keep current, entirely over loopback — zero Alarm.com requests per cycle. |
 
 Deliberately slow, and the one knob here worth understanding before changing.
 Unlike the camera-list poll — a local read of an in-memory dict on the bridge —

@@ -40,12 +40,16 @@ Alarm.com's normal login flow. The domain is `telus_smarthome`.
   `reauth_required` / `telus_error`), so auth problems are visible as a
   normal HA entity/history graph instead of only in logs or via the reauth
   notification; plus the Recent Events activity-feed sensor, the talkdown
-  status/failure sensors, and the bridge-served per-camera diagnostic
-  (signal / battery / status) and solar-panel sensors — see
-  `docs/ha-integration.md` for the full entity list.
+  status/failure sensors, the bridge-served per-camera diagnostic
+  (signal / battery / status) and solar-panel sensors, and the per-camera
+  stream-health sensors (stream state / dropped frames, off the bridge's
+  `/control/status`) — see `docs/ha-integration.md` for the full entity
+  list.
 - `alarm_control_panel.py`, `lock.py`, `binary_sensor.py`, `cover.py`,
   `light.py`, and `climate.py` mirror the upstream integration's entity
-  platforms, built on the shared `base_device.py` base classes.
+  platforms, built on the shared `base_device.py` base classes;
+  `binary_sensor.py` additionally carries the camera-bridge connectivity
+  sensor, on the stream-health coordinator it shares with `sensor.py`.
 - `switch.py`, `select.py`, `number.py`, and `button.py` carry both the
   upstream-style config-option entities (built on `base_device.py`) and this
   fork's bridge-backed camera/panel settings entities (privacy mode, chime,
