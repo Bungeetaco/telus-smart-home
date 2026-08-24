@@ -23,8 +23,11 @@ opaque UDP.
 
 ## Actions already used by this project
 
-`GetDoorbellCameraList`, `GetLiveVideoStream`, `StartFullDuplex`, `EndLiveStream`,
-`SeamlessLoginNew`, `GetStreamPreloadProperties`, `GetDoorbellAssociatedItems`.
+`GetDoorbellCameraList`, `GetLiveVideoStream`, `StartFullDuplex`,
+`EndLiveStream`, `EndFullDuplex`, `GetCurrentDoorbellSettings`,
+`SeamlessLoginNew`, `LoginAsLogin`. (`GetStreamPreloadProperties` and
+`GetDoorbellAssociatedItems` appear in the captures this survey is built
+from but are not issued by any code in this project.)
 
 Added since this survey: `GetAllSirenDevices`, `ManualSirenStart`,
 `ManualSirenStop`, `GetAllCameraPrivacyModeInfo`, `SetCameraPrivacyModeState`,
@@ -85,9 +88,10 @@ assuming success.
 | `GetWebViewUrl` | Returns `https://www.alarm.com/web/default.aspx?loginAsKey=<key>` — an SSO handoff that opens the **full web portal** in a webview. Sections like Users/access codes are the website, not a separate mobile API. Also a second, independent route into a website session. |
 
 Note the mobile push socket connects as `wss://webskt.alarm.com:8443/?auth=<token>&**ver=A**`,
-which differs from the plain `?auth=` form the library uses. (The README documents
-that mirroring the *portal's* `?f=1&…&ver=A` form was rejected by the server; this
-is the **mobile** form, which is a different thing and untested by us.)
+which differs from the plain `?auth=` form the library uses.
+([ha-integration.md](ha-integration.md) documents that mirroring the
+*portal's* `?f=1&…&ver=A` form was rejected by the server; this is the
+**mobile** form, which is a different thing and untested by us.)
 
 ### Other
 `GetCSContacts`, `GetCSLocationPhoneNumber` (central-station contact details),

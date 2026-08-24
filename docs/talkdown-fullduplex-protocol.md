@@ -49,7 +49,7 @@ orchestration) → `control_server.py` (`POST /control/cameras/{id}/talk`).
 | Fact | Value |
 |---|---|
 | Model | `ADC-VDB750` (firmware `02091`) |
-| MWS `did` | `2048` |
+| MWS `did` | `<did>` |
 | `UnitId` | `<unit-id>` |
 | Website globalDeviceId | `<unit-id>-<did>` (= `UnitId-did`) |
 | LAN IP | `<doorbell-ip>` (private VLAN, same LAN as the bridge `<bridge-ip>`) |
@@ -72,7 +72,7 @@ Real response shape (secrets redacted; one `<cli>` per doorbell under `<dcl>`):
 ```xml
 <gdclr ts="0" s="true" ...>
   <dcl>
-    <cli model="ADC-VDB750" cd="Doorbell" did="2048" UnitId="<unit-id>"
+    <cli model="ADC-VDB750" cd="Doorbell" did="<did>" UnitId="<unit-id>"
          Firmware="02091" StreamProtocol="0" SupportsWebRTC="false"
          susa="true" sdsa="true" sfd="true"
          l="vieweruser" p="<PER-SESSION-PASSWORD>"
@@ -93,7 +93,7 @@ Real response shape (secrets redacted; one `<cli>` per doorbell under `<dcl>`):
 
 | Attr | Meaning | Used for |
 |---|---|---|
-| `did` | MWS device id (`2048`) | `StartFullDuplex`/`EndLiveStream` `DeviceId` |
+| `did` | MWS device id (`<did>`) | `StartFullDuplex`/`EndLiveStream` `DeviceId` |
 | `UnitId` | account/unit id (`<unit-id>`) | forms `global_device_id` |
 | `l` | stream username (`vieweruser`) | HTTP Digest username |
 | `p` | **per-session stream password** | HTTP Digest password |
@@ -108,8 +108,11 @@ Real response shape (secrets redacted; one `<cli>` per doorbell under `<dcl>`):
 
 **Key insight:** `GetDoorbellCameraList` itself mints a stream session — the port
 (e.g. `41925`) is **ephemeral/per-session** and the password `p` is
-**per-session**. Do not cache them across talk sessions; fetch fresh each time
-(the bridge does: `_resolve_doorbell` calls it at the start of every `speak`).
+**per-session**. Never persist them across restarts. The bridge reuses a
+fetched result only within `TALK_DOORBELL_CACHE_TTL_S` (60 s) across talks —
+observed evidence shows the session is not per-talk in practice (the same
+port served 12+ hours), and a stale hit self-corrects via renegotiation — see
+backlog E16.
 
 Parser: `mws_client.parse_doorbell_camera_list` → per-doorbell dict with
 `put_urls` `{cloud,direct,local,public}` and `rtsp_urls` likewise, `stream_user`,
@@ -135,13 +138,19 @@ Transport: `talk_fullduplex.stream_talkdown(put_url, password, audio_source, *, 
   answers the first PUT with `401 WWW-Authenticate: Digest ...`; parse the
   `nonce`/`realm`/`opaque` and authenticate every subsequent PUT.
 - **Body: raw G.711 µ-law (PCMU), 8 kHz, mono. No RTP header.** Sizes are
-  multiples of 80 bytes (10 ms). `talk_fullduplex._encode_mulaw` shells to
-  `ffmpeg -i <src> -ac 1 -ar 8000 -f mulaw pipe:1`, so **any input format works**
-  (WAV, MP3, TTS, a music file). 8 kHz mono µ-law is telephone-grade — music
-  plays but sounds lo-fi; that is a codec limit of the doorbell, not a bug.
-- **TLS:** the doorbell serves HTTPS with a **self-signed cert** → verification is
-  disabled for the PUT connection (`ssl=False`). This is scoped to the talk PUT
-  only.
+  multiples of 80 bytes (10 ms). `talk_fullduplex._open_source` / `_encode`
+  shell to ffmpeg (`-ac 1 -ar 8000 -f mulaw`, command built by
+  `_ffmpeg_args`; streaming encode by default, `TALK_STREAMING_ENCODE`), so
+  **any input format works** (WAV, MP3, TTS, a music file). 8 kHz mono µ-law
+  is telephone-grade — music plays but sounds lo-fi; that is a codec limit of
+  the doorbell, not a bug.
+- **TLS:** the doorbell serves HTTPS with a **self-signed cert**, so CA
+  verification cannot apply. The PUT connection uses an unverified TLS context
+  with the device certificate **pinned by SHA-256**
+  (`TALK_DEVICE_CERT_SHA256` / `TALK_TLS_PIN_MODE`, default `warn`) on the
+  device-terminated endpoint kinds (direct/local/public); the cloud relay — a
+  different host with its own CA-signed certificate — is never pinned and
+  stays unverified (`ssl=False`). See backlog E12.
 - **User-Agent** sent by the app: `GStreamer souphttpclientsink libsoup/3.6.0`
   (the bridge mirrors it).
 - The doorbell/relay replies with a tiny `application/json` ack per chunk.
@@ -173,7 +182,10 @@ it best-effort in a `finally` and always removes the spooled temp clip.
   otherwise falls back to the `GetLiveVideoStream` webrtc/srtp path;
 - `_run_full_duplex`: `StartFullDuplex` → spool temp → `stream_talkdown` →
   (finally) `EndLiveStream` + unlink;
-- everything bounded by `TALK_STREAM_LOOKUP_TIMEOUT_S` / `TALK_SESSION_TIMEOUT_S`;
+- the MWS lookup/arm/teardown steps are each bounded by
+  `TALK_STREAM_LOOKUP_TIMEOUT_S`; the streaming deadline derives from the
+  audio length (clip + margin) rather than a fixed timeout;
+  `TALK_SESSION_TIMEOUT_S` caps the webrtc/srtp **fallback** path only;
 - **no secrets logged** (password, SessionToken, nonce) — only non-secret routing
   facts (endpoint kind, chunk/byte counts, host).
 
@@ -219,10 +231,13 @@ Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
 
 ## Caveats / open items
 
-- Per-session `p` + ephemeral port ⇒ always call `GetDoorbellCameraList` fresh per
-  talk; never persist them.
-- `stream_talkdown` re-challenges (401) and retries a chunk once; if the doorbell
-  rotates the nonce mid-stream beyond that, add re-challenge handling.
+- Per-session `p` + ephemeral port ⇒ never persist them across restarts; the
+  bridge reuses a fetched `GetDoorbellCameraList` result only within
+  `TALK_DOORBELL_CACHE_TTL_S` (60 s), self-correcting on a stale hit via
+  renegotiation (backlog E16).
+- Digest challenges — including rotated/stale nonces mid-stream — are absorbed
+  by aiohttp's `DigestAuthMiddleware`; a second consecutive raw `401`
+  escalates to an in-place reconnect. See backlog E7/E11/E21.
 - Live-verified  (see "Live verification" section below): plays at the
   door, sustains >=10 min continuous, no renegotiation needed. Deploy/enable
   steps in `docs/talkdown-DEPLOY.md`.

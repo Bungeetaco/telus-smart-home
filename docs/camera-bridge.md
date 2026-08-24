@@ -420,13 +420,14 @@ fd/socket/child unconditionally.
 
 Defined by `Dockerfile`, `entrypoint.sh`, and `docker-compose.yml`.
 
-- **Base image**: `python:3.12-slim`. Installs `ffmpeg`, `intel-media-va-driver`,
+- **Base image**: `python:3.14-slim`. Installs `ffmpeg`, `intel-media-va-driver`,
   and `mesa-va-drivers` (userspace VAAPI drivers for Intel and AMD, keyed off the
   runtime PCI device, so both ship unconditionally). `h264_vaapi`/`h264_nvenc` are
   already in Debian's ffmpeg — no extra package is needed for NVIDIA. All Python
   deps resolve to manylinux wheels (`pip install --only-binary :all:`), so no
   build toolchain ships in the image.
-- **MediaMTX**: pinned static binary (`v1.19.2`) downloaded at build time.
+- **MediaMTX**: pinned static binary downloaded at build time (the pinned
+  version is the `MEDIAMTX_VERSION` ARG in the `Dockerfile`).
 - **Non-root**: runs as a dedicated `bridge` user (uid/gid 1500). All ports are
   >1024; everything written lives under `/app` or the bind-mounted `/shared`
   (host-side ownership must match this uid).
@@ -470,10 +471,25 @@ environment variables:
 | `MEDIAMTX_RTSP_PORT` | `8554` | RTSP listen port. |
 | `CONTROL_PORT` | `8199` | Loopback control API port (see [control-api.md](control-api.md)). |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
+| `CONTROL_ACCESS_LOG` | `false` | Per-request access logging on the control endpoint; off by default (see [configuration.md](configuration.md)). |
 | `HOST_SHARED_DIR` | Supervised path | Host side of the `/shared` mount. |
 | `RENDER_GID` | `992` | Host `render` group GID for `/dev/dri` access. |
 | `BRIDGE_MEM_LIMIT` / `BRIDGE_CPU_LIMIT` | `768m` / `2.0` | Container resource caps. |
-| `TALKDOWN_ENABLED` | `false` | Opt-in two-way audio (ships inert). |
+| `TALKDOWN_ENABLED` | `true` | Two-way audio, enabled by default; set `false` to disable (the talk route then returns `403 talkdown_disabled`). |
+
+### Logs
+
+The bridge logs to stdout/stderr only (no file handlers), so
+`sudo docker logs telus-cam-bridge` is the one place its logs live.
+`docker-compose.yml` caps the json-file driver at 10 MB × 3 files, so retained
+history is bounded at ~30 MB and rotation needs no host configuration. Every
+line is written to be greppable during an incident: it carries the camera or
+device id, the cause, and — where the code knows it — what happens next.
+Per-request access lines are off by default (`CONTROL_ACCESS_LOG`) so routine
+HA polling cannot age real warnings out of that window. Log lines never carry
+secrets: signed snapshot URLs, media-URL query strings (which can hold signed
+tokens), RTSP/PUT credentials and session tokens are all redacted before
+logging.
 
 ### Recreating the container
 

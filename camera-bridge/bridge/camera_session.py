@@ -310,8 +310,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     consecutive_failures += 1
                 _update_status(state="reconnecting", consecutive_failures=consecutive_failures,
                                last_error=repr(exc))
-                log.exception("%s: camera session failed, reconnecting in %ss",
-                              camera["id"], backoff)
+                # For a RateLimited failure the actual sleep is the server's own
+                # Retry-After (logged with the cause and delay just below), not
+                # this loop's fixed backoff -- claiming "reconnecting in 2s" and
+                # then sleeping 100+s put two contradictory delays in the log
+                # for one event. Message text only; the handling is unchanged.
+                log.exception("%s: camera session failed%s", camera["id"],
+                              "" if rate_limited else f", reconnecting in {backoff}s")
                 if consecutive_failures >= c.MAX_CONSECUTIVE_SESSION_FAILURES:
                     # This loop's own backoff already absorbs ordinary transient
                     # failures (auth blips, brief camera dropouts, etc). Reaching

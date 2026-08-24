@@ -116,10 +116,10 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   set (was None) so the bridge can fetch the absolute `/api/tts_proxy` URL -- set
   to `http://<ha-host-ip>:8123` via WS `config/core/update`. All speak audio gets
   the default conditioning.
-  Still TODO: wire the actual door-greeting AUTOMATION (the example
-  `docs/talkdown-automation.yaml` is a placeholder; if you already run
-  door-greeting logic elsewhere, integrate talkdown there rather than as a
-  standalone rule).
+  Wiring an actual door-greeting automation is a deployment choice left to the
+  operator, not project work: the example `docs/talkdown-automation.yaml` is a
+  placeholder, and an install that already runs door-greeting logic elsewhere
+  should integrate talkdown there rather than as a standalone rule.
 
 ## Audio quality / transport
 - **E4 (CLOSED -- not achievable on this device) L16 codec.**

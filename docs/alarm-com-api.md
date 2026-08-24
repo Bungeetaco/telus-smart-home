@@ -475,8 +475,11 @@ in one call:
 | `StreamProtocol` | stream protocol ordinal (`0` = RTSP) |
 | `sid` / `cstet` | session id / session expiry |
 
-The port embedded in these URLs and the password `p` are **ephemeral / per-session** —
-always fetch fresh, never cache. Blank attributes normalise to none.
+The port embedded in these URLs and the password `p` are **ephemeral /
+per-session** — never persist them; a fetched result may be reused only
+briefly (this project uses a 60 s in-memory TTL, `TALK_DOORBELL_CACHE_TTL_S`,
+with renegotiation as the self-correction on a stale hit — backlog E16).
+Blank attributes normalise to none.
 
 #### `StartFullDuplex` / `EndLiveStream` / `EndFullDuplex`
 
@@ -506,8 +509,12 @@ the MWS XML** at all — it is a chunked HTTP PUT directly to the doorbell:
    - `Authorization: Digest username="vieweruser", realm="Alarm.com", algorithm=MD5,
      qop=auth`, per-request incrementing `nc`, password = the per-session `p`. The
      server nonce comes from the doorbell's `401` challenge.
-   - Body = **raw G.711 µ-law (PCMU), 8 kHz mono**, ~20 ms/chunk (~160 bytes), no RTP
-     header. The doorbell serves HTTPS with a self-signed cert (disable TLS verify).
+   - Body = **raw G.711 µ-law (PCMU), 8 kHz mono**, no RTP header; chunk sizes
+     are multiples of 80 bytes (10 ms). The bridge sends 40 ms (320 B) chunks;
+     the app's exact observed chunk size is not reliably recorded. The doorbell
+     serves HTTPS with a self-signed cert, so CA verification cannot apply;
+     this project pins the device certificate's SHA-256 instead — see backlog
+     E12.
 5. `EndLiveStream` (and/or `EndFullDuplex`) to tear down.
 
 This transport (chunked Digest µ-law PUT) is specific to this doorbell model. The

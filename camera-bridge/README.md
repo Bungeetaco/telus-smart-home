@@ -83,7 +83,7 @@ to software automatically per-`start()` call (see `ffmpeg_sink.py`'s module
 docstring) -- `ENCODE_BACKEND` only picks which hardware path is *attempted*
 first.
 
-## The 120s proactive session-rotation fix -- do not regress
+## The 165s proactive session-rotation fix -- do not regress
 
 Alarm.com kills a video session **server-side at ~180s**, unconditionally,
 matching the `"timeout_seconds": 180` sent in the Janus mountpoint-create
@@ -96,11 +96,10 @@ and the rotation loop in `camera_session.py`'s `run_camera_forever`):
 
 - Proactively **rotates every camera session every 165s**, before Alarm.com's
   ~180s server-side kill, so the RTSP feed never goes dark waiting for a
-  server-initiated teardown. (This was 120s in an earlier design that tore the
-  ffmpeg publisher down along with each session; once the publisher was made to
-  outlive rotations and the gap bridged by repeating the last frame, the margin
-  could be tightened to 15s -- matching `FRAME_SILENCE_TIMEOUT_S` -- to keep
-  those frame-hold gaps as infrequent as possible.)
+  server-initiated teardown. (The 15s margin -- matching
+  `FRAME_SILENCE_TIMEOUT_S` -- is safe because the ffmpeg publisher outlives
+  rotations and the gap is bridged by repeating the last frame; the margin is
+  kept this tight to keep those frame-hold gaps as infrequent as possible.)
 - Independently detects a **dead session via frame silence**
   (`FRAME_SILENCE_TIMEOUT_S = 15`) -- if no frame arrives for 15s, the session
   is torn down and reconnected immediately, without waiting for the rotation
@@ -163,8 +162,9 @@ ffplay "rtsp://bridge:$(sudo cat /var/lib/homeassistant/share/telus_cam_bridge/r
 
 ## Credentials
 
-By default, read once at startup from `.env`
-(`TELUS_EMAIL` / `TELUS_PASSWORD`, plus `MEDIAMTX_RTSP_PORT` and `LOG_LEVEL`).
+By default, credentials are read once at startup from `secrets.env`
+(`TELUS_EMAIL` / `TELUS_PASSWORD`); non-secret settings such as
+`MEDIAMTX_RTSP_PORT` and `LOG_LEVEL` come from `.env`.
 
 **This bridge holds its own separate copy of the TELUS username/password from
 the Home Assistant `telus_smarthome` integration.** They used to be
@@ -197,6 +197,15 @@ Body: {"username": "<telus email>", "password": "<telus password>"}
 GET http://127.0.0.1:8199/control/health   -- no auth, {"status": "ok"}
 ```
 
+The same listener serves the rest of the control API (see
+`docs/control-api.md`), including `GET /control/status` -- per-camera
+`state`, `consecutive_failures`, `last_frame_at`, `fps`, `hardware_encode`,
+`dropped_frames`, `last_error`, same bearer auth as every other endpoint.
+`camera_session.py`'s `run_camera_forever` updates its own entry directly;
+the control server just reflects it. `dropped_frames` is the camera's
+lifetime consumer-fell-behind drop total since process start, accumulated as
+each video session ends.
+
 Credentials are swapped in by reassigning the module attributes
 `config.TELUS_EMAIL` / `config.TELUS_PASSWORD` -- `telus_auth.py`'s
 `TelusSession.login()` reads them lazily (as `c.TELUS_EMAIL`/`c.TELUS_PASSWORD`
@@ -215,9 +224,13 @@ startup if it is group/world-readable, with a warning naming the old mode; if
 the chmod fails (e.g. the file is owned by another uid on the shared mount) a
 warning is logged and the secret is served as-is -- a permissions problem
 never regenerates it, so the HA side keeps authenticating.
-Rotating it is manual: delete the file and restart this container (it
-regenerates); the HA side re-reads the file on its next credential push
-attempt, since it doesn't cache the secret in memory across HA restarts.
+The secret rotates automatically every
+`config.CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days by default) via an atomic
+rewrite of `control_secret` -- safe with no coordination needed, since HA's
+`bridge_client.py` re-reads the file fresh on every request rather than
+caching it. Manual rotation works too: delete the file and restart this
+container (it regenerates); the HA side re-reads the file on its next
+request for the same reason.
 
 Both `login()` call sites that existed before this endpoint (the initial
 startup login, and the 401-triggered relogin inside
@@ -242,6 +255,11 @@ and write these files without any new host path or supervisor config change.
   Read back on every later start and built into the RTSP URLs this bridge
   publishes with and reports over `/control/cameras`. See "RTSP
   authentication" above.
+- `mobile_auth.json` -- written by this bridge's mobile MWS auth
+  (`mobile_auth.py`): a persisted synthetic device uid plus the rolling
+  seamless-login token, so a restart re-logs-in silently instead of re-running
+  the full SSO bootstrap. The token is credential-grade; the file never holds
+  the short-lived session token itself.
 - `restart_guard.json` -- `{"exits": [<unix ts>, ...]}`, written by this bridge
   every time it deliberately ends its own process (camera_session.py's
   escape hatch, or a terminal startup-login failure). It lives here purely
@@ -254,8 +272,9 @@ and write these files without any new host path or supervisor config change.
   the HA integration on **every** successful credential update (reconfigure or
   reauth), regardless of whether the live push to `/control/credentials`
   succeeded. This is the fallback path:
-  - **On startup**, this bridge adopts `credentials.json` over `.env` if
-    present (`_load_fallback_credentials_if_present` in `main.py`) -- so a
+  - **On startup**, this bridge adopts `credentials.json` over the
+    `secrets.env` credentials if present
+    (`_load_fallback_credentials_if_present` in `main.py`) -- so a
     freshly recreated/restarted container picks up the latest credentials
     even if it missed the live push entirely (e.g. it was down at the time).
   - **While running**, a background task (`watch_credentials_fallback`)
@@ -266,7 +285,8 @@ and write these files without any new host path or supervisor config change.
   - **A corrupt file never kills the bridge.** Truncated JSON, invalid
     UTF-8 (a torn write on the shared mount), or valid JSON that is not an
     object is logged as a warning and ignored on both paths: startup keeps
-    the `.env` credentials, the watcher skips that cycle and keeps polling.
+    the `secrets.env` credentials, the watcher skips that cycle and keeps
+    polling.
     The bad file outlives any restart, so crashing on it would restart-loop
     the container through repeated SSO logins. Pinned by
     `tests/test_credentials_fallback.py`.
@@ -289,18 +309,6 @@ never blocked on this bridge being reachable.
   actually work, or repeated failed attempts against TELUS's live auth
   endpoint. Would need real design work (and that capture) if it ever
   becomes necessary.
-- `GET /control/status` (per-camera `state`, `consecutive_failures`,
-  `last_frame_at`, `fps`, `hardware_encode`, `dropped_frames`, `last_error`)
-  -- added, same auth as every other endpoint. `camera_session.py`'s
-  `run_camera_forever` updates its own entry directly; the control server just
-  reflects it. `dropped_frames` is the camera's lifetime consumer-fell-behind
-  drop total since process start, accumulated as each video session ends.
-- The control secret now rotates automatically every
-  `config.CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days by default) via an
-  atomic rewrite of `control_secret` -- safe with no coordination needed
-  since HA's `bridge_client.py` re-reads the file fresh on every request
-  rather than caching it. Manual rotation (delete the file, restart the
-  container) still works too.
 
 ## Recreating the container
 

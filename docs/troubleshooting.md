@@ -29,6 +29,7 @@ the component READMEs.
 - [A bypass appears to do nothing](#a-bypass-appears-to-do-nothing)
 - [A control answers `429`, or Home Assistant keeps retrying into a rate limit](#a-control-answers-429-or-home-assistant-keeps-retrying-into-a-rate-limit)
 - [An arming-device write answers `404 unknown_device`](#an-arming-device-write-answers-404-unknown_device)
+- [Checking whether talkdown has been failing](#checking-whether-talkdown-has-been-failing)
 
 ---
 
@@ -401,7 +402,7 @@ playing.
 | Status | Meaning | Fix |
 | --- | --- | --- |
 | **403** | Talkdown has been **disabled**. It is enabled by default, so this means `TALKDOWN_ENABLED` is set to a false value in the bridge's `.env`. | Remove that line (or set it `true`) and recreate the container so the change is picked up (`docker compose up -d`). |
-| **409** | A talk is **already in progress** for that camera. The transport is single-session; a second concurrent talk is rejected rather than interleaved. | Wait for the current clip to finish (or cancel it, if a cancel path is available) before starting another. |
+| **409** | A talk is **already in progress** for that camera. The transport is single-session; a second concurrent talk is rejected rather than interleaved. | Wait for the current clip to finish, or cancel it with `POST /control/cameras/{id}/talk/stop` (or the integration's `stop_speaking` service), then retry. |
 | **422** | **No upstream audio** could be produced — the request named an `audio_url`/`audio_path` (or TTS `message`) that yielded nothing to send. | Verify the audio source is reachable *from the bridge* and returns real audio. For an HTTP TTS URL, confirm the bridge can fetch it (loopback/`internal_url` reachability); for a file, confirm the path exists inside the container. |
 
 Also note **400**: the endpoint rejects a `codec` other than `mulaw` on this

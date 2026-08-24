@@ -154,17 +154,28 @@ grepping container logs.
       "dropped_frames": 0,
       "last_error": null
     }
+  },
+  "talk": {
+    "attempts": 3,
+    "succeeded": 1,
+    "stopped": 1,
+    "failed": 1,
+    "last_failure_reason": "media_error"
   }
 }
 ```
+
+The top-level `talk` key is a five-field summary of the talkdown counters
+(`attempts`, `succeeded`, `stopped`, `failed`, `last_failure_reason`); the full
+counters live at [`/control/metrics`](#get-controlmetrics) below.
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `state` | string | One of `streaming`, `connecting`, `reconnecting`, `restart_deferred` |
 | `consecutive_failures` | int | Reconnect attempts since the last good frame |
 | `last_frame_at` | int \| null | Unix timestamp of the most recent frame, or `null` |
-| `fps` | number | Current frame rate |
-| `hardware_encode` | bool | Whether the pipeline is using hardware encode |
+| `fps` | number \| null | Current frame rate; `null` until the camera first reaches the `streaming` state |
+| `hardware_encode` | bool \| null | Whether the pipeline is using hardware encode; `null` until the camera first reaches the `streaming` state |
 | `dropped_frames` | int | Lifetime total, since process start, of frames dropped because the consumer fell behind the decoder (the ingest queue's latency-over-completeness drop — see [camera-bridge.md](camera-bridge.md)). Present (`0`) from the camera's first status entry. The total is accumulated when each ~165 s video session **ends** — on healthy rotation and on the failure paths alike — not per frame, so it can lag the live session's drops by up to one rotation. Resets with the process, like the rest of this response |
 | `last_error` | string \| null | Most recent error string, or `null` |
 
@@ -194,6 +205,7 @@ curl -s -H "Authorization: Bearer $SECRET" $BASE/control/metrics
 ```json
 {
   "talk": {
+    "since": 1787500350.2,
     "uptime_seconds": 52.5,
     "attempts": 3,
     "succeeded": 1,
@@ -207,6 +219,8 @@ curl -s -H "Authorization: Bearer $SECRET" $BASE/control/metrics
     "renegotiations": 0,
     "audio_seconds_played": 8.3,
     "talk_seconds": 7.9,
+    "last_success_at": 1787500390.1,
+    "last_failure_at": 1787500402.7,
     "last_failure_reason": "media_error",
     "recent": [{"at": 1787500402.7, "camera_id": "<unit-id>-<did>",
                 "outcome": "ok", "wall_seconds": 4.89, "played_seconds": 5.0}]
@@ -218,6 +232,9 @@ Notes:
 
 - **In-memory only.** They reset when the bridge restarts, which is what keeps
   them free; the log remains the durable record.
+- `since` is the Unix timestamp the counters started at (process start);
+  `last_success_at` and `last_failure_at` are Unix timestamps or `null` when no
+  talk has yet succeeded/failed.
 - `attempts` counts talks that actually started. A request refused because one was
   already running is counted separately as `rejected_in_progress`, not as an
   attempt.
@@ -547,10 +564,14 @@ a different value will fix. Both leave the camera untouched.
 
 Reads one camera's audio, image and video/clip settings, its status LED,
 notification and solar-panel sections, and its siren and privacy records — eight
-keys. Uncached: a settings value a UI renders as a slider must not be stale. Each
-call is **four website GETs and two mobile MWS reads** (plus one more, cached for
-much longer, for the chime-type names), which makes it the heaviest read here;
-the Home Assistant side polls it every 120 s, and you should not poll it tighter.
+keys. The website settings are uncached: a settings value a UI renders as a
+slider must not be stale. Each call is **four website GETs plus at most two
+mobile MWS reads** (plus one more MWS read, cached for much longer, for the
+chime-type names), which makes it the heaviest read here. The two MWS actions
+are account-wide, so their results — failures included — are cached for 30 s
+and shared across every camera: a sequential sweep over all cameras pays them
+once, not per camera. The Home Assistant side polls this route every 120 s,
+and you should not poll it tighter.
 
 `led`, `notifications` and `solar` all come out of the **same** upstream
 `generalSettings` document and cost one request between them.
@@ -1007,8 +1028,10 @@ the whole read with a `502`. A caller must therefore distinguish three states �
 two. Treating `null` as `false` turns a transient MWS blip into "this camera has
 no siren"; treating it as `true` offers a control that will fail.
 
-Because these are two extra MWS POSTs on top of three website GETs, this route
-is the most expensive read in the API. Poll it slowly.
+Because these are up to two extra MWS POSTs on top of four website GETs, this
+route is the most expensive read in the API. Poll it slowly. The MWS halves are
+account-wide and cached for 30 s across all cameras (failures included), so a
+sweep over several cameras pays them once.
 
 **Errors:** `401 bad_secret`, `404 unknown_camera`, `429 rate_limited`,
 `502 telus_error`. Note there is **no `503` here** — unlike the siren and
@@ -1598,6 +1621,7 @@ Sets picture settings. Every field is optional; only the ones sent are changed
 | `ir_led_enabled` | bool | Infrared illuminator |
 | `ir_sensitivity` | int | IR sensitivity; must be within the device-reported range, else `400` |
 | `night_vision_enabled` | bool | Night vision |
+| `max_exposure` | int | Must be one of the device's `max_exposure_options`. Unsupported on both reference cameras (`canSetMaxExposure` false), so expect `422 unsupported` there; routed because another model may offer it, and never exercised against hardware |
 
 Any other key is a `400 malformed`, as is a value of the wrong type or a number
 outside the range the device published. A recognised key the device reports no
@@ -1634,6 +1658,7 @@ the image route.
 | `pretrigger_enabled` | bool | Pre-trigger recording (the seconds before the event) |
 | `keep_clips_days` | int | Cloud retention in days, checked against whichever the device publishes — its `keep_clips_days_options` list and/or a min/max. **`-1` is a legitimate option meaning "keep forever"**, so do not filter negatives out on the assumption that a retention must be positive |
 | `alarm_clip_duration` | int | Alarm-clip length in seconds; must be within the device-reported range, else `400` |
+| `camera_triggered_clip_duration` | int | Camera-triggered clip length in seconds; checked against the device's published options/range like the other numeric fields |
 | `live_resolution` | string | The **live stream's** resolution — the exception in this route, and the one field here that is not about clips. Must be one of `live_resolution_options`. Unlike `clip_resolution` it **does** change what this bridge restreams (verified live), though only from the next stream renegotiation |
 
 Any other key, or a value of the wrong type, is a `400 malformed`. A recognised
@@ -2079,8 +2104,10 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 ## Home Assistant client
 
 The HA integration talks to this API through
-`custom_components/telus_smarthome/bridge_client.py`, used by `camera.py`,
-`event.py`, and `binary_sensor.py`. Two helpers matter:
+`custom_components/telus_smarthome/bridge_client.py`, used throughout the
+integration — `camera.py`, `event.py`, `switch.py`, `sensor.py`, the
+settings and arming-device coordinators, and the speak/clip/bypass/unpair
+services. Two helpers matter:
 
 - **`read_control_secret()`** reads the shared secret off the mounted share
   (`/share/telus_cam_bridge/control_secret`), stripped. It is blocking file I/O

@@ -70,7 +70,8 @@ The environment variables the bridge actually reads, grouped by concern:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `LOG_LEVEL` | `INFO` | Log verbosity (standard Python levels, e.g. `DEBUG`, `INFO`, `WARNING`). |
+| `LOG_LEVEL` | `INFO` | Log verbosity (standard Python levels, e.g. `DEBUG`, `INFO`, `WARNING`). The bridge logs only to stdout/stderr; the Docker layer owns retention (`docker-compose.yml` caps the json-file log at 10 MB × 3 files), so `docker logs telus-cam-bridge` is the one place logs live and history is bounded at ~30 MB. |
+| `CONTROL_ACCESS_LOG` | `false` | Per-request access logging (`aiohttp.access`, INFO) for the control endpoint. Off by default: every request is loopback Home Assistant polling, and the lines measure at roughly a quarter of all log output — enough to age real warnings out of the bounded log window within days. Handler-level warning/error logging is unaffected; set `true` to watch individual requests. With the default, `grep aiohttp.access` over the container log finds nothing. |
 | `CONTROL_PORT` | `8199` | TCP port for the local control API. Bound to loopback (`127.0.0.1`) only — never reachable from off-host, since both this container and the HA container run `--network host`. |
 
 #### Video / encode
@@ -101,6 +102,7 @@ alongside the other overrides:
 | `BRIDGE_MEM_LIMIT` | `768m` | Container memory cap. Default leaves generous headroom over measured live usage (~326 MB RSS for 2 cameras). |
 | `BRIDGE_CPU_LIMIT` | `2.0` | Container CPU cap (cores). Default is well above measured usage (~14–31% of one core for 2 cameras). |
 | `HOST_SHARED_DIR` | `/var/lib/homeassistant/share/telus_cam_bridge` | Host-side path for the directory shared with the HA container. Default matches the Home Assistant Supervised layout; override for a different install type or non-default path. |
+| `RENDER_GID` | `992` | GID of the host `render` group, granted to the container user (`group_add`) for `/dev/dri` access (hardware encode). Set it to the output of `getent group render` if the host's GID differs. |
 
 #### Talkdown (two-way audio)
 
@@ -132,7 +134,7 @@ for the full talk mechanism.
 | `TALK_MAX_RECONNECTS` | no | `2` | Consecutive in-place retries — same credentials, new socket, fresh Digest handshake — before escalating to a full renegotiation. Two failures do not need new credentials: a dropped keep-alive connection, and a `401` the Digest middleware could not clear by itself. Renegotiation is three round trips of dead air and is bounded, so spending one on a problem a new socket fixes can cost the talk later. Any successful chunk resets the counter, and the safety deadline is deliberately *not* extended for a reconnect, so a link that blips forever still terminates. `0` sends every failure straight to renegotiation. |
 | `TALK_MAX_RENEGOTIATIONS` | no | `2` | How many times a talk may fetch a fresh doorbell session and resume from the exact byte offset it reached. The PUT URL, port and password are per-session, so a long clip or a network blip can outlive one; bounded so a persistently broken session fails the request instead of looping. |
 | `TALK_RENEGOTIATE_MARGIN_S` | no | `20` | When a session expiry can be determined, swap this many seconds early rather than waiting for the first failed PUT — a proactive swap costs one silent gap of a few hundred ms instead of a failed chunk plus a teardown/setup round trip. |
-| `TALK_DEVICE_CERT_SHA256` | **yes** (`TALK_DEVICE_CERT_SHA256`) | the fingerprint observed on one ADC-VDB750 (the literal is in `config.py`) | SHA-256 of the DER certificate the doorbell presents on its audio endpoint. Change it after a firmware update, a factory reset or a replacement unit — all three legitimately change the certificate, and a mismatch logs the presented fingerprint so it can be pasted here. Set it empty to run unpinned; a value that is not a 32-byte hex digest is rejected at startup with an error and the talk continues unpinned. |
+| `TALK_DEVICE_CERT_SHA256` | **yes** (`TALK_DEVICE_CERT_SHA256`) | the fingerprint observed on one ADC-VDB750 (the literal is in `config.py`) | SHA-256 of the DER certificate the doorbell presents on its audio endpoint. Change it after a firmware update, a factory reset or a replacement unit — all three legitimately change the certificate, and a mismatch logs the presented fingerprint so it can be pasted here. Set it empty to run unpinned; a value that is not a 32-byte hex digest is rejected with a logged error when a talk first constructs the pin (not at startup), and the talk continues unpinned. |
 | `TALK_TLS_PIN_MODE` | **yes** (`TALK_TLS_PIN_MODE`) | `warn` | `warn` verifies the fingerprint, logs loudly on a mismatch (with both values and the fix) and **connects anyway**; `enforce` refuses the connection on a mismatch; `off` disables the check. See below. |
 | `TALK_TLS_PIN_ENDPOINT_KINDS` | no | `("direct", "local", "public")` | Which endpoint kinds the pin applies to. The fingerprint is the *device's* own, so it is only meaningful where TLS terminates at the device: the two LAN URLs and the site's WAN address. The `cloud` endpoint is the vendor relay — a different host with its own CA-signed certificate — and pinning the doorbell's fingerprint there would break WAN talkdown outright. |
 
@@ -246,6 +248,15 @@ because the hatch kills the process:
 Fixed upstream/auth constants (`TELUS_BASE`, `AUTH_GATEWAY`, `TELUS_CLIENT_ID`,
 `TELUS_AUTH_PROVIDER`, `RTSP_USER`) are protocol constants and are not
 configurable.
+
+**Rotating the shared secrets.** The control secret rotates automatically every
+`CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days); to rotate it manually, delete
+`/shared/control_secret` and restart the bridge container — it regenerates the
+file, and HA reads the secret fresh off disk on every request, so no HA-side
+action is needed. To rotate the RTSP password, delete `/shared/rtsp_password`,
+restart the bridge (`entrypoint.sh` regenerates it), then restart Home
+Assistant so its camera entities re-read the stream URLs from
+`/control/cameras`.
 
 ---
 
@@ -377,7 +388,10 @@ they define how the integration reaches the camera bridge on loopback:
 | `CAMERA_BRIDGE_AUTOMATION_PAUSE_URL_TEMPLATE` | `http://127.0.0.1:8199/control/automations/{rule_id}/pause` |
 | `CAMERA_BRIDGE_AUTOMATION_RESUME_URL_TEMPLATE` | `http://127.0.0.1:8199/control/automations/{rule_id}/resume` |
 | `CAMERA_BRIDGE_ARMING_DEVICES_URL` | `http://127.0.0.1:8199/control/arming-devices` |
+| `CAMERA_BRIDGE_ARMING_DEVICE_URL_TEMPLATE` | `http://127.0.0.1:8199/control/arming-devices/{device_id}` |
 | `CAMERA_BRIDGE_ARMING_DEVICE_DISARMING_URL_TEMPLATE` | `http://127.0.0.1:8199/control/arming-devices/{device_id}/disarming` |
+| `CAMERA_BRIDGE_ARMING_DEVICE_PARTITION_URL_TEMPLATE` | `http://127.0.0.1:8199/control/arming-devices/{device_id}/enrolled-partition` |
+| `CAMERA_BRIDGE_BLUETOOTH_DISARMING_URL` | `http://127.0.0.1:8199/control/bluetooth-disarming` |
 | `CAMERA_BRIDGE_PARTITIONS_URL` | `http://127.0.0.1:8199/control/partitions` |
 | `CAMERA_BRIDGE_PARTITION_BYPASS_URL_TEMPLATE` | `http://127.0.0.1:8199/control/partitions/{partition_id}/bypass` |
 | `CONF_CLIP_LINK_SECRET` | `clip_link_secret` (entry data key; see reauth note above) |
@@ -401,7 +415,8 @@ patch these).
 Deliberately slow, and the one knob here worth understanding before changing.
 Unlike the camera-list poll — a local read of an in-memory dict on the bridge —
 each cycle is a real round trip to TELUS per camera — two bridge requests, and
-six upstream reads behind them. These values only change when someone edits them in the app or
+nine upstream reads behind them (four website settings documents, two mobile
+reads for the siren and privacy records, and three diagnostics reads). These values only change when someone edits them in the app or
 the portal, and Alarm.com's rate limits are undocumented and can lock an account
 (see [troubleshooting.md](troubleshooting.md#alarmcom-rate-limiting-http-429)), so
 shortening it buys responsiveness nobody needs at a real account-level risk. A

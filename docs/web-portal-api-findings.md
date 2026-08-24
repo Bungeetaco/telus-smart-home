@@ -41,16 +41,18 @@ The same call carries a `chimeToneSetting` object: `isIndoorChimeOn`,
 `selectedChimeType` (+`chimeTypeOptions`), `isOutdoorToneOn`, and
 `outdoorToneVolumeValue` with range 0–3 — i.e. the doorbell's own chime is
 configurable too. **[implemented]** for `isIndoorChimeOn` / `isOutdoorToneOn` /
-`outdoorToneVolumeValue` via `POST …/settings/chime`; `selectedChimeType` is read
-back in `raw` but not yet settable.
+`outdoorToneVolumeValue` via `POST …/settings/chime` — and `selectedChimeType`
+too, settable as `chime_type` on the same route (validated against the
+device's offered options), with the option labels merged from the mobile API
+and an HA select entity — see backlog E27.
 
 ## Other camera settings, all writable
 
 | Endpoint | Controls | Status |
 | --- | --- | --- |
-| `PUT /web/api/video/settings/imageSettings/{id}` | brightness, contrast, saturation, sharpness (each with min/max), HDR, image flip, max exposure, and a nested `infraredSetting` (IR LEDs, IR sensitivity, night vision) | **implemented** — `POST …/settings/image`; max exposure not modelled. No HA entity yet |
-| `PUT /web/api/video/settings/videoConfigs/{id}` | clip resolution (`480x480` / `960x960` / `1440x1440`), clip quality, alarm-clip duration, camera-triggered clip duration, pre-trigger recording, keep-clips-for-days — all of them in the **`savedVideoSetting`** relationship, not in the document's own attributes (see the wire-shape section) | **implemented** — `POST …/settings/video`; camera-triggered clip duration not modelled. No HA entity yet |
-| `PUT /web/api/video/settings/generalSettings/{id}` | **the status LED** (`ledLightSetting`: `canTurnOnOffLedLight`, `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`, `ledBrightness`, `ledLightColor`), the doorbell's TELUS-side notification toggles (`doorbellNotificationSetting`), and solar-panel status. "General camera settings" undersold this one badly — see the note below | **implemented** — `POST …/settings/led` and `POST …/settings/notifications`, both with HA switches. `notificationFormat` is read-only (E40) and solar panel is unmodelled (E39) |
+| `PUT /web/api/video/settings/imageSettings/{id}` | brightness, contrast, saturation, sharpness (each with min/max), HDR, image flip, max exposure, and a nested `infraredSetting` (IR LEDs, IR sensitivity, night vision) | **implemented** — `POST …/settings/image`; `max_exposure` is routed too but unsupported on both reference cameras (`canSetMaxExposure` false), so it is unexercised against hardware (E30). The image scalars have no HA entity |
+| `PUT /web/api/video/settings/videoConfigs/{id}` | clip resolution (`480x480` / `960x960` / `1440x1440`), clip quality, alarm-clip duration, camera-triggered clip duration, pre-trigger recording, keep-clips-for-days — all of them in the **`savedVideoSetting`** relationship, not in the document's own attributes (see the wire-shape section) | **implemented** — `POST …/settings/video`; `camera_triggered_clip_duration` is routed too but refused by the support gate on the reference cameras (E30). The same endpoint also backs the **live video resolution** control (`live_resolution`), which has an HA select entity (E34); the clip scalars have no HA entity |
+| `PUT /web/api/video/settings/generalSettings/{id}` | **the status LED** (`ledLightSetting`: `canTurnOnOffLedLight`, `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`, `ledBrightness`, `ledLightColor`), the doorbell's TELUS-side notification toggles (`doorbellNotificationSetting`), and solar-panel status. "General camera settings" undersold this one badly — see the note below | **implemented** — `POST …/settings/led` and `POST …/settings/notifications`, both with HA switches. `notificationFormat` is settable (`format` on `POST …/settings/notifications`, limited to the Text Only / Attach a Thumbnail values — E40) with an HA select; solar-panel status is read-only, surfaced as an enum sensor where supported (E39) |
 | `PUT /web/api/video/devices/cameras/{id}` | camera device properties | unused |
 
 > **`generalSettings` carries more than its name suggests** — the status LED, the

@@ -34,7 +34,7 @@ Release steps:
    git push origin <branch> --tags
    ```
 
-**Keep the git tag and the manifest version in lockstep** — a checkout of tag `vX.Y.Z` should report version `X.Y.Z` to HA/HACS. (During early `1.5.x` development the manifest was bumped without matching tags — the last tag was `v1.4.0` while the manifest read `1.5.1`. Going forward every version bump gets its tag.)
+**Keep the git tag and the manifest version in lockstep** — a checkout of tag `vX.Y.Z` should report version `X.Y.Z` to HA/HACS. Every version bump gets its tag.
 
 A bridge-only change still rides in the same integration version bump — note it in the version's changes so the two components stay releasable together.
 
@@ -157,7 +157,7 @@ moved internal -- update `_telus_async_login` / the patched attributes in
 patch still applies, but still skim the upstream changelog before merging.
 
 
-## Dependency hardening (2026-08 audit)
+## Dependency hardening
 
 A dependency-fragility audit of both trees drove the following changes. The theme:
 this project's integration deliberately monkeypatches a library, so the risk is not

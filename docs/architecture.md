@@ -132,7 +132,7 @@ the box. The integration is a pure **client** of this API. Key endpoints:
 | `/control/clip/{video_event_id}` | GET | Re-mint a fresh signed download URL for one clip |
 | `/control/history` | GET | System-wide activity feed |
 | `/control/automations` | GET | Video automation rules (+ `/pause`, `/resume`) |
-| `/control/cameras/{id}/settings` | GET, POST | Camera audio/image/video settings (writes are read-modify-write) |
+| `/control/cameras/{id}/settings` | GET | Camera audio/image/video settings (writes are POSTs to the per-facet sub-routes `/settings/{volume,chime,led,notifications,image,video}`, each a read-modify-write) |
 | `/control/cameras/{id}/diagnostics` | GET | Camera signal strength, battery, device status |
 | `/control/cameras/{id}/siren`, `/privacy` | POST | Camera siren and privacy mode (mobile MWS backend) |
 
@@ -152,6 +152,7 @@ secrets and fallbacks the loopback API cannot bootstrap on its own:
 | `control_secret` | bridge (first start, auto-rotated) | integration | Bearer secret for the credential push |
 | `credentials.json` | integration (every credential update) | bridge (startup + 30s watcher) | Credential fallback if the live push is missed |
 | `rtsp_password` | bridge (`entrypoint.sh`, mode `0600`) | bridge | Baked into the RTSP URLs the bridge publishes and reports |
+| `mobile_auth.json` | bridge (`mobile_auth.py`) | bridge | Persisted mobile-session state: a stable synthetic device uid plus the rolling seamless-login token, so a restart re-logs-in silently instead of re-running the full SSO bootstrap. Never holds the short-lived session token |
 | `restart_guard.json` | bridge | bridge | Cross-process crash-loop guard |
 
 The credential handoff is deliberately belt-and-suspenders: when TELUS
@@ -207,8 +208,9 @@ use a signed `clip_link` that hits an unauthenticated HA redirect view
 The integration's `speak` service renders TTS to a loopback media URL and POSTs
 it to `/control/cameras/{id}/talk`. The bridge then uses the **mobile MWS
 backend** (mint `SessionToken` → `GetLiveVideoStream` → WebRTC/SRTP talk
-transport) to play it through the doorbell speaker. Off by default on the bridge
-(`TALKDOWN_ENABLED`, on by default). See [talkdown.md](talkdown-fullduplex-protocol.md).
+transport) to play it through the doorbell speaker. Enabled by default on the
+bridge (`TALKDOWN_ENABLED`); set it `false` to make the route refuse with
+`403 talkdown_disabled`. See [talkdown.md](talkdown-fullduplex-protocol.md).
 
 ### Device settings and alarm configuration
 

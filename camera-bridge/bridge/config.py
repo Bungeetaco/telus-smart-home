@@ -46,6 +46,16 @@ ENCODE_BACKEND = os.environ.get("ENCODE_BACKEND", "vaapi").lower()
 # them and this is never reachable from outside the host.
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = int(os.environ.get("CONTROL_PORT", "8199"))
+# aiohttp's per-request access log for the control endpoint, opt-in. Off by
+# default on purpose: every request is loopback polling from Home Assistant,
+# and the routine INFO "aiohttp.access" lines were measured live at ~27% of all
+# log output -- against Docker's capped json-file rotation window (10m x 3,
+# docker-compose.yml) that is enough to age real warnings out of the retained
+# history within days. Failures still log through the route handlers
+# themselves, so nothing diagnostic is lost; set true only when debugging the
+# control API's request flow itself.
+CONTROL_ACCESS_LOG = os.environ.get("CONTROL_ACCESS_LOG", "false").strip().lower() in (
+    "1", "true", "yes", "on")
 
 # Shared directory with the HA container (HA side: /share/telus_cam_bridge,
 # mounted here at /shared). Holds the control-endpoint's shared secret (this

@@ -234,9 +234,10 @@ sudo docker compose up -d --build
 ## Step 4 — Confirm the shared directory is mounted by both containers
 
 The entire credential-sync contract rests on **both** containers seeing the
-**same** host directory. The bridge writes `control_secret`, `rtsp_password`,
-and `credentials.json` there; Home Assistant reads them to authenticate its
-credential push and its camera/event polls.
+**same** host directory. The bridge writes `control_secret` and
+`rtsp_password` there; Home Assistant reads those to authenticate its
+credential push and its camera/event polls, and writes `credentials.json`
+there as the bridge's fallback copy of the credentials.
 
 Preparing the host path (Step 3.6) says nothing about whether HA's container
 actually mounts it — and if it doesn't, **nothing fails loudly**. HA simply

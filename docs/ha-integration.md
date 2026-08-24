@@ -150,10 +150,7 @@ These are covered in detail under [The update model](#the-update-model) and
     safe to call unconditionally from an automation)
     (see [talkdown-DEPLOY.md](talkdown-DEPLOY.md)), guarded so reloads are a
     no-op.
-13. **Debug event listener.** Register a listener for `DEBUG_REQ_EVENT` that dumps
-    a device's `debug_data` to the log, wrapped in `async_on_unload`.
-
-14. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
+13. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
     or un-bypasses named sensors on the alarm partition. **A bypassed zone does
     not trigger the alarm until it is put back**, which is why this is a service
     rather than a switch on every sensor row — a stray tap should not be able to
@@ -168,7 +165,7 @@ These are covered in detail under [The update model](#the-update-model) and
     **ten seconds** to reach the sensor — so the post-write refresh is delayed
     past that window rather than firing immediately and reading the old state.
 
-15. **Unpair service.** Register `telus_smarthome.unpair_arming_device`, which
+14. **Unpair service.** Register `telus_smarthome.unpair_arming_device`, which
     removes one phone from the panel's Bluetooth disarming so it can no longer
     disarm on approach. **It cannot be undone from Home Assistant** — re-pairing
     needs physical access to both the phone and the panel — which is the whole
@@ -183,6 +180,9 @@ These are covered in detail under [The update model](#the-update-model) and
     refused: an unknown entity, one belonging to another integration, or one that
     is not an arming-device switch. The vendor's own unpair-all is not exposed at
     any level.
+
+15. **Debug event listener.** Register a listener for `DEBUG_REQ_EVENT` that dumps
+    a device's `debug_data` to the log, wrapped in `async_on_unload`.
 
 ### Controller initialization
 
@@ -233,7 +233,8 @@ handled by the camera bridge, not by these virtual devices.
    prevents one leaked session/connector/sockets per reload.
 2. `async_unload_platforms(config_entry, PLATFORMS)`.
 3. If no config entries remain (excluding the `clip_view_registered` sentinel),
-   remove the shared speak service.
+   remove all three shared services: `speak`/`stop_speaking`, `bypass_sensors`,
+   and `unpair_arming_device`.
 
 ### Config-entry migrations
 
@@ -333,14 +334,14 @@ wrap idempotent.
 Wraps the library's `_async_handle_message` to fix two defects that sat between a
 device changing and HA showing it:
 
-14. **A library crash killed the connection.** The library's message handler
+1. **A library crash killed the connection.** The library's message handler
    could hit an `UnboundLocalError` on an unrecognized device (one absent from
    its registry — e.g. a bridge-served doorbell camera, id like
    `<unit>-<device>`). The exception propagated out of the read loop and dropped
    the socket. Because such a device emits events regularly, real-time updates
    were dead much of the time. The wrapper **swallows per-message errors** so one
    unprocessable message can never end the connection.
-15. **Nothing refreshed HA after a push.** The library applied each message to its
+2. **Nothing refreshed HA after a push.** The library applied each message to its
    in-memory objects (which entities read live), but no listener was notified, so
    even a successfully-processed push was invisible until the next poll. The
    wrapper **notifies every registered coordinator's listeners** after each
@@ -362,10 +363,10 @@ Alarm.com's; only the login handshake differs. The replacement
 1. Clears the session cookie jar (TELUS rejects a login if stale session cookies
    are present — important for re-login on session expiry; the dedicated session
    makes wiping safe).
-16. **POST** `smarthome_login_v1` — submit credentials.
-17. **POST** `flows/login?acr=…` — complete the login flow (must send an explicit
+2. **POST** `smarthome_login_v1` — submit credentials.
+3. **POST** `flows/login?acr=…` — complete the login flow (must send an explicit
    empty JSON body; a bodiless POST 415s).
-18. **GET** the OAuth2 authorization endpoint with `allow_redirects=True` and
+4. **GET** the OAuth2 authorization endpoint with `allow_redirects=True` and
    follow the full redirect chain, which lands on the page that sets the real
    dealer-portal session cookie.
 5. Extract the anti-forgery (`afg`) cookie, then (unchanged from upstream) fetch
@@ -506,11 +507,11 @@ Two screens (`async_step_init` → `async_step_modes`):
 | `cover` | library garage doors + gates | Open/close with opening/closing states; device class garage or gate |
 | `light` | library lights | On/off, brightness (if supported); optimistic state for lights without state tracking |
 | `button` | all stateful devices + bridge cameras | One **Debug** button per device (fires `DEBUG_REQ_EVENT` to dump `debug_data`); **siren start/stop** buttons per camera that supports them (bridge-backed) |
-| `number` | camera config options + bridge cameras | Skybell **brightness** slider/box config option; camera **speaker volume** (bridge-backed) |
-| `switch` | camera config options + bridge automation rules + bridge cameras | Skybell binary-chime on/off; **video automation rule** pause/resume; camera **privacy mode** (both bridge-backed) |
-| `select` | camera config options | Skybell **adjustable chime** volume and **motion sensitivity** |
+| `number` | camera config options + bridge cameras | Skybell **brightness** slider/box config option; camera **speaker volume** and **status-LED brightness** (bridge-backed — see [Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities)) |
+| `switch` | camera config options + bridge automation rules + bridge cameras + arming devices | Skybell binary-chime on/off; **video automation rule** pause/resume; camera **privacy mode**, **indoor chime**, **outdoor tone**, **status LED** and the three **TELUS-app notification** toggles (motion / button press / smart chime); per-phone **Disarm alarm on arrival**; **Panel Bluetooth pairing** (all bridge-backed) |
+| `select` | camera config options + bridge cameras + arming devices | Skybell **adjustable chime** volume and **motion sensitivity**; camera **wired chime type**, **TELUS-app notification format** and **live video resolution**; per-phone **enrolled partition**; **Bluetooth disarm window** (all but the Skybell options bridge-backed) |
 | `climate` | library thermostats | HVAC mode (heat/cool/auto/fan-only/off), setpoints, fan mode, humidity readout |
-| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics (bridge-backed) |
+| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status (bridge-backed) |
 | `camera` | camera bridge | Live RTSP stream + on-demand snapshots (bridge-backed) |
 | `event` | camera bridge | Per-camera video-clip events + a system-wide activity event (bridge-backed) |
 
@@ -609,8 +610,14 @@ device's `debug_data` at warning level — a support aid.
 
 ### Sensor
 
-Two entities, both grouped under a synthetic **"TELUS Smart Home Integration"**
-service device rather than any Alarm.com device:
+`sensor.py` provides the **Auth Health** sensor plus the two talkdown sensors
+(see [Talkdown diagnostics](#talkdown-diagnostics)) under a synthetic **"TELUS
+Smart Home Integration"** service device rather than any Alarm.com device; the
+**Recent Events** activity-feed sensor on the **Activity** device it shares
+with the activity event entity; and the per-camera diagnostic (signal strength
+/ battery / device status) and solar-panel sensors on the camera devices (see
+[Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities)).
+The two covered here:
 
 - **`AuthHealthSensor`** — an enum diagnostic sensor
   (`ok` / `reauth_required` / `telus_error`) reflecting
@@ -771,10 +778,13 @@ every sensor down with it.
 That first refresh is also **not awaited**. It runs as a config-entry background
 task (`async_create_background_task`), and `async_get_camera_settings_coordinator`
 returns as soon as the instance is stashed. Swallowing the exception is only half
-the protection: one poll cycle is two bridge requests per camera, each bounded
-only by the shared client's 10 s timeout, so a bridge that is *slow* rather than
-*down* costs up to 20 s per camera and can outlast Home Assistant's 60 s
-platform-setup budget with three cameras — which aborts whichever of
+the protection: one poll cycle is two bridge requests per camera — the
+`/settings` request bounded by the shared client's 10 s timeout and the
+`/diagnostics` request by its own 45 s timeout
+(`CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS`; the signal read alone can legitimately
+take ~25 s on some models) — so a bridge that is *slow* rather than *down*
+costs up to ~55 s per camera and can outlast Home Assistant's 60 s
+platform-setup budget with two cameras — which aborts whichever of
 `button`/`number`/`switch`/`sensor` set up first, taking the Debug buttons, the
 Skybell config entities and the integration diagnostics with it. Not waiting
 turns that into "entities appear a moment later".
@@ -1073,6 +1083,7 @@ From `const.py` (timing and identity):
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | 30 | Video-clip / activity poll |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | 300 | Automation-rule poll |
 | `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 120 | Camera settings + diagnostics poll |
+| `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` | 45 | Per-request timeout for the `/diagnostics` bridge read (the signal read alone can take ~25 s on some models); the `/settings` read keeps the shared 10 s default |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | 900 | Bluetooth arming devices **and** the panel-wide Bluetooth settings poll |
 | `CLIP_LINK_TTL_SECONDS` | 90 days | Signed clip-link lifetime |
 

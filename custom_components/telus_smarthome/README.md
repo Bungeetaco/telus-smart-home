@@ -25,38 +25,51 @@ Alarm.com's normal login flow. The domain is `telus_smarthome`.
   the config flow as `telus_sso_error` (distinct from `invalid_auth`, which
   means the library got a normal "wrong password" response).
 - `controller.py` — owns the `pyalarmdotcomajax` `AlarmController`, the
-  `DataUpdateCoordinator`, the websocket keep-alive, and (as of this change)
-  simple auth-health tracking (`auth_health` / `auth_health_detail` /
-  `last_auth_success`) surfaced via the diagnostic sensor in `sensor.py`.
+  `DataUpdateCoordinator`, the websocket keep-alive, and simple auth-health
+  tracking (`auth_health` / `auth_health_detail` / `last_auth_success`)
+  surfaced via the diagnostic sensor in `sensor.py`.
 - `config_flow.py` — login (`user`), 2FA (`otp_select_method` /
   `otp_submit`), reauth (`reauth` / `reauth_confirm`), and **reconfigure**
   (`reconfigure`) flows. The reconfigure flow (Settings → Devices & Services
   → this integration's card → ⋮ → *Reconfigure*) lets you update the TELUS
   username/password in place — it does **not** delete/recreate the config
   entry, so all existing entities/devices/automations referencing them are
-  preserved. Before this, the only way to change credentials was to remove
-  and re-add the integration, which regenerated every entity ID.
-- `sensor.py` — one diagnostic entity, "Auth Health" (`ok` /
+  preserved (removing and re-adding the integration would regenerate every
+  entity ID).
+- `sensor.py` — the "Auth Health" diagnostic sensor (`ok` /
   `reauth_required` / `telus_error`), so auth problems are visible as a
   normal HA entity/history graph instead of only in logs or via the reauth
-  notification.
-- All other platform files (`alarm_control_panel.py`, `lock.py`,
-  `binary_sensor.py`, `cover.py`, `light.py`, `switch.py`, `climate.py`,
-  `number.py`, `select.py`, `button.py`) mirror the upstream integration's
-  entity platforms, built on the shared `base_device.py` base classes.
+  notification; plus the Recent Events activity-feed sensor, the talkdown
+  status/failure sensors, and the bridge-served per-camera diagnostic
+  (signal / battery / status) and solar-panel sensors — see
+  `docs/ha-integration.md` for the full entity list.
+- `alarm_control_panel.py`, `lock.py`, `binary_sensor.py`, `cover.py`,
+  `light.py`, and `climate.py` mirror the upstream integration's entity
+  platforms, built on the shared `base_device.py` base classes.
+- `switch.py`, `select.py`, `number.py`, and `button.py` carry both the
+  upstream-style config-option entities (built on `base_device.py`) and this
+  fork's bridge-backed camera/panel settings entities (privacy mode, chime,
+  status LED, app-notification toggles, speaker volume, chime type,
+  notification format, live resolution, siren buttons, Bluetooth disarming),
+  built on `CameraSettingsEntity` and dedicated coordinators instead.
+- `camera.py` and `event.py` serve bridge-backed live video, snapshots and
+  clip events; `bridge_client.py` and the coordinator modules
+  (`camera_settings_coordinator.py`, `arming_devices_coordinator.py`) are the
+  shared plumbing to the bridge's loopback control API; `speak_service.py`,
+  `bypass_service.py`, `unpair_service.py` and `clip_view.py` provide the
+  fork's services and the signed clip-link HTTP view. Details in
+  `docs/ha-integration.md`.
 
 ## Credential sync with the camera bridge
 
 There is a **separate**, independently-deployed Docker service (the
 `camera-bridge/` directory in this same repo -- see its own README) that
 streams camera video into Home Assistant via its own Janus/WebRTC bridge. It
-used to hold a completely independent copy of the TELUS username/password
-(from its own `.env` file), disconnected
-from this integration's config entry — so changing your TELUS password here
-would silently break camera streaming until someone noticed and manually
-updated the bridge's `.env` and restarted it.
+holds its own copy of the TELUS username/password (from its own
+`secrets.env` file), so a password change made here must reach it too or
+camera streaming silently breaks.
 
-As of this change, both the `reauth` and `reconfigure` flows
+That is why both the `reauth` and `reconfigure` flows
 (`async_step_final` → `_async_sync_bridge_credentials` in `config_flow.py`)
 push updated credentials to the bridge's local control endpoint
 (`http://127.0.0.1:8199/control/credentials`, both containers run with
