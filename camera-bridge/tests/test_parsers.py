@@ -1,9 +1,10 @@
-"""Tests for the pure parsers and helpers behind the MWS/talkdown path.
+"""Tests for the pure parsers and helpers behind the MWS/talkdown path, plus the
+pure SDP summariser the Janus client logs its offers through.
 
-These are the functions that turn Alarm.com's XML into the values the bridge
-acts on. They were originally verified by hand against a live capture, which
-means nothing re-checks them when someone edits a field name. Everything here is
-pure: no network, no ffmpeg, no device.
+These are the functions that turn Alarm.com's XML (and, for the last one, its
+SDP) into the values the bridge acts on or prints. They were originally verified
+by hand against a live capture, which means nothing re-checks them when someone
+edits a field name. Everything here is pure: no network, no ffmpeg, no device.
 
 The XML below is shaped exactly like a real response (attributes rather than
 child elements, the abbreviated names the server actually uses) with every
@@ -251,6 +252,89 @@ def test_defusedxml_is_a_hard_import():
     print("  ok  defusedxml hard import: MWS modules refuse to load without it")
 
 
+def test_sdp_media_summary():
+    """janus_client._sdp_media_summary must summarise an SDP's media and NOTHING
+    else, and must never raise.
+
+    Two invisible failures live here. The first is a LEAK: the summary is logged
+    once per session start, and the SDP it reads carries `a=ice-ufrag`,
+    `a=ice-pwd`, `a=fingerprint` and `a=candidate` (host addresses) -- a
+    "helpful" widening of the parser would quietly start printing session
+    secrets into a log that is kept and shared. The second is a CRASH: the only
+    caller sits between the watch reply and setRemoteDescription on the
+    session-rotation path, so an exception out of a diagnostic would fail a
+    perfectly healthy session every ~165s and count toward camera_session.py's
+    container-restart escape hatch. Hence the total contract pinned below.
+    """
+    from bridge.janus_client import _sdp_media_summary
+
+    secrets = ["SUPERSECRETUFRAG", "SUPERSECRETPASSWORD", "AA:BB:CC:DD:EE:FF",
+               "198.51.100.77"]
+    offer = (
+        "v=0\r\n"
+        "o=- 1 1 IN IP4 198.51.100.77\r\n"
+        "s=Mountpoint 12345\r\n"
+        "t=0 0\r\n"
+        "a=group:BUNDLE 0 1\r\n"
+        "m=video 9 UDP/TLS/RTP/SAVPF 126\r\n"
+        "c=IN IP4 198.51.100.77\r\n"
+        "a=mid:0\r\n"
+        "a=sendonly\r\n"
+        "a=rtpmap:126 H264/90000\r\n"
+        "a=fmtp:126 profile-level-id=42e01f;packetization-mode=1\r\n"
+        "a=ice-ufrag:SUPERSECRETUFRAG\r\n"
+        "a=ice-pwd:SUPERSECRETPASSWORD\r\n"
+        "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF\r\n"
+        "a=candidate:1 1 udp 2013266431 198.51.100.77 40000 typ host\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "a=mid:1\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n"
+        "a=ice-ufrag:SUPERSECRETUFRAG\r\n"
+    )
+    summary = _sdp_media_summary(offer)
+    assert summary == "video(port=9,H264) audio(port=9,opus)", summary
+    for secret in secrets:
+        assert secret not in summary, (
+            f"{secret!r} reached the summary -- the parser is reading lines other "
+            "than m= and a=rtpmap:, and this string is logged")
+    # Nothing outside the media/codec vocabulary at all: no ice, no fingerprint,
+    # no candidate, no addresses, whatever the SDP happens to contain.
+    for forbidden in ("ice-", "ufrag", "pwd", "fingerprint", "candidate", "sha-256",
+                      "198.51", "IN IP4"):
+        assert forbidden not in summary, f"{forbidden!r} reached the summary: {summary!r}"
+
+    # Video-only is the shape this deployment sees today; the whole point of the
+    # diagnostic is telling it apart from the one above at a glance.
+    video_only = ("v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 126\r\n"
+                  "a=rtpmap:126 H264/90000\r\na=ice-pwd:SUPERSECRETPASSWORD\r\n")
+    assert _sdp_media_summary(video_only) == "video(port=9,H264)"
+
+    # Multiple codecs on one m-line are all reported, in offer order, deduped.
+    multi = ("m=video 5004 RTP/AVP 96 97 96\r\n"
+             "a=rtpmap:96 H264/90000\r\na=rtpmap:97 VP8/90000\r\n")
+    assert _sdp_media_summary(multi) == "video(port=5004,H264,VP8)"
+
+    # TOTAL: garbage in, a string out -- never an exception. An object whose
+    # str() raises is the only way to reach the except path, and it is exactly
+    # what "this must not be able to raise into the rotation path" means.
+    class Explodes:
+        def __str__(self):
+            raise ValueError("boom")
+
+    assert _sdp_media_summary(Explodes()) == "<unparsable>"
+    # ...and input that is merely useless is reported as such, not as a parse
+    # failure -- "the offer had no media" and "we could not read the offer" are
+    # different diagnoses.
+    for junk in ("", "not an sdp at all", None, b"\x00\xff", 12345, [],
+                 "m=\r\n" "a=rtpmap:\r\n"):
+        result = _sdp_media_summary(junk)
+        assert isinstance(result, str) and result, repr(junk)
+    assert _sdp_media_summary("") == "<no media>"
+    assert _sdp_media_summary("not an sdp at all") == "<no media>"
+    print("  ok  sdp media summary: kinds/ports/codecs only, no ice/fingerprint/"
+          "candidate, total on garbage")
+
+
 def test_retry_after():
     assert c.parse_retry_after("120") == 120.0
     soon = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90))
@@ -283,6 +367,7 @@ def main():
                  test_live_video_stream_parser, test_live_video_stream_edge_cases,
                  test_decode_srtp_key,
                  test_action_acks, test_defusedxml_is_a_hard_import,
+                 test_sdp_media_summary,
                  test_retry_after, test_session_deadline):
         try:
             test()

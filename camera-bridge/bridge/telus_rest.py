@@ -33,6 +33,15 @@ async def get_video_source(telus, camera_id: str) -> dict:
         resp.raise_for_status()
         body = await resp.json()
     attrs = body["data"]["attributes"]
+    # DIAGNOSTIC: does this response carry an audio-capability field the bridge
+    # has never parsed? Only the KEY NAMES are logged -- the values are the
+    # relay proxyUrl, the Janus gateway URL, the Janus token and the ICE server
+    # credentials, none of which may ever reach a log. The two exceptions are a
+    # bool and a presence test, both safe by construction. One line per session
+    # start (~1 per SESSION_MAX_LIFETIME_S per camera).
+    log.info("%s: videoSource attributes=%s supportsAudio=%r audioUpStreamUrl=%s",
+             camera_id, sorted(attrs), attrs.get("supportsAudio"),
+             "present" if attrs.get("audioUpStreamUrl") is not None else "absent")
     return {
         "proxy_url": attrs["proxyUrl"],
         "janus_gateway_url": attrs["janusGatewayUrl"],

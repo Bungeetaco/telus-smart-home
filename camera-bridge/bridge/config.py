@@ -233,6 +233,31 @@ WEBRTCUP_TIMEOUT_S = 20
 FIRST_FRAME_TIMEOUT_S = 20
 JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side; keep well under that
 
+# --- EXPERIMENT: ask the Janus mountpoint for a downstream AUDIO track ------
+# OFF BY DEFAULT. This answers exactly one open question and nothing else: will
+# alarm.com's Janus gateway serve a downstream audio track if the bridge asks
+# for one? With this true, janus_client.py adds the audio counterparts of the
+# video keys ("audio"/"audioport"/"audiopt"/"audiortpmap") to the streaming
+# plugin's mountpoint-create body. The answer then shows up in the offer the
+# gateway sends back, logged per session as "janus offer media: ..." -- an
+# `audio(...)` entry means yes, video only means no.
+#
+# CONSUMING audio is NOT implemented. Nothing decodes, publishes or plays a
+# downstream audio track: ffmpeg_sink.py publishes video only, and an offered
+# audio track is drained and discarded (see janus_client.on_track). Turning
+# this on cannot make the RTSP feed carry sound; it only changes what is asked
+# for and what the log reports. (Two-way audio TO the doorbell is a separate,
+# working path -- see TALKDOWN_ENABLED above.)
+#
+# It is safe to leave on ONLY because of the fallback in janus_client.py: if
+# the create-with-audio is rejected, the create is immediately retried once
+# with the byte-identical video-only body this bridge has always sent. A
+# rejected experiment therefore never raises, never counts a consecutive
+# session failure, and never reaches camera_session.py's
+# MAX_CONSECUTIVE_SESSION_FAILURES container-restart escape hatch.
+JANUS_REQUEST_AUDIO = os.environ.get("JANUS_REQUEST_AUDIO", "false").strip().lower() in (
+    "1", "true", "yes", "on")
+
 # How often to re-poll TELUS for the camera list after startup, so a camera
 # added to the account later gets picked up (and streaming started
 # automatically) without a container restart. Existing camera tasks are never

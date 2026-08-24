@@ -491,6 +491,40 @@ secrets: signed snapshot URLs, media-URL query strings (which can hold signed
 tokens), RTSP/PUT credentials and session tokens are all redacted before
 logging.
 
+Two INFO diagnostics ride along, one line each per session start (so about one
+per rotation, per camera):
+
+- **The Janus offer's media summary** — the media kinds, ports and codec names
+  the gateway offered, e.g. `janus offer media: video(port=9,H264)`. It is a
+  *derived summary by construction, and must stay one*: a raw SDP carries
+  `a=ice-ufrag`, `a=ice-pwd`, `a=fingerprint` and `a=candidate`, so only `m=`
+  and `a=rtpmap:` lines are read and every token emitted is filtered against a
+  conservative pattern. Turning the root log level up to `DEBUG` is **not** an
+  equivalent way to see this — aiortc logs the entire raw SDP at debug, which
+  would put ICE credentials into the container log.
+- **The videoSource attribute inventory** — the attribute *key names* the
+  live-video source document carries, plus `supportsAudio` and whether
+  `audioUpStreamUrl` is present. Key names and one boolean only; never a value,
+  because the same document holds the Janus token and the ICE server
+  credentials.
+
+### Downstream (listen) audio
+
+The bridge publishes **video only**, and the Janus mountpoint it creates asks
+for video only. A camera that offers an audio track anyway has that track
+**drained and discarded** rather than merely ignored: aiortc auto-accepts every
+media section the remote offers and decodes it on its own thread into an
+unbounded queue, so a track nobody reads would grow for the whole life of each
+session — a per-rotation memory sawtooth. Draining holds it at zero; the
+decoder thread itself is released when the session closes. (Stopping the track
+instead would be worse than doing nothing: it stops the queue being readable
+without stopping it being filled.)
+
+Whether the upstream *would* serve downstream audio is an open question, and
+`JANUS_REQUEST_AUDIO` (see [configuration.md](configuration.md)) is the
+experiment that answers it from the offer summary above. This is separate from
+talkdown, which plays audio *out* of a doorbell and works today.
+
 ### Recreating the container
 
 The cloned repo directory *is* the deployment location; `docker-compose.yml` runs
