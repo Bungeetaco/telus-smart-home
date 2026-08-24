@@ -1194,13 +1194,28 @@ when it ships.
   container ships a different build, so `ffmpeg has stopped reading the audio
   pipe` is the line to grep if audio ever backs up.
 
-  **Unverified, and worth watching on any first deploy:** the RTSP ANNOUNCE
-  carrying a second AAC m-line has never been exercised against MediaMTX (all
-  offline verification used mp4/null outputs), and no real camera has been in
-  the loop — the assumption that aiortc decodes Opus to packed s16/48 kHz
-  stereo is a bootstrap that self-corrects with exactly one publisher rebuild,
-  but that rebuild momentarily blacks the path. A/V skew measured ~130 ms over
-  12 s offline; on a live camera it is unmeasured.
+  **It does not work in the container yet, and the reason is the ffmpeg
+  version.** Enabled on the doorbell against the live deployment, the encoder
+  entered a restart loop within seconds: `ffmpeg has stopped reading the audio
+  pipe (~550-680 kB queued); restarting the encoder`, repeating every few
+  seconds. Video kept flowing and no session failed, but each restart kicks
+  every reader, so it was rolled back immediately and both cameras recovered
+  with zero warnings.
+
+  The offline validation that cleared this change ran against **ffmpeg
+  n9.0.1**; the container ships **7.1.5**. The two-input raw-pipe behaviour
+  differs between them — the timestamp-flag fix that resolves it on 9.0.1 is
+  not sufficient on 7.1.5. Any further work must be validated **inside the
+  container** (`docker exec`), against the build that actually runs, rather
+  than against whatever ffmpeg the development host happens to have. That is
+  the real lesson here and it generalises beyond audio.
+
+  Confirmed working on the live deployment even so: the decoded format is
+  exactly the assumed `48000Hz/2ch/s16`, the per-camera gating held (the indoor
+  camera stayed video-only throughout), and the new status fields reported
+  correctly. Still unverified: the RTSP ANNOUNCE carrying a second AAC m-line
+  against MediaMTX (it never got far enough to matter), and A/V skew on a live
+  camera.
 
 - **E55 (open) Device-direct listen audio is not an RTSP pull.** The `<cli>`
   element's `re`/`dre`/`lre`/`pre` attributes look like RTSP URLs, but the
