@@ -97,6 +97,35 @@
                     "telus_error": "خطأ في TELUS/Alarm.com"
                 }
             },
+            "talkdown_status": {
+                "name": "حالة التنبيه الصوتي",
+                "state": {
+                    "idle": "خامل",
+                    "ok": "جيد",
+                    "stopped": "توقف مبكرًا",
+                    "rejected": "مرفوض (تحدث جارٍ بالفعل)",
+                    "failed": "فشل"
+                }
+            },
+            "talkdown_failures": {
+                "name": "إخفاقات التنبيه الصوتي"
+            },
+            "camera_signal_strength": {
+                "name": "قوة الإشارة"
+            },
+            "camera_battery": {
+                "name": "البطارية"
+            },
+            "camera_device_status": {
+                "name": "حالة الكاميرا"
+            },
+            "camera_solar_panel": {
+                "name": "اللوحة الشمسية",
+                "state": {
+                    "connected": "متصلة",
+                    "not_connected": "غير متصلة"
+                }
+            },
             "camera_stream_state": {
                 "name": "حالة البث",
                 "state": {
@@ -113,6 +142,68 @@
         "binary_sensor": {
             "camera_bridge": {
                 "name": "جسر الكاميرات"
+            }
+        },
+        "number": {
+            "camera_call_volume": {
+                "name": "مستوى صوت السماعة"
+            },
+            "camera_status_led_brightness": {
+                "name": "سطوع مؤشر الحالة"
+            }
+        },
+        "switch": {
+            "camera_privacy_mode": {
+                "name": "وضع الخصوصية"
+            },
+            "camera_indoor_chime": {
+                "name": "الجرس الداخلي"
+            },
+            "camera_outdoor_tone": {
+                "name": "النغمة الخارجية"
+            },
+            "camera_status_led": {
+                "name": "مؤشر الحالة"
+            },
+            "camera_telus_app_motion_notifications": {
+                "name": "إشعارات الحركة في تطبيق TELUS"
+            },
+            "camera_telus_app_button_press_notifications": {
+                "name": "إشعارات ضغط الزر في تطبيق TELUS"
+            },
+            "camera_telus_app_smart_chime_notifications": {
+                "name": "إشعارات الجرس الذكي في تطبيق TELUS"
+            },
+            "arming_device_disarming": {
+                "name": "إلغاء تفعيل الإنذار عند الوصول"
+            },
+            "panel_bluetooth_pairing": {
+                "name": "اقتران Bluetooth للوحة التحكم"
+            }
+        },
+        "select": {
+            "camera_chime_type": {
+                "name": "نوع الجرس السلكي"
+            },
+            "camera_telus_app_notification_format": {
+                "name": "تنسيق إشعارات تطبيق TELUS"
+            },
+            "camera_live_resolution": {
+                "name": "دقة الفيديو المباشر"
+            },
+            "arming_device_enrolled_partition": {
+                "name": "القسم الذي يلغي تفعيله"
+            },
+            "panel_bluetooth_timeout": {
+                "name": "نافذة إلغاء التفعيل عبر Bluetooth"
+            }
+        },
+        "button": {
+            "camera_siren_start": {
+                "name": "تشغيل صفارة الإنذار"
+            },
+            "camera_siren_stop": {
+                "name": "إيقاف صفارة الإنذار"
             }
         },
         "event": {

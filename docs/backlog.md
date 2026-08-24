@@ -33,8 +33,6 @@ and evidence.
   actual battery camera.
 - **E41** (two questions) — whether panel-wide pairing off makes the per-device
   toggle inert, and the uncaptured `bluetoothDisarmingSettings` write shape.
-- **E52** — the nine non-English translation files lack translations for the
-  talkdown and camera-settings entity keys the English file carries.
 
 ## High value
 _Implemented since live testing:_ **E-COND audio conditioning (with per-request
@@ -1096,22 +1094,18 @@ when it ships.
 
 ## Gaps found while implementing the stream-health entities
 
-- **E52 (open) The nine non-English translation files are missing the older
-  talkdown and camera-settings entity keys.** The integration ships ten
-  translation files (`translations/{en,ar,bn,es,fr,hi,pt,ru,ur,zh-Hans}.json`).
-  The English file names every entity, but the nine non-English files carry
-  only `auth_health`, the two event entities, and the stream-health keys
-  (`camera_stream_state`, `camera_dropped_frames`, `camera_bridge`) — those
-  last three were added in all ten languages when the stream-health entities
-  shipped, so the gap is pre-existing and was not widened. What the nine files
-  lack is everything between: the talkdown sensors (`talkdown_status`,
-  `talkdown_failures`), the camera diagnostic and solar sensors
-  (`camera_signal_strength`, `camera_battery`, `camera_device_status`,
-  `camera_solar_panel`), and the entire `number` / `switch` / `select` /
-  `button` groups (speaker volume, chime, LED, notification, privacy-mode,
-  siren, resolution and Bluetooth-disarming entities). A non-English HA
-  instance falls back to the English names for all of those, so nothing is
-  broken — but the files promise a localization they only partially deliver.
-  Closing it means translating the English file's remaining keys into the
-  other nine languages, keeping the key sets identical so the gap cannot
-  silently reopen.
+- **E52 (DONE) All ten translation files carry the identical key set.** Each
+  of the nine non-English files (`ar,bn,es,fr,hi,pt,ru,ur,zh-Hans`) now holds
+  the same 96 leaf keys as `en.json`, verified by a programmatic key-tree diff
+  (zero missing, zero extra, per language). The 31 keys that were missing —
+  the talkdown sensors, the camera diagnostic and solar sensors, and the
+  entire `number` / `switch` / `select` / `button` groups — were translated
+  per language against each file's established register (e.g. pt stays
+  European Portuguese: "altifalante", "à chegada"; ru renders talkdown as
+  "голосовое оповещение"; bn/hi/ur transliterate it as a feature name,
+  matching how those files treat technical loanwords; brand terms TELUS /
+  Bluetooth / Alarm.com stay untranslated everywhere, per each file's
+  existing practice). Translations are model-written, not native-speaker
+  reviewed — a fluent speaker may still improve phrasing, but the key sets
+  are complete and any future drift is a one-line key-tree diff away from
+  being visible.

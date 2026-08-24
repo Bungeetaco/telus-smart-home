@@ -97,6 +97,35 @@
                     "telus_error": "TELUS/Alarm.com 错误"
                 }
             },
+            "talkdown_status": {
+                "name": "语音喊话状态",
+                "state": {
+                    "idle": "空闲",
+                    "ok": "正常",
+                    "stopped": "提前停止",
+                    "rejected": "已拒绝（正在通话）",
+                    "failed": "失败"
+                }
+            },
+            "talkdown_failures": {
+                "name": "语音喊话失败次数"
+            },
+            "camera_signal_strength": {
+                "name": "信号强度"
+            },
+            "camera_battery": {
+                "name": "电池"
+            },
+            "camera_device_status": {
+                "name": "摄像头状态"
+            },
+            "camera_solar_panel": {
+                "name": "太阳能板",
+                "state": {
+                    "connected": "已连接",
+                    "not_connected": "未连接"
+                }
+            },
             "camera_stream_state": {
                 "name": "视频流状态",
                 "state": {
@@ -113,6 +142,68 @@
         "binary_sensor": {
             "camera_bridge": {
                 "name": "摄像头桥接"
+            }
+        },
+        "number": {
+            "camera_call_volume": {
+                "name": "扬声器音量"
+            },
+            "camera_status_led_brightness": {
+                "name": "状态指示灯亮度"
+            }
+        },
+        "switch": {
+            "camera_privacy_mode": {
+                "name": "隐私模式"
+            },
+            "camera_indoor_chime": {
+                "name": "室内门铃"
+            },
+            "camera_outdoor_tone": {
+                "name": "室外提示音"
+            },
+            "camera_status_led": {
+                "name": "状态指示灯"
+            },
+            "camera_telus_app_motion_notifications": {
+                "name": "TELUS 应用移动侦测通知"
+            },
+            "camera_telus_app_button_press_notifications": {
+                "name": "TELUS 应用按铃通知"
+            },
+            "camera_telus_app_smart_chime_notifications": {
+                "name": "TELUS 应用智能铃声通知"
+            },
+            "arming_device_disarming": {
+                "name": "到达时自动撤防"
+            },
+            "panel_bluetooth_pairing": {
+                "name": "面板蓝牙配对"
+            }
+        },
+        "select": {
+            "camera_chime_type": {
+                "name": "有线门铃类型"
+            },
+            "camera_telus_app_notification_format": {
+                "name": "TELUS 应用通知格式"
+            },
+            "camera_live_resolution": {
+                "name": "实时视频分辨率"
+            },
+            "arming_device_enrolled_partition": {
+                "name": "撤防分区"
+            },
+            "panel_bluetooth_timeout": {
+                "name": "蓝牙撤防时限"
+            }
+        },
+        "button": {
+            "camera_siren_start": {
+                "name": "启动警笛"
+            },
+            "camera_siren_stop": {
+                "name": "停止警笛"
             }
         },
         "event": {

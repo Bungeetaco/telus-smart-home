@@ -97,6 +97,35 @@
                     "telus_error": "Error de TELUS/Alarm.com"
                 }
             },
+            "talkdown_status": {
+                "name": "Estado del anuncio de voz",
+                "state": {
+                    "idle": "Inactivo",
+                    "ok": "OK",
+                    "stopped": "Detenido antes de tiempo",
+                    "rejected": "Rechazado (ya hay un anuncio en curso)",
+                    "failed": "Fallido"
+                }
+            },
+            "talkdown_failures": {
+                "name": "Fallos del anuncio de voz"
+            },
+            "camera_signal_strength": {
+                "name": "Intensidad de la señal"
+            },
+            "camera_battery": {
+                "name": "Batería"
+            },
+            "camera_device_status": {
+                "name": "Estado de la cámara"
+            },
+            "camera_solar_panel": {
+                "name": "Panel solar",
+                "state": {
+                    "connected": "Conectado",
+                    "not_connected": "No conectado"
+                }
+            },
             "camera_stream_state": {
                 "name": "Estado de la transmisión",
                 "state": {
@@ -113,6 +142,68 @@
         "binary_sensor": {
             "camera_bridge": {
                 "name": "Puente de cámaras"
+            }
+        },
+        "number": {
+            "camera_call_volume": {
+                "name": "Volumen del altavoz"
+            },
+            "camera_status_led_brightness": {
+                "name": "Brillo del LED de estado"
+            }
+        },
+        "switch": {
+            "camera_privacy_mode": {
+                "name": "Modo de privacidad"
+            },
+            "camera_indoor_chime": {
+                "name": "Timbre interior"
+            },
+            "camera_outdoor_tone": {
+                "name": "Tono exterior"
+            },
+            "camera_status_led": {
+                "name": "LED de estado"
+            },
+            "camera_telus_app_motion_notifications": {
+                "name": "Notificaciones de movimiento de la aplicación TELUS"
+            },
+            "camera_telus_app_button_press_notifications": {
+                "name": "Notificaciones de pulsación del botón de la aplicación TELUS"
+            },
+            "camera_telus_app_smart_chime_notifications": {
+                "name": "Notificaciones de timbre inteligente de la aplicación TELUS"
+            },
+            "arming_device_disarming": {
+                "name": "Desarmar la alarma al llegar"
+            },
+            "panel_bluetooth_pairing": {
+                "name": "Emparejamiento Bluetooth del panel"
+            }
+        },
+        "select": {
+            "camera_chime_type": {
+                "name": "Tipo de timbre cableado"
+            },
+            "camera_telus_app_notification_format": {
+                "name": "Formato de notificaciones de la aplicación TELUS"
+            },
+            "camera_live_resolution": {
+                "name": "Resolución del video en vivo"
+            },
+            "arming_device_enrolled_partition": {
+                "name": "Partición que desarma"
+            },
+            "panel_bluetooth_timeout": {
+                "name": "Ventana de desarmado por Bluetooth"
+            }
+        },
+        "button": {
+            "camera_siren_start": {
+                "name": "Iniciar sirena"
+            },
+            "camera_siren_stop": {
+                "name": "Detener sirena"
             }
         },
         "event": {
