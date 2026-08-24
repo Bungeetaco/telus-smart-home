@@ -34,6 +34,14 @@ bridge container; the HA side reads it from its own view of the shared mount,
 
 - Generated with `secrets.token_hex(32)` and written atomically with mode
   `0600`.
+- **A pre-existing secret file is re-tightened on adoption.** When the bridge
+  starts against a secret file it did not create (e.g. restored from a backup,
+  or written under a permissive umask) and the file's mode has any group/other
+  bits set, it is best-effort `chmod`ed to `0600`, with a warning naming the
+  previous mode. If the chmod fails (e.g. the file is owned by another uid on
+  the shared mount) a warning is logged and the secret is served unchanged —
+  the bridge never regenerates the secret over a permissions problem, so the
+  HA client keeps authenticating.
 - **Rotated every 30 days** (`config.CONTROL_SECRET_ROTATE_INTERVAL_S`). The
   new value is rewritten atomically to the same file. No pairing or grace
   period is needed because the HA client reads the secret fresh off disk on
@@ -143,6 +151,7 @@ grepping container logs.
       "last_frame_at": 1723406400,
       "fps": 15.0,
       "hardware_encode": true,
+      "dropped_frames": 0,
       "last_error": null
     }
   }
@@ -156,6 +165,7 @@ grepping container logs.
 | `last_frame_at` | int \| null | Unix timestamp of the most recent frame, or `null` |
 | `fps` | number | Current frame rate |
 | `hardware_encode` | bool | Whether the pipeline is using hardware encode |
+| `dropped_frames` | int | Lifetime total, since process start, of frames dropped because the consumer fell behind the decoder (the ingest queue's latency-over-completeness drop — see [camera-bridge.md](camera-bridge.md)). Present (`0`) from the camera's first status entry. The total is accumulated when each ~165 s video session **ends** — on healthy rotation and on the failure paths alike — not per frame, so it can lag the live session's drops by up to one rotation. Resets with the process, like the rest of this response |
 | `last_error` | string \| null | Most recent error string, or `null` |
 
 `state: "restart_deferred"` is the most informative value: the camera hit the
@@ -193,6 +203,7 @@ curl -s -H "Authorization: Bearer $SECRET" $BASE/control/metrics
     "failures_by_reason": {"media_error": 1},
     "by_endpoint": {"direct": 2},
     "by_codec": {"mulaw": 2},
+    "by_path": {"full_duplex": 2},
     "renegotiations": 0,
     "audio_seconds_played": 8.3,
     "talk_seconds": 7.9,
@@ -216,6 +227,13 @@ Notes:
   `no_upstream_audio`, `timeout`, `transport_error`, `network_error`,
   `upstream_error`, `cancelled`) — never exception text, which could carry a URL
   or token.
+- `by_path` counts, per transport, the talks that successfully ran it. Keys are
+  the same values the talk response's `path` field reports (`full_duplex`,
+  `webrtc`, `srtp`), and a key appears only once that path has run. A talk ended
+  early by an explicit stop still counts — the same convention as `by_codec` —
+  while failed and rejected talks never do. This is what makes a silent
+  degradation visible: e.g. the preferred full-duplex path failing device
+  discovery and every talk quietly running the `webrtc`/`srtp` fallback.
 - `recent` is the last 20 talks, oldest first. Each entry carries the outcome plus
   `played_seconds`, `seconds`, `renegotiations`, `codec` and `chunks` when the
   talk reported them.

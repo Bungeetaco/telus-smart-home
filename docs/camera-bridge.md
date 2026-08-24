@@ -209,8 +209,17 @@ Decoded video frames flow through a small bounded queue (`maxsize=4`). When the
 consumer falls behind, the **oldest** queued frame is dropped rather than
 blocking the decoder — a live view cares about latency, not completeness — and
 the drop count is logged (throttled) so a backlog is visible rather than silent.
+Each session exposes its own count as the read-only
+`JanusCameraSession.dropped_frames` property; when a session ends,
+`camera_session` folds it into a per-camera lifetime total published as
+`dropped_frames` in `GET /control/status` (see
+[control-api.md](control-api.md#get-controlstatus)), so a chronic backlog is a
+number something can alert on rather than a log-grep question.
 A keepalive is sent every `JANUS_KEEPALIVE_INTERVAL_S` (25s), well under Janus's
-~60s idle-session GC.
+~60s idle-session GC. The keepalive task ends quietly when the websocket drops
+between keepalives (an ordinary unclean rotation — the server force-closes
+sessions at ~180s against the 25s interval); detecting and reporting a dead
+session is the recv loop's job, not the keepalive's.
 
 The session's `frames()` async generator races each frame read against a "dead"
 signal (track ended, ICE/connection failed, websocket closed) so it never blocks
@@ -219,7 +228,13 @@ under certain ICE states and has no timeout of its own; `camera_session` always
 wraps it in `_close_with_timeout` (`SESSION_CLOSE_TIMEOUT_S = 5`) so a hang
 surfaces as one counted failure rather than an unrecoverable wedge, and always
 closes the dying session **before** the backoff sleep (a still-running session
-keeps decoding RTP nobody drains for the whole sleep).
+keeps decoding RTP nobody drains for the whole sleep). Inside `close()`, the
+Janus-gateway websocket is closed unconditionally (try/finally): a `pc.close()`
+that raises, or the `_close_with_timeout` cancellation landing mid-close, still
+releases the socket instead of leaking one per rotation on a wedged camera. The
+ordering (peer connection first, then websocket) is preserved, the websocket
+close never masks `pc.close()`'s own exception, and a cancellation is re-raised
+after the cleanup attempt.
 
 ### fps and resolution learning
 

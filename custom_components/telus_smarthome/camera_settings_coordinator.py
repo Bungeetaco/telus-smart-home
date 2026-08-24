@@ -349,6 +349,23 @@ async def async_bridge_post(
                 raise HomeAssistantError("This camera does not support that control.")
             if resp.status == 404:
                 raise HomeAssistantError("The camera bridge no longer knows this camera.")
+            if resp.status == 429:
+                # The alarm.com edge rate-limited the upstream call; the bridge
+                # forwards the server's own wait as a Retry-After header and
+                # mirrors it in the body ({"error": "rate_limited",
+                # "retry_after": <s>}). Surface that wait, never retry it here --
+                # every caller is a user action, and an automatic retry is
+                # exactly the tight loop the rate-limit discipline forbids.
+                retry_after: Any = resp.headers.get("Retry-After")
+                if retry_after is None:
+                    try:
+                        retry_after = (await resp.json()).get("retry_after")
+                    except (aiohttp.ClientError, ValueError):
+                        retry_after = None
+                raise HomeAssistantError(
+                    "Alarm.com is rate-limiting this account; the change was not "
+                    "applied -- try again"
+                    + (f" in {retry_after}s" if retry_after else " later"))
             resp.raise_for_status()
             return await resp.json()
     except (aiohttp.ClientError, asyncio.TimeoutError) as err:

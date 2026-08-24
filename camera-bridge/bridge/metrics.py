@@ -35,6 +35,7 @@ class TalkMetrics:
         self.failures_by_reason: Counter[str] = Counter()
         self.by_endpoint: Counter[str] = Counter()   # direct / local / public / cloud
         self.by_codec: Counter[str] = Counter()
+        self.by_path: Counter[str] = Counter()       # full_duplex / webrtc / srtp
         self.renegotiations = 0
         self.audio_seconds_played = 0.0   # audio actually pushed to a speaker
         self.talk_seconds = 0.0           # wall time spent in talk requests
@@ -66,6 +67,8 @@ class TalkMetrics:
             self.by_codec[str(result["codec"])] += 1
         if result.get("endpoint"):
             self.by_endpoint[str(result["endpoint"])] += 1
+        if result.get("path"):
+            self.by_path[str(result["path"])] += 1
         self.last_success_at = time.time()
         self._remember(camera_id, "stopped" if stopped else "ok", wall_s, result)
 
@@ -111,6 +114,7 @@ class TalkMetrics:
             "failures_by_reason": dict(self.failures_by_reason),
             "by_endpoint": dict(self.by_endpoint),
             "by_codec": dict(self.by_codec),
+            "by_path": dict(self.by_path),
             "renegotiations": self.renegotiations,
             "audio_seconds_played": round(self.audio_seconds_played, 1),
             "talk_seconds": round(self.talk_seconds, 1),

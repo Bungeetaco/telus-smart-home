@@ -46,7 +46,8 @@ Contract (as implemented -- this is what callers must match):
                                                  "consecutive_failures": ...,
                                                  "last_frame_at": <unix ts or null>,
                                                  "fps": ..., "hardware_encode": ...,
-                                                 "last_error": <str or null>}, ...}}
+                                                 "last_error": <str or null>,
+                                                 "dropped_frames": <int>}, ...}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
       reconnect counts, last-frame age, and current encode mode, without
@@ -54,6 +55,13 @@ Contract (as implemented -- this is what callers must match):
       most informative one: this camera hit the MAX_CONSECUTIVE_SESSION_FAILURES
       escape hatch, but it has fired too often lately to be a local wedge, so
       restart_guard.py is holding the process before it exits (see there).
+      "dropped_frames" is the camera's LIFETIME total (since process start) of
+      frames dropped because the consumer fell behind (janus_client._pump_track's
+      latency-over-completeness drop). Each Janus session's own counter dies
+      with it at the ~165s rotation, so the loop folds it into this running
+      total as each session ends -- which also means the field updates on
+      session end, not per frame, and lags the live session by up to one
+      rotation.
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -276,7 +284,7 @@ Contract (as implemented -- this is what callers must match):
     Body: {"volume": <int>}
 
       The talk/call volume -- i.e. the volume talkdown itself plays at (E9 in
-      docs/talkdown-fullduplex-protocol.md). Bounded by the device's own
+      docs/backlog.md). Bounded by the device's own
       call_volume_min..call_volume_max as reported by the settings read; a value
       outside that range is 400, never silently clamped, so a caller is told its
       value was not applied instead of quietly getting a different one.
@@ -918,11 +926,38 @@ def _mws_failure_note(result: dict) -> str:
     return ", ".join(parts)
 
 
+def _tighten_secret_mode() -> None:
+    """Re-tighten an ADOPTED control_secret file to 0o600 when it is looser.
+
+    The 0o600 in _write_secret and the generate path below only applies to files
+    THIS process creates; a secret restored from a backup or written under a
+    permissive umask arrives with whatever mode it was given and would sit
+    group/world-readable on the shared bind mount until the first scheduled
+    rotation happens to replace it. Best-effort, like the HA side's handling of
+    its credentials.json sibling: a chmod that fails (e.g. the file is owned by
+    another uid on the shared mount) is logged and the secret is still served --
+    refusing to start over a permissions wart would turn it into an outage.
+    Its own try block on purpose: an OSError here must NOT fall into
+    _load_or_create_secret's read handler, which would regenerate a perfectly
+    good secret. Logs the mode only, never the secret itself.
+    """
+    try:
+        mode = os.stat(c.CONTROL_SECRET_PATH).st_mode & 0o777
+        if mode & 0o077:
+            os.chmod(c.CONTROL_SECRET_PATH, 0o600)
+            log.warning("Re-tightened %s from mode %04o to 0600",
+                        c.CONTROL_SECRET_PATH, mode)
+    except OSError:
+        log.warning("Could not re-tighten permissions on %s; it may remain "
+                    "group/world-readable", c.CONTROL_SECRET_PATH, exc_info=True)
+
+
 def _load_or_create_secret() -> str:
     try:
         with open(c.CONTROL_SECRET_PATH) as f:
             secret = f.read().strip()
             if secret:
+                _tighten_secret_mode()
                 return secret
             log.warning("%s exists but is empty; regenerating", c.CONTROL_SECRET_PATH)
     except FileNotFoundError:

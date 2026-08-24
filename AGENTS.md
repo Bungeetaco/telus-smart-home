@@ -53,7 +53,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   | `docs/configuration.md` | a knob, env var, URL template or interval is added or changed |
   | `docs/troubleshooting.md` | a new failure mode exists, or an old symptom now has a different cause |
   | `docs/*-api-findings.md` | something new is learned about an upstream API, INCLUDING that a previous finding was wrong |
-  | the enhancement backlog | an idea is deferred, closed, or proven unachievable — with the evidence |
+  | `docs/backlog.md` (the enhancement backlog) | an idea is deferred, closed, or proven unachievable — with the evidence |
   | `docs/README.md` | a doc is added, so the index never goes stale |
 
   **These docs are a source of truth, not a changelog.** They state what the

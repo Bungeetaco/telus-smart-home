@@ -224,6 +224,50 @@ def test_token_status_is_read_or_reported_absent():
           "never logged as a value when it was never sent")
 
 
+def test_secret_file_ends_at_0600_however_it_arrived():
+    """The control secret must be 0o600 whether the bridge made it or adopted it.
+
+    The generate path opens the file at 0o600, but an ADOPTED file -- restored
+    from a backup, or created under a permissive umask -- used to keep whatever
+    mode it arrived with until the first 30-day rotation happened to replace it:
+    a bearer token sitting group/world-readable on the shared bind mount, with
+    nothing logged and every request still answered correctly. The secret must
+    also round-trip UNCHANGED through the re-tighten -- regenerating it would
+    401 the running Home Assistant, which is the same silent breakage the
+    import-time path redirect above exists to prevent.
+    """
+    saved = c.CONTROL_SECRET_PATH
+    c.CONTROL_SECRET_PATH = os.path.join(_TMP, "control_secret_modes")
+    try:
+        # Generated fresh: born 0o600 regardless of umask (os.open mode arg).
+        generated = cs._load_or_create_secret()
+        mode = os.stat(c.CONTROL_SECRET_PATH).st_mode & 0o777
+        assert mode == 0o600, (
+            f"a freshly generated secret file must be 0o600, got {mode:04o}")
+
+        # Adopted loose: a pre-existing 0o644 file is re-tightened on load...
+        os.chmod(c.CONTROL_SECRET_PATH, 0o644)
+        adopted = cs._load_or_create_secret()
+        mode = os.stat(c.CONTROL_SECRET_PATH).st_mode & 0o777
+        assert mode == 0o600, (
+            f"a pre-existing 0o644 secret file was left at {mode:04o} -- "
+            "group/world-readable on the shared mount until the first rotation")
+        # ...and the secret itself survives untouched.
+        assert adopted == generated, (
+            "re-tightening must not regenerate the secret -- that would 401 "
+            "the running Home Assistant")
+        with open(c.CONTROL_SECRET_PATH) as f:
+            assert f.read().strip() == generated, "on-disk secret changed"
+
+        # Already tight: loading again must not loosen or rewrite anything.
+        assert cs._load_or_create_secret() == generated
+        assert os.stat(c.CONTROL_SECRET_PATH).st_mode & 0o777 == 0o600
+    finally:
+        c.CONTROL_SECRET_PATH = saved
+    print("  ok  secret file mode: generated at 0o600, an adopted 0o644 file is "
+          "re-tightened to 0o600 with the secret unchanged")
+
+
 # ---------------------------------------------------------------------------
 # Route-level harness
 # ---------------------------------------------------------------------------
@@ -905,6 +949,7 @@ async def main():
              test_string_false_is_not_permission,
              test_the_two_gates_err_in_opposite_directions,
              test_token_status_is_read_or_reported_absent,
+             test_secret_file_ends_at_0600_however_it_arrived,
              test_settings_publishes_the_keys_home_assistant_reads,
              test_every_audio_response_carries_the_labelled_chime_choices,
              test_chime_choices_degrade_to_absent_without_breaking_the_section,

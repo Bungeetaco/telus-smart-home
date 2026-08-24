@@ -37,6 +37,7 @@ own deployment.
 | [mobile-api-findings.md](mobile-api-findings.md) | Survey of mobile-app API actions this project does NOT use, and what each would enable. |
 | [web-portal-api-findings.md](web-portal-api-findings.md) | Survey of the web portal API surface (from a browser HAR) — camera settings including speaker volume, diagnostics, and other writes. |
 | [configuration.md](configuration.md) | Every configurable knob across the bridge and the integration, in one place. |
+| [backlog.md](backlog.md) | The enhancement backlog — every open, blocked, and settled improvement idea across the project, with stable `E<n>` IDs and the evidence behind each status. |
 
 ## Guides
 

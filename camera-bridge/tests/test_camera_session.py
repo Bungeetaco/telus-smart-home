@@ -7,9 +7,12 @@ Run from the camera-bridge directory:
 No network, no Janus, no ffmpeg: `JanusCameraSession`, `FfmpegSink`,
 `restart_guard` and `os._exit` are replaced with scriptable fakes, and the
 timing constants in `config.py` are shrunk to fractions of a second so a
-165-second rotation cycle can be exercised in well under one. Set
-`TEST_VERBOSE=1` to see the loop's own logging (it is silenced by default --
-several tests deliberately drive it through `log.exception` paths).
+165-second rotation cycle can be exercised in well under one. The two session-
+teardown tests in section 6 are the exception: they drive the REAL
+`JanusCameraSession`'s close()/keepalive against fake pc/websocket objects,
+still entirely offline. Set `TEST_VERBOSE=1` to see the loop's own logging (it
+is silenced by default -- several tests deliberately drive it through
+`log.exception` paths).
 
 Why this file exists: **every failure mode in this loop looks like a camera
 going quiet, not like an error.** Nothing raises out of `run_camera_forever` --
@@ -60,6 +63,18 @@ Pinned here:
   8. backoff           -- grows and caps, and the dead session is closed BEFORE
                           the sleep rather than after it (an orphaned session
                           keeps decoding RTP nobody drains for the whole wait).
+  9. session teardown  -- janus_client's close() closes the gateway websocket
+                          even when aiortc's pc.close() raises or the close
+                          timeout's cancellation lands mid-close (otherwise a
+                          wedged camera leaks one socket per ~165s rotation),
+                          and a keepalive that sends into a dead websocket ends
+                          its task quietly instead of finishing with an
+                          exception nothing ever retrieves.
+ 10. dropped frames    -- each session's drop counter is folded into a
+                          per-camera lifetime total in the status dict when the
+                          session ends (healthy rotation and failure path
+                          alike), so /control/status keeps the count across
+                          rotations instead of losing it with each session.
 """
 import asyncio
 import contextlib
@@ -184,11 +199,13 @@ class Plan:
             so the second call must NOT re-deliver the first batch).
     tail:   what happens once the list is exhausted -- "stall" (never another
             frame), "end" (StopAsyncIteration), or ("repeat", interval, w, h).
+    dropped_frames: what this session's drop counter reads when it ends (the
+            real counter lives in janus_client._pump_track and is per-session).
     """
 
     def __init__(self, frames=(), tail="stall", connect_error=None,
                  connect_delay=0.0, close_error=None, close_hang=False,
-                 on_frame=None):
+                 on_frame=None, dropped_frames=0):
         self.frames = list(frames)
         self.tail = tail
         self.connect_error = connect_error
@@ -196,6 +213,7 @@ class Plan:
         self.close_error = close_error
         self.close_hang = close_hang
         self.on_frame = on_frame
+        self.dropped_frames = dropped_frames
 
 
 class FakeSession:
@@ -207,6 +225,7 @@ class FakeSession:
         self.close_calls = 0
         self.frame_index = 0
         self._pending = list(self.plan.frames)
+        self.dropped_frames = self.plan.dropped_frames   # the real one is a property
         CTX.sessions.append(self)
 
     async def connect_and_watch(self):
@@ -454,6 +473,42 @@ async def test_silence_before_the_deadline_is_a_failure():
     assert state.get("state") == "reconnecting", state
     assert "no frame for" in (state.get("last_error") or ""), state
     assert state.get("consecutive_failures", 0) >= 1, state
+
+
+async def test_dropped_frames_accumulate_across_sessions_into_the_status():
+    """janus_client's drop counter is per-session, so it dies with every ~165s
+    rotation -- before the running total, the throttled warning lines were the
+    only trace drops ever left and /control/status said nothing at all. The
+    loop folds each ending session's count into a per-camera lifetime total in
+    the status dict, on the healthy rotation path AND the failure path alike.
+    """
+    plans = [
+        Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720),
+             dropped_frames=7),                      # retired by a healthy rotation
+        Plan(connect_error=RuntimeError("no frames received before timeout"),
+             dropped_frames=5),                      # retired by the failure path
+        Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720)),
+    ]
+    with scenario(plans, SESSION_MAX_LIFETIME_S=0.3,
+                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+        start(ctx)
+        # Well inside the first session's 0.3s lifetime: nothing has retired yet,
+        # so the field must already exist -- the status shape is a contract and a
+        # key that appears only after the first rotation is a different shape.
+        await asyncio.sleep(0.05)
+        early = ctx.state.get("dropped_frames", "absent")
+        await run_until(ctx, lambda x: x.state.get("dropped_frames", 0) >= 12,
+                        timeout=8.0, why="both retired sessions' drops in the status")
+        state = dict(ctx.state)
+        await stop(ctx)
+
+    assert early == 0, (
+        f"dropped_frames must be published as 0 from the first status entry, got "
+        f"{early!r}")
+    assert state.get("dropped_frames") == 12, (
+        f"7 (rotated) + 5 (failed) should accumulate to 12 in the status, got "
+        f"{state.get('dropped_frames')!r} -- the per-session counter is being lost "
+        "with each session instead of folded into the lifetime total")
 
 
 # --------------------------------------------------------------------------
@@ -904,6 +959,144 @@ async def test_a_hanging_close_does_not_wedge_the_loop():
     assert alive and sessions >= 3, f"the loop wedged on close(): {sessions} sessions"
 
 
+async def test_janus_close_never_abandons_the_websocket():
+    """The REAL JanusCameraSession.close(), against fake pc/websocket objects.
+
+    close() runs pc.close() first (ordering is deliberate and unchanged), and
+    both camera_session call sites bound it with
+    wait_for(SESSION_CLOSE_TIMEOUT_S). aiortc's pc.close() is the known-hangable
+    call the bound exists for -- so it can raise, or the wait_for's cancellation
+    can land mid-close. A plain sequential close abandoned the websocket to
+    alarm.com's Janus gateway open in both cases, and the rotation loop opens a
+    fresh session every ~165s: a wedged camera leaked one socket per rotation,
+    invisibly, forever.
+    """
+    from bridge.janus_client import JanusCameraSession
+
+    class RaisingPc:
+        async def close(self):
+            raise RuntimeError("pc.close() blew up")
+
+    class HangingPc:
+        async def close(self):
+            await asyncio.Event().wait()
+
+    class FakeWs:
+        def __init__(self, error=None):
+            self.closed = 0
+            self.error = error
+
+        async def close(self):
+            self.closed += 1
+            if self.error is not None:
+                raise self.error
+
+    def make_session(pc, ws):
+        session = JanusCameraSession({"id": "cam"}, {"janus_token": "tok"})
+        session.pc = pc
+        session._ws = ws
+        return session
+
+    # pc.close() raising must still close the ws -- and the exception must still
+    # propagate, since swallowing it is _close_with_timeout's job, not close()'s.
+    ws = FakeWs()
+    try:
+        await make_session(RaisingPc(), ws).close()
+        raise AssertionError("pc.close()'s exception vanished inside close()")
+    except RuntimeError:
+        pass
+    assert ws.closed == 1, "pc.close() raised and the websocket was abandoned open"
+
+    # The guarded ws close must not mask pc.close()'s exception with its own:
+    # the pc's RuntimeError is what the caller logs, not the ws's OSError.
+    ws = FakeWs(error=OSError("ws close failed too"))
+    try:
+        await make_session(RaisingPc(), ws).close()
+        raise AssertionError("no exception propagated at all")
+    except RuntimeError:
+        pass
+    assert ws.closed == 1, "the ws close was skipped when it was going to raise"
+
+    # wait_for's cancellation landing mid-pc.close() -- what a hung close looks
+    # like from _close_with_timeout -- must close the ws on its way out, and the
+    # timeout must still surface (the cleanup may not swallow the cancellation).
+    ws = FakeWs()
+    try:
+        await asyncio.wait_for(make_session(HangingPc(), ws).close(), timeout=0.1)
+        raise AssertionError("a hanging pc.close() did not time out")
+    except asyncio.TimeoutError:
+        pass
+    assert ws.closed == 1, (
+        "the close timeout's cancellation abandoned the websocket -- one leaked "
+        "socket per ~165s rotation on a wedged camera")
+
+
+async def test_janus_keepalive_dies_quietly_when_the_session_is_already_dead():
+    """The REAL _keepalive_loop, against a websocket whose send raises.
+
+    The server force-closes every session at ~180s and keepalives run every 25s,
+    so a keepalive sent into a just-dead websocket is a routine part of every
+    unclean rotation, not an edge case. The loop must end QUIETLY: close() only
+    cancel()s the task, which is a no-op once it has already finished, so a loop
+    that dies by raising leaves a finished-with-exception task nobody ever
+    inspects -- asyncio then logs "Task exception was never retrieved"
+    tracebacks at GC time, recurring error-level noise for normal operation.
+    Marking the session dead stays the recv loop's job either way.
+    """
+    import websockets.exceptions
+    from bridge.janus_client import JanusCameraSession
+
+    class DeadWs:
+        def __init__(self, exc):
+            self.exc = exc
+            self.sends = 0
+
+        async def send(self, _msg):
+            self.sends += 1
+            raise self.exc
+
+    def make_session(ws):
+        session = JanusCameraSession({"id": "cam"}, {"janus_token": "tok"})
+        session._ws = ws
+        session._session_id = 1
+        return session
+
+    saved = c.JANUS_KEEPALIVE_INTERVAL_S
+    c.JANUS_KEEPALIVE_INTERVAL_S = 0.01
+    try:
+        # ConnectionClosed (the routine case) and any other send failure both
+        # end the loop with NO stored exception -- task.exception() is the very
+        # thing nothing in production ever retrieves.
+        for exc in (websockets.exceptions.ConnectionClosedError(None, None),
+                    RuntimeError("send blew up some other way")):
+            ws = DeadWs(exc)
+            task = asyncio.ensure_future(make_session(ws)._keepalive_loop())
+            await asyncio.wait({task}, timeout=5.0)
+            assert task.done(), "the keepalive loop kept running after a dead send"
+            assert not task.cancelled()
+            assert task.exception() is None, (
+                f"the keepalive task finished with an exception nothing retrieves "
+                f"({task.exception()!r}) -- this is the recurring 'Task exception "
+                "was never retrieved' log noise")
+            assert ws.sends == 1, f"a dead session was re-sent to: {ws.sends} sends"
+
+        # ...but cancellation must still cancel: close() relies on it to stop the
+        # keepalive of a LIVE session, and a blanket handler that ate
+        # CancelledError would turn every clean rotation into a leaked task.
+        c.JANUS_KEEPALIVE_INTERVAL_S = 60
+        task = asyncio.ensure_future(make_session(DeadWs(RuntimeError("unused")))
+                                     ._keepalive_loop())
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+            raise AssertionError("the keepalive loop swallowed its cancellation")
+        except asyncio.CancelledError:
+            pass
+    finally:
+        c.JANUS_KEEPALIVE_INTERVAL_S = saved
+
+
 # --------------------------------------------------------------------------
 # 7. Backoff
 # --------------------------------------------------------------------------
@@ -961,6 +1154,7 @@ TESTS = [
     test_rotation_keeps_one_publisher,
     test_rotation_deadline_survives_total_frame_silence,
     test_silence_before_the_deadline_is_a_failure,
+    test_dropped_frames_accumulate_across_sessions_into_the_status,
     test_frame_hold_bridges_the_reconnect_gap,
     test_frame_hold_is_bounded_by_time_since_a_real_frame,
     test_a_failed_hold_task_does_not_fail_the_next_session,
@@ -977,6 +1171,8 @@ TESTS = [
     test_close_with_timeout_is_bounded_and_swallows_errors,
     test_a_raising_close_does_not_kill_the_camera,
     test_a_hanging_close_does_not_wedge_the_loop,
+    test_janus_close_never_abandons_the_websocket,
+    test_janus_keepalive_dies_quietly_when_the_session_is_already_dead,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,
 ]

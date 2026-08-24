@@ -45,6 +45,11 @@ import uuid
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import aiohttp
+# Hard dependency (pinned in requirements.txt): a build without the hardened XML
+# parser must fail here at import -- caught by CI's every-module-imports job --
+# rather than silently parse with stdlib ElementTree and lose entity-expansion
+# protection.
+import defusedxml.ElementTree as DET
 from yarl import URL
 
 from . import config as c
@@ -95,7 +100,7 @@ def _redacted(form: dict) -> dict:
     return {k: ("<redacted>" if k in _REDACT else v) for k, v in form.items()}
 
 
-def _device_fields(mobile_device_uid: str, culture: str = "en-US") -> dict:
+def device_fields(mobile_device_uid: str, culture: str = "en-US") -> dict:
     """The device-identity params common to every MWS login action (from
     jl0/a.java + aq0/g.java + mk0/b4.java). TwoFactorId is "<uid>:<2faId>"; a
     fresh device has an empty 2faId, i.e. "<uid>:"."""
@@ -136,7 +141,7 @@ def _params_of(url: str) -> dict:
     return params
 
 
-def _read_body_text(raw: bytes) -> str:
+def read_body_text(raw: bytes) -> str:
     """Decode an MWS response body, transparently gunzipping when the server
     returns gzip without a Content-Encoding header (SubmitRequest.aspx does this,
     so aiohttp does not auto-decompress and .text() chokes on the 1f 8b magic)."""
@@ -238,7 +243,7 @@ class MobileSession:
 
     # ---- step A: silent re-login (SeamlessLoginNew) -------------------------
     async def _seamless_login(self) -> None:
-        form = _device_fields(self.device_uid)
+        form = device_fields(self.device_uid)
         form["Action"] = "SeamlessLoginNew"
         form["SeamlessLoginToken"] = self.seamless_login_token
         body = await self._post_mws(form)
@@ -296,7 +301,7 @@ class MobileSession:
 
     # ---- step C: exchange LoginAsLoginToken -> SessionToken -----------------
     async def _login_as_login(self, login_as_token: str) -> None:
-        form = _device_fields(self.device_uid)
+        form = device_fields(self.device_uid)
         form.update({
             "Action": "LoginAsLogin",
             "LoginAsLoginToken": login_as_token,
@@ -332,7 +337,7 @@ class MobileSession:
                 # Body may echo the token back; never log it, only the status.
                 raise MobileLoginError(
                     f"MWS POST {form.get('Action')} -> HTTP {resp.status}")
-            return _read_body_text(await resp.read())
+            return read_body_text(await resp.read())
 
     def _absorb(self, parsed: dict) -> None:
         self.session_token = parsed["session_token"]
@@ -355,13 +360,7 @@ def _parse_login_xml(body: str, root_tag: str) -> dict:
     only (the live account returns lr=0 with a valid session -- see below). Parsed with a defused XML parser rather than
     ElementTree.fromstring so a hostile MWS response can't drive an XML attack."""
     try:
-        import defusedxml.ElementTree as DET
         root = DET.fromstring(body)
-    except ImportError:
-        # defusedxml isn't guaranteed in the container; fall back to stdlib but
-        # keep it a single, contained parse of a response we already TLS-trust.
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(body)
     except Exception as e:
         raise MobileLoginError(f"MWS response not parseable as XML: {e}")
     el = root if root.tag == root_tag else root.find(f".//{root_tag}")

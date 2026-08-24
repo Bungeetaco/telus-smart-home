@@ -25,15 +25,18 @@ copes with the several of them that answer in XML anyway.
 import base64
 import json
 import logging
-from xml.etree import ElementTree as ET
 
 import aiohttp
+# Hard dependency (pinned in requirements.txt) -- see mobile_auth's import: a
+# build without the hardened XML parser must fail at import, not silently fall
+# back to stdlib ElementTree.
+import defusedxml.ElementTree as DET
 
 # GetLiveVideoStream is a BaseTokenRequest, so it carries the same device/token
 # envelope every MWS action does. Reuse mobile_auth's canonical assembly of that
-# envelope (HAIKU/APP_BUILD/_device_fields) and its Cloudflare-429 type so the
+# envelope (HAIKU/APP_BUILD/device_fields) and its Cloudflare-429 type so the
 # stream path funnels into the identical Retry-After backoff as the auth path.
-from .mobile_auth import HAIKU, APP_BUILD, _device_fields, _read_body_text
+from .mobile_auth import HAIKU, APP_BUILD, device_fields, read_body_text
 from . import config as c
 from .telus_auth import RateLimited
 
@@ -61,15 +64,10 @@ SRTP_CRYPTO_SUITE = "AES_CM_128_HMAC_SHA1_80"
 
 
 def _parse_xml(body):
-    """Parse an MWS XML response, preferring defusedxml so a hostile/oversized
-    response can't drive an XML attack; falls back to stdlib ElementTree when
-    defusedxml isn't installed. Mirrors mobile_auth._parse_login_xml's pattern
+    """Parse an MWS XML response with defusedxml so a hostile/oversized
+    response can't drive an XML attack. Mirrors mobile_auth._parse_login_xml
     (this module parses responses from the same server)."""
-    try:
-        import defusedxml.ElementTree as DET
-        return DET.fromstring(body)
-    except ImportError:
-        return ET.fromstring(body)
+    return DET.fromstring(body)
 
 def _local(tag: str) -> str:
     """Local (namespace-stripped) name of an ElementTree tag.
@@ -174,7 +172,7 @@ async def get_live_video_stream(session: aiohttp.ClientSession,
     # server rejection likely. We send the full app set first; a reviewer should
     # trim it empirically against ONE live capture (see specs/mws_getlivevideostream.md).
     if mobile_device_uid:
-        form = _device_fields(mobile_device_uid)
+        form = device_fields(mobile_device_uid)
     else:
         # No device uid threaded through: fall back to the minimal envelope plus
         # the app-integrity Haiku, which gates the alarm.com endpoints.
@@ -203,7 +201,7 @@ async def get_live_video_stream(session: aiohttp.ClientSession,
     async with session.post(MWS_URL, data=form, headers=headers) as resp:
         _raise_if_rate_limited(resp)
         resp.raise_for_status()
-        body = _read_body_text(await resp.read())
+        body = read_body_text(await resp.read())
     return parse_live_video_stream(body)
 
 
@@ -384,12 +382,12 @@ def _base_token_form(action, session_token, *, customer_id=None,
     """Assemble the BaseTokenRequest envelope shared by every MWS token action.
 
     Mirrors get_live_video_stream exactly: the full app device envelope
-    (_device_fields, which includes Haiku/ApplicationBuildNumber) when a device
+    (device_fields, which includes Haiku/ApplicationBuildNumber) when a device
     uid is threaded through, else the minimal Haiku/build fallback; then Action +
     SessionToken + ForceServerError, optional CustomerId/SeamlessLoginToken, and
     any per-action ``extra`` params (None-valued extras are dropped)."""
     if mobile_device_uid:
-        form = _device_fields(mobile_device_uid)
+        form = device_fields(mobile_device_uid)
     else:
         form = {"Haiku": HAIKU, "ApplicationBuildNumber": APP_BUILD,
                 "UseNewSessionManager": "true"}
@@ -415,7 +413,7 @@ async def _post_mws(session, form):
     async with session.post(MWS_URL, data=form, headers=headers) as resp:
         _raise_if_rate_limited(resp)
         resp.raise_for_status()
-        return _read_body_text(await resp.read())
+        return read_body_text(await resp.read())
 
 
 def parse_doorbell_camera_list(xml):

@@ -56,6 +56,34 @@ def test_counts_and_durations():
           "audio PLAYED not clip length, snapshot is JSON-serialisable")
 
 
+def test_by_path_counter():
+    """by_path must record WHICH talk transport actually ran, per success.
+
+    The talk response reports its transport ("full_duplex"/"webrtc"/"srtp"),
+    but a caller only sees its own response -- without this counter a preferred
+    path silently degrading to the fallback for every talk is invisible in
+    /control/metrics."""
+    m = TalkMetrics()
+    for path, n in (("full_duplex", 2), ("webrtc", 1), ("srtp", 1)):
+        for _ in range(n):
+            m.attempt()
+            m.success("cam-1", wall_s=1.0, result={"path": path})
+    # A stopped talk still ran a transport, so it counts too (like by_codec).
+    m.attempt()
+    m.success("cam-1", wall_s=0.5, result={"path": "full_duplex", "stopped": True})
+    # Failures and path-less results must not add a bucket.
+    m.attempt()
+    m.failure("cam-1", "no_upstream_audio", wall_s=1.0)
+    m.attempt()
+    m.success("cam-1", wall_s=1.0, result={})
+
+    snap = m.snapshot()
+    assert snap["by_path"] == {"full_duplex": 3, "webrtc": 1, "srtp": 1}, snap
+    json.dumps(snap)   # must stay serialisable for the control API
+    print("  ok  by_path: one count per talk that ran a transport, "
+          "failures and path-less results excluded")
+
+
 def test_recent_window_bounded():
     m = TalkMetrics()
     for i in range(50):
@@ -95,8 +123,8 @@ def test_reason_labels_carry_no_detail():
 
 def main():
     failures = 0
-    for test in (test_counts_and_durations, test_recent_window_bounded,
-                 test_reason_labels_carry_no_detail):
+    for test in (test_counts_and_durations, test_by_path_counter,
+                 test_recent_window_bounded, test_reason_labels_carry_no_detail):
         try:
             test()
         except AssertionError as exc:
