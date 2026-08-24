@@ -38,6 +38,15 @@ from aiortc import (MediaStreamError, MediaStreamTrack, RTCConfiguration,
                     RTCIceServer, RTCPeerConnection, RTCSessionDescription)
 from aiortc.sdp import candidate_from_sdp
 
+# Imported for its import-time side effect. This module answers the camera's
+# offer with a sendrecv audio m-line and runs a background receive task, so it
+# builds an Opus decoder of its own and inherits the same defect janus_client
+# does: one malformed packet kills the audio-decoder thread and the receive task
+# then waits forever on a `recv()` nothing will ever complete. Importing the
+# patch from both entry points is free (module import is cached, and the guard
+# refuses to apply itself twice).
+from . import aiortc_opus_patch  # noqa: F401
+
 log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2.0.1"

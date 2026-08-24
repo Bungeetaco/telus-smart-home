@@ -268,7 +268,8 @@ Load-bearing ffmpeg flags, found empirically against this exact stack:
 | `-g <fps>` | GOP tied to the measured fps (not a fixed frame count) → consistent ~1s keyframe interval regardless of camera frame rate, and clean alignment with HA's 2.0s HLS segmenter. |
 | `-pkt_size 1200` | Keep RTP payloads under MediaMTX's repacketization threshold; letting MediaMTX repacketize strips DTS continuity ("No dts in N consecutive packets" in HA). |
 | `-use_wallclock_as_timestamps 1` | Makes the video timeline advance with real time, including while held frames are repeated during a rotation gap. **Video input only** — the audio input's timeline is its own sample count (see "Downstream (listen) audio"). |
-| `-r <fps>` before `-i` | **Video-only publishes only.** It declares the raw input's frame rate, and in doing so it *overrides* `-use_wallclock_as_timestamps`: the timeline then advances by 1/fps per frame **written** instead of per second **elapsed**, so a camera delivering fewer frames than the fps ffmpeg was told produces proportionally less media than wall time. With nothing else sharing that timeline this is invisible, which is why it is kept for the long-proven video-only command line. With a second input it is fatal — see below. |
+| `-framerate <fps>` before `-i` | Declares the camera's frame rate to the **rawvideo demuxer**, so the output stays CFR at that rate and `-g <fps>` above spans the ~1s it is chosen for. Without it, the demuxer's default of 25 fps applies to every camera regardless of its real rate, which duplicates frames for a slower one and *drops* them for a faster one. It does **not** touch the packet timestamps, which is what separates it from `-r` below. |
+| `-r <fps>` before `-i` | **Never used, on either command line.** It forces the input *stream's* frame rate and in doing so *overrides* `-use_wallclock_as_timestamps`: the timeline then advances by 1/fps per frame **written** instead of per second **elapsed**, so a camera delivering fewer frames than the fps it was measured at publishes proportionally less media than wall time and an HLS consumer falls progressively behind live. With a second input it is worse than silent — see below. |
 | `-rtsp_transport tcp` | RTSP over TCP to MediaMTX. |
 
 When `JANUS_CONSUME_AUDIO` applies to the camera, the same subprocess gets a
@@ -279,31 +280,69 @@ parameters are fully described by `-f`/`-ar`/`-ac`, so there is nothing to probe
 for, and without it ffmpeg would wait on input 1 before starting the output at
 all. See "Downstream (listen) audio" below for the rest of that path.
 
-The audio-enabled command line also **drops `-r <fps>` from the video input**,
-and that single omission is what makes a two-input publish survive. The two
-inputs have to share one clock: the audio timeline is real time (the silence fill
-is sized from the wallclock), so the video timeline must be too. `-r` prevents
-that, and the two then diverge by exactly the shortfall between the fps ffmpeg
-was declared and the rate frames actually arrive at — a dropped frame, or a
-burst-contaminated fps measurement. Audio outruns video, the muxer's interleaver
-stops accepting audio packets, ffmpeg stops draining the pipe, and the sink
-rebuilds the publisher every few seconds (kicking every RTSP reader each time).
+#### How the video input declares its frame rate
 
-Measured inside the deployed container image (ffmpeg 7.1.5, `h264_vaapi`), both
-pipes fed at real-time pacing with the input declared `-r 25` while frames were
-written at 15 fps: as shipped, the audio backlog crossed the sink's 512 kB limit
-in ~10 s on every run — to `-f null`, to a file, and to a live RTSP publish — and
-11 s of wall time produced 6.2 s of video (exactly the 15/25 ratio). Without
-`-r`, the backlog stayed at zero across a 100 s RTSP publish and 22 s of wall
-time produced 21.96 s of video. **This is not a quirk of the image's ffmpeg
-version:** the same reproduction and the same fix hold on ffmpeg n9.0.1.
-Everything else that looks like a candidate still stalls at ~10 s on both builds
-— `-thread_queue_size` on either or both inputs, dropping
+The video input is **identical on both command lines** — the audio fragments
+above are the only difference between them — and how it declares the camera's
+frame rate is load-bearing in two opposite directions.
+
+`-r <fps>` before `-i` forces the input stream's frame rate and overrides
+`-use_wallclock_as_timestamps`, so the timeline advances 1/fps per frame
+*written* rather than per second *elapsed*. On its own that is a silent defect:
+a camera delivering fewer frames than the fps it was measured at publishes less
+media than wall time, nothing errors, and an HLS consumer drifts further behind
+live for as long as the stream runs. With a second input it is fatal, because
+the audio timeline really is real time (the silence fill is sized from the
+wallclock): audio outruns video, the muxer's interleaver stops accepting audio
+packets, ffmpeg stops draining the pipe, and the sink rebuilds the publisher
+every few seconds — kicking every RTSP reader each time.
+
+Declaring nothing is not the alternative. The rawvideo demuxer's own `framerate`
+option **defaults to 25** (`ffmpeg -h demuxer=rawvideo`), so an input with no
+rate declaration is re-rated to a constant 25 fps whatever the camera actually
+does: frames are duplicated for a slower camera and *dropped* for a faster one,
+and `-g <fps>` then spans a different number of seconds than the ~1 s it exists
+to produce. `-framerate <fps>` declares the rate to the demuxer without touching
+the timestamps, which is the combination this pipeline needs.
+
+Measured inside the deployed container image (ffmpeg 7.1.5, `h264_vaapi`,
+1280×720 → 960×540, publishing live RTSP into MediaMTX), 40 s of wall time per
+run. The `libx264` path was measured alongside it and matches row for row.
+
+| Declared / fed | Rate declaration | Media per 40 s wall | Frames written → encoded | Output rate | Keyframe gap |
+|---|---|---|---|---|---|
+| 15 fps / 9 fps | `-r 15` | 24.07 s | 361 → 361 | 15 fps | 1.0 s |
+| 15 fps / 9 fps | *(none)* | 40.04 s | 361 → 1001 | 25 fps | 0.6 s |
+| 15 fps / 9 fps | `-framerate 15` | 40.07 s | 361 → 601 | 15 fps | 1.0 s |
+| 30 fps / 30 fps | `-r 30` | 40.03 s | 1201 → 1201 | 30 fps | 1.0 s |
+| 30 fps / 30 fps | *(none)* | 40.08 s | 1201 → 1002 (**199 dropped**) | 25 fps | 1.2 s |
+| 30 fps / 30 fps | `-framerate 30` | 40.03 s | 1201 → 1201 | 30 fps | 1.0 s |
+| 6 fps / 6 fps | `-r 6` | 40.17 s | 241 → 241 | 6 fps | 1.0 s |
+| 6 fps / 6 fps | *(none)* | 40.08 s | 241 → 1002 | 25 fps | 0.24 s |
+| 6 fps / 6 fps | `-framerate 6` | 40.17 s | 241 → 241 | 6 fps | 1.0 s |
+
+The `-r` rows at a frame shortfall are the defect: 40 s of wall time published as
+24 s of media, exactly the 9/15 ratio of written-to-declared fps. The *(none)*
+rows are why removing the flag is not enough by itself.
+
+With the audio input attached, same build, declared 15 fps while frames were
+written at 9 fps — the shortfall that stalls:
+
+- `-r 15`: the audio backlog crossed the sink's 512 kB limit at 9.6 s, video
+  timeline 24.07 s per 40 s of wall time.
+- *(none)*: backlog flat at 0 bytes across a 100 s RTSP publish, timeline
+  100.0 s/100.0 s — and ffmpeg logs `More than 1000 frames duplicated`, the
+  re-rate to 25 fps.
+- `-framerate 15`: backlog flat at 0 bytes across a 100 s RTSP publish, timeline
+  100.0 s/100.0 s, output CFR 15 fps, no duplication warning.
+
+**This is not a quirk of the image's ffmpeg version:** the same reproduction and
+the same behaviour hold on ffmpeg n9.0.1. Everything else that looks like a
+candidate still stalls at ~10 s on both builds while `-r` is present —
+`-thread_queue_size` on either or both inputs, dropping
 `-analyzeduration`/`-probesize`, `-use_wallclock_as_timestamps` on both inputs or
 on neither, `-fps_mode passthrough`/`vfr`, `-max_interleave_delta 0`, dropping
-`-af aresample`, and swapping the input order. The frame *count* is unchanged:
-ffmpeg still encodes one output frame per frame written, so `-g`'s
-keyframe-every-fps-frames behaviour and the encode cost are what they were.
+`-af aresample`, and swapping the input order.
 
 Frames larger than `MAX_ENCODE_DIMENSION` (960px on the larger side) are
 downscaled at the encode step. Some cameras publish natively at 1440×1440, which
@@ -632,24 +671,76 @@ Three properties of that path are load-bearing:
   guess was wrong.
 
 The audio stream's timeline is its own sample count, and the video's is the wall
-clock (which is why the audio-enabled video input drops `-r` — see the flag table
-above). Stamping the audio input with the wallclock too would tie its timeline to
-*when a write happened to be flushed* rather than to how many samples exist, so a
+clock (which is why no video input carries `-r` — see "How the video input
+declares its frame rate" above). Stamping the audio input with the wallclock too
+would tie its timeline to *when a write happened to be flushed* rather than to
+how many samples exist, so a
 burst after a stall would compress into no time at all. That is what makes the
 wallclock-derived silence count load-bearing rather than cosmetic: the sample
 count is the only thing tying the audio to real time, and therefore to the video
-beside it. The asymmetry is a design choice, not a workaround — with `-r` gone
-the pipeline also stays drained with the flag on both inputs (measured on 7.1.5;
-never run live that way). `-af aresample=async=1` (fill-and-trim only, no
+beside it. The asymmetry is a design choice, not a workaround — with no `-r` on
+the video input the pipeline also stays drained with the flag on both inputs
+(measured on 7.1.5; never run live that way). `-af aresample=async=1` (fill-and-trim only, no
 stretching) absorbs what is left. The audio input and encoder are
 spliced into the `common_in`/`common_out` fragments every encoder variant is
 built from, so a hardware path that publishes audio while the software fallback
 silently does not is not expressible.
 
-`/control/status` reports `audio_consumed`, `audio_format` and
-`dropped_audio_frames` per camera (see [control-api.md](control-api.md)). Note
-that the frame-silence watchdog is **video-only**: audio can stop while a camera
-still reports `streaming`.
+`/control/status` reports `audio_consumed`, `audio_format`,
+`decoded_audio_frames` and `dropped_audio_frames` per camera (see
+[control-api.md](control-api.md)). `audio_format` is the shape of a frame that
+was actually **decoded**, and is `null` until one has been — never the shape the
+publisher was launched with, which is a guess until the first frame arrives.
+`decoded_audio_frames` is what makes flow checkable at a glance: consumption on
+and that counter stuck at `0` is a silent stream. Note that the frame-silence
+watchdog is **video-only**: audio can stop while a camera still reports
+`streaming`.
+
+#### aiortc's Opus decoder is patched to survive a bad packet
+
+`bridge/aiortc_opus_patch.py` replaces `aiortc.codecs.opus.OpusDecoder.decode`
+at import time, and without it downstream audio does not work at all on this
+account's doorbell.
+
+Upstream, aiortc's two decoders are not written the same way. `H264Decoder.decode`
+wraps its decode in `try/except av.FFmpegError`, logs and returns no frames, so a
+bad packet costs one packet. `OpusDecoder.decode` has **no handler**, and neither
+does `rtcrtpreceiver.decoder_worker` — which is a *thread target*. So one
+malformed Opus packet kills that session's `audio-decoder` thread outright, and
+the thread is started exactly once per receiver with no restart path.
+
+Nothing above notices. The receiver gates further RTP on the Thread *object*,
+which stays truthy after the thread dies, so packets keep being queued to nobody
+(~8,000 per session); the frame-silence watchdog is video-only; and the sink
+keeps the audio input alive with silence, so the RTSP path carries a perfectly
+valid, perfectly silent AAC track. Measured on the live published stream before
+the patch: **9,572,352 of 9,572,352 samples at the s16 noise floor**, with
+`max_volume == mean_volume` — not one nonzero sample — across eleven consecutive
+sessions, each of which logged `Exception in thread audio-decoder` and left zero
+live audio-decoder threads. The bridge's own audio pump also leaked a task per
+session, waiting forever on a `recv()` whose end-of-stream sentinel only the dead
+worker could produce.
+
+The patch mirrors h264.py exactly: catch `av.FFmpegError`, log, return no frames.
+The decoder object survives a rejected `avcodec_send_packet()` and decodes the
+next packet normally.
+
+**What the bad packet is, is not yet known.** libopus does not reject ordinary
+Opus: every TOC code-0 packet — the shape of every normal 20 ms WebRTC Opus
+packet — decodes (0 of 500 rejected in a calibration sweep). The byte sequences
+that *do* reproduce the exact error are Ogg identification headers
+(`OpusHead` / `OpusTags`, whose TOC byte 0x4f is frame-count code 3) and H.264
+NAL bytes, i.e. something that is not an Opus payload arriving on the Opus
+payload type. A stream-start identification header is the leading hypothesis and
+it is **unverified**, which is why the patch logs `len` and the first 16 bytes of
+the offending packet — once per session, since the stream runs at ~50 packets/s.
+
+The patch carries an import-time compatibility guard, on the same terms as the
+integration's three `telus_*_patch.py` modules: it refuses to apply if the class
+or method moved, if it is being applied twice, or if upstream has grown its own
+exception handling (which would most likely mean upstream fixed this and the
+module should be deleted). Neither aiortc 1.15.0 — the pin — nor upstream `main`
+fixes it today; both `OpusDecoder.decode` and `decoder_worker` are unchanged.
 
 #### What is established about asking for the track
 

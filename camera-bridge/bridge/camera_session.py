@@ -42,6 +42,23 @@ async def _close_with_timeout(session: JanusCameraSession, camera_id: str) -> No
                       camera_id)
 
 
+def _audio_format_str(fmt) -> str | None:
+    """`(sample format, rate, channels)` as /control/status's `audio_format`
+    string, or None for "nothing observed".
+
+    Deliberately fed from OBSERVED frames only. It used to be rendered from what
+    the running ffmpeg had been LAUNCHED with, which is
+    `config.AUDIO_DEFAULT_FORMAT` -- literally ("s16", 48000, 2) -- whenever no
+    frame had been decoded yet. That made the field report a confident
+    "48000Hz/2ch/s16" for a camera whose audio-decoder thread was dead and whose
+    published track was pure silence, and it is why eleven consecutive sessions
+    of total silence went unnoticed. A field that reads the same whether or not
+    audio exists cannot answer the only question it is ever asked."""
+    if not fmt:
+        return None
+    return f"{fmt[1]}Hz/{fmt[2]}ch/{fmt[0]}"
+
+
 async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
     consecutive_failures = 0  # reset on any successful frame batch; see the
@@ -71,8 +88,14 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # contract about the video stream, and a caller that has always read
         # dropped_frames as "video frames lost" must not silently start getting a
         # mixed count.
+        # audio_format stays null until a frame is actually DECODED (see
+        # _audio_format_str), and decoded_audio_frames is what makes "audio is
+        # flowing" checkable without measuring the published track: a camera
+        # with audio_consumed true and decoded_audio_frames stuck at 0 is
+        # publishing silence, which is exactly the failure aiortc_opus_patch.py
+        # exists for and which nothing here could see before.
         "audio_consumed": consume_audio, "audio_format": None,
-        "dropped_audio_frames": 0,
+        "decoded_audio_frames": 0, "dropped_audio_frames": 0,
     }
 
     def _update_status(**fields):
@@ -85,6 +108,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # total per camera.
     dropped_frames_total = 0
     dropped_audio_frames_total = 0
+    # Lifetime total of decoded audio frames this camera's sessions have handed
+    # to the publisher. Unlike the two drop counters it is NOT folded in at
+    # session end -- it is incremented by the pump as each frame arrives, so it
+    # answers "is audio flowing right now" rather than "did audio flow during
+    # the session that just retired".
+    decoded_audio_frames_total = 0
 
     async def _retire_session(sess):
         # The single exit for a finished/failed session: fold its drop counter
@@ -134,7 +163,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # directly -- a sink that refuses a frame sets the rebuild flag and the
         # VIDEO loop acts on it, so the repair goes through exactly the same path
         # a frame-size change does.
-        nonlocal known_audio_fmt, audio_rebuild_needed
+        nonlocal known_audio_fmt, audio_rebuild_needed, decoded_audio_frames_total
         try:
             while True:
                 frame = await sess.next_audio_frame(c.AUDIO_SILENCE_TOPUP_S)
@@ -151,12 +180,20 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         audio_rebuild_needed = True
                         return
                     continue
+                # Counted BEFORE the write: this is "a frame was decoded and
+                # reached the publisher's pump", which is the fact
+                # /control/status could not report before -- a sink that then
+                # refuses the frame is a separate, already-visible failure
+                # (the rebuild below).
+                decoded_audio_frames_total += 1
                 observed = ffmpeg_sink.audio_format_of(frame)
                 if observed != known_audio_fmt:
                     # Purely an observation, exactly like reading (w, h) off a
                     # video frame -- the GUARD that stops a mismatched frame
                     # corrupting the pipe lives in sink.write_audio.
                     known_audio_fmt = observed
+                    _update_status(audio_format=_audio_format_str(observed))
+                _update_status(decoded_audio_frames=decoded_audio_frames_total)
                 if sink is None or not await sink.write_audio(frame):
                     audio_rebuild_needed = True
                     return
@@ -185,11 +222,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     async def _hold_frames():
         # Repeat the most recent real frame at the camera's fps while the Janus
         # session is being rotated/reconnected, so the RTSP publish never goes
-        # silent -- the repeated frames keep the encoder's output moving, and on
-        # an audio-enabled publisher they also keep its timeline moving at real
-        # time, since that is the argv where -use_wallclock_as_timestamps is
-        # actually in effect (see ffmpeg_sink.py's comment on the video input's
-        # omitted `-r`). Bounded by
+        # silent -- the repeated frames keep the encoder's output moving, and
+        # they keep its timeline moving at real time, since
+        # -use_wallclock_as_timestamps is in effect on every publisher this
+        # bridge launches (see ffmpeg_sink.py's comment on the video input's
+        # absent `-r`). Bounded by
         # time-since-last-real-frame, not per-invocation, so a genuinely
         # offline camera (e.g. the 2026-07-17 doorbell outage) stops
         # masquerading as live after FRAME_HOLD_MAX_S and fails honestly.
@@ -375,8 +412,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # out to be wrong, write_audio's guard forces a rebuild.
                 if consume_audio:
                     observed_audio = getattr(session, "audio_format", None)
-                    if observed_audio is not None:
+                    if observed_audio is not None and observed_audio != known_audio_fmt:
                         known_audio_fmt = observed_audio
+                        # The peek is a real decoded frame, so it is the earliest
+                        # honest answer /control/status can give -- and on a
+                        # healthy camera it lands a rotation before the pump's
+                        # first frame does.
+                        _update_status(audio_format=_audio_format_str(observed_audio))
                 desired_audio_fmt = (
                     (known_audio_fmt or c.AUDIO_DEFAULT_FORMAT) if consume_audio else None)
                 audio_rebuild_needed = False
@@ -413,9 +455,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # see a mismatch and rebuild the publisher forever, which is
                     # the one thing this loop exists to avoid.
                     sink_audio_fmt = desired_audio_fmt
-                    live = sink.audio_format
-                    _update_status(audio_format=(
-                        f"{live[1]}Hz/{live[2]}ch/{live[0]}" if live else None))
+                    # NOTE: /control/status's audio_format is deliberately NOT
+                    # written here. What the sink was launched with is a guess
+                    # (AUDIO_DEFAULT_FORMAT) until a frame has actually been
+                    # decoded, and publishing that guess is what let eleven
+                    # sessions of pure silence report "48000Hz/2ch/s16". The
+                    # field is written only where a real frame is observed --
+                    # the peek above and the audio pump.
                 if consume_audio and sink.audio_enabled:
                     audio_task = asyncio.ensure_future(_pump_audio(session))
 

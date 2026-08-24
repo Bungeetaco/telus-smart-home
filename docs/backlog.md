@@ -39,10 +39,14 @@ and evidence.
 - **E54** (follow-up) — audio consumption works and MediaMTX accepts it, but no
   real camera has been through it end to end, and the frame-silence watchdog is
   video-only, so audio can die while a camera still reports `streaming`.
-- **E58** — the video-only argv still carries `-r`, with the same latent
-  slow-timeline defect E54 fixed on the audio path.
-- **E59** — aiortc's audio decoder dies once per session on the doorbell, so
-  decoded audio arrives in gaps.
+- **E60** (open) — `dropped ... consumer falling behind` runs at ~300 frames
+  per session (~12%) on the doorbell. Whether the CFR-25 re-rate E58 fixed was
+  the cause is unproven; re-measure now that it publishes at its real rate.
+- **E59** (follow-up) — the Opus-decoder patch ships, but that real sound now
+  reaches the stream is unconfirmed; the deploy's `head=` log line identifies
+  the malformed packet.
+- **E61** — silent audio is invisible from Home Assistant; the fields that
+  expose it live only on `/control/status`.
 - **E55** — the device-direct listen path's format is unrecorded; one
   read-only capture would settle whether it is viable at all.
 - **E56** — the doorbell button press is not a first-class event, which blocks
@@ -1231,90 +1235,89 @@ when it ships.
   5-vs-25 fps mismatch and a deliberate 5% audio skew. Not yet exercised: Home
   Assistant's HLS worker or Frigate actually consuming the two-stream path.
 
-- **E58 (open) The video-only path still carries `-r`, and has the same latent
-  slow-timeline defect.** E54's fix removes `-r` only on the audio-enabled
-  argv, to keep the audio-off command byte-identical. But the mechanism is not
-  audio-specific: whenever a camera delivers fewer frames than its declared
-  fps, that stream publishes less media than wall time, so an HLS consumer
-  falls progressively behind live. It is the same one-token change, and it
-  needs its own live validation before shipping — the byte-identical guarantee
-  is the only reason it was not done at the same time.
+- **E58 (DONE) The video input declares its rate with `-framerate`, never
+  `-r`.** Both halves of that matter, and the second is the one that nearly got
+  shipped wrong.
 
-- **E59 (open) aiortc's audio decoder dies on the doorbell every session.**
-  Visible in the live logs even with consumption OFF (the drain path still
-  decodes): `av.error.InvalidDataError ... avcodec_send_packet()`, once per
-  session. Video is unaffected, but it means decoded audio arrives in gaps
-  rather than continuously, so the silence fill will do considerably more work
-  than expected once consumption is enabled. Whether this is a malformed first
-  packet, a codec-parameter mismatch, or something about how the gateway starts
-  the Opus stream is **unknown** — nothing has been captured yet.
+  `-r <fps>` before `-i` forces the input stream's rate and overrides
+  `-use_wallclock_as_timestamps`, so the timeline advances per frame *written*
+  rather than per second *elapsed* — measured at 24.07 s of media per 40 s of
+  wall time when a 15 fps-declared camera delivered 9 fps, exactly the 9/15
+  ratio. That is the drift an HLS viewer accumulates.
 
-- **E55 (open) Device-direct listen audio is not an RTSP pull.** The `<cli>`
-  element's `re`/`dre`/`lre`/`pre` attributes look like RTSP URLs, but the
-  device has **no RTSP server**: its media port answers RTSP with an HTTP 400
-  from lighttpd, and the URLs are consumed over HTTPS as
-  `GET /api/GetStream?streamID=0` with Digest auth. Pointing ffmpeg at the
-  published `rtsp://` string simply fails. The body's container and whether it
-  carries audio are **unrecorded** — the existing read-only probe tool fetches
-  that path but prints only the first bytes; capturing a few seconds and
-  running `ffprobe` over it is the cheapest next step. Two reasons this is not
-  a 24/7 path even if the format works: refreshing the per-session credentials
-  means standing MWS polling against an account with undocumented rate limits
-  (today those calls are user-triggered only), and every talkdown ends with
-  `EndLiveStream`, which would plausibly tear down a long-lived reader holding
-  the same session. An on-demand listen session, built as talkdown's sibling,
-  is the shape that avoids both.
+  But **removing `-r` outright is not the fix.** The rawvideo demuxer's
+  `framerate` option defaults to **25**, so with no declaration every stream is
+  re-rated to a constant 25 fps: frames duplicated below it and *dropped* above
+  it (measured: 1201 written → 1002 encoded, 199 lost, on a 30 fps source), and
+  `-g <fps>` then spans 0.24–1.2 s instead of the ~1 s it exists for.
+  `-framerate <fps>` sets the demuxer's rate without touching timestamps, which
+  is the combination this pipeline needs; it was verified identical to `-r` in
+  output rate, frame count and GOP while tracking wallclock, on VAAPI and
+  libx264 alike, at 6/15/25/30 fps.
 
-- **E56 (open, blocked on a capture) The doorbell button press is not a
-  first-class event.** A press lands in the generic activity feed and there is
-  no `doorbell`-device-class event entity, so every ring-triggered automation
-  has to pattern-match free text instead of triggering on a press.
+  **This was already live and wrong.** E54's fix removed `-r` from the
+  audio-enabled argv only, so from the moment audio was enabled the doorbell
+  published **CFR 25 with 0.6 s keyframes** — roughly 67% more encoded frames
+  than intended — while E54's note claiming "frame count is unchanged" was
+  simply false. Both are corrected.
 
-  **What blocks it is evidence, not effort.** The press's own wire shape is
-  unrecorded: no press appears anywhere in Home Assistant's retained recorder
-  history, none in the last 100 entries of either the history or video-event
-  feed, and the upstream library has no doorbell event vocabulary at all. The
-  reference documentation asserts the history feed carries doorbell presses,
-  but that claim is not backed by a captured example here.
+- **E59 (DONE, fix unconfirmed on a live stream) aiortc's Opus decoder killed
+  its own thread, and the published audio was pure silence.** The entry above
+  understated this badly: audio did not "arrive in gaps" — it never arrived at
+  all. Measured on the live published stream with `ffmpeg -af volumedetect` over
+  200 s: **9,572,352 of 9,572,352 samples at the s16 noise floor**, `max_volume`
+  equal to `mean_volume`. Every sample in the doorbell's AAC track was coming
+  from the sink's silence fill.
 
-  Two facts shape the fix once a press IS captured. This account's event
-  descriptions arrive in **French** ("Déclenché par caméra (Une personne)",
-  "Mouvement détecté"), so a press will be French too and the classifier —
-  which already matches both languages for person/vehicle/animal — needs the
-  French press wording, not just an English guess. And each event carries a
-  `device_description` field (e.g. `Doorbell`), which is how a press can be
-  attributed to the right camera. Capture one real press, pin its
-  `event_type_name` and description, then the entity itself is small.
+  The cause is a two-file asymmetry in aiortc. `codecs/h264.py` wraps its decode
+  in `try/except av.FFmpegError`, logs, and returns `[]` — one packet dropped,
+  decoder lives (43 such warnings live, zero dead video threads). `codecs/opus.py`
+  has **no handler at all**, and neither does `decoder_worker`'s loop, so one
+  malformed packet propagates out of the thread target and the `audio-decoder`
+  thread **dies permanently** — it is started once, with no restart path. Live:
+  11 sessions, 11 deaths. Two silent consequences followed: the receiver keeps
+  queueing to the dead thread (its gate tests the Thread *object*, truthy even
+  when dead) at ~8,000 frames per session, and the bridge's audio pump waits
+  forever on a `recv()` whose end-sentinel only the dead worker could produce.
 
-- **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
-  library the integration is built on carries a notice that its maintainer has
-  moved and no longer has an Alarm.com system to test against, on an indefinite
-  timeline. The repository is not archived or disabled, but its last functional
-  commit predates the notice by more than a year — so in practice the library
-  has been dormant for as long as this project has been active, and the notice
-  formalises a status quo rather than changing it.
+  Fixed by `bridge/aiortc_opus_patch.py`, a fourth monkeypatch following the
+  integration's `*_patch.py` convention with an import-time compatibility guard
+  — including a check that upstream has not grown its own handler, which would
+  mean the patch should be deleted. **Not fixed upstream:** 1.15.0 is the latest
+  release and `main` is byte-identical.
 
-  **No action is required now, and pinning is why.** `manifest.json` pins an
-  exact version, Renovate keeps it in the never-auto-merge group, and the CI
-  smoke test imports all three monkeypatches and asserts the private instance
-  attributes the replaced `async_login` depends on — so an upstream change
-  cannot reach this project silently, and an upstream that never changes cannot
-  reach it at all. The project already reimplements the parts it most depends
-  on (the bridge re-does auth from scratch; the integration patches login, the
-  websocket heartbeat and the push handler).
+  **What the status endpoint was doing is worth remembering.** `audio_format`
+  was rendered from what ffmpeg had been *launched* with, which falls back to
+  `AUDIO_DEFAULT_FORMAT` — literally `("s16", 48000, 2)`. So through eleven
+  sessions of total silence it reported a confident `"48000Hz/2ch/s16"`
+  alongside `state: streaming` and a fresh `last_frame_at`. Nothing in the
+  payload could distinguish flowing audio from audio that had never decoded a
+  single frame. It now reports `null` until a frame is genuinely observed, and a
+  new `decoded_audio_frames` counter makes flow checkable by polling twice.
+  `dropped_audio_frames` could never have caught this: a stream that decodes
+  nothing drops nothing.
 
-  What the pause does change is the calculus for later. The "when a bump PR
-  appears" procedure in [development.md](development.md) is now unlikely ever
-  to fire, and nobody upstream will adapt the library if Alarm.com changes
-  something. Triggers that should reopen this: the pinned version failing on a
-  Python version the runtime moves to, a security advisory against it or its
-  dependencies, or a change this project wants in code it currently reaches by
-  monkeypatch.
+  **Still unconfirmed:** that real sound now reaches the stream. The identifying
+  log line carries `len=` and `head=` of the rejected bytes; the leading
+  hypothesis is an `OpusHead`/`OpusTags` identification header at stream start
+  (it reproduces the error exactly), but H.264 NAL bytes reproduce it too and
+  would be a much worse diagnosis. One deploy settles it.
 
-  **The likely eventual answer is vendoring, not forking.** Three internals are
-  already monkeypatched with compatibility guards precisely because they cannot
-  be changed in place; vendoring the library into the integration would turn
-  those patches into ordinary edits and delete the guard machinery
-  (`check_patch.py` included) along with the pin. It is not worth doing on
-  spec — do it when one of the triggers above forces the question, and record
-  the outcome here.
+- **E61 (open) Silent audio is invisible from Home Assistant.** The integration
+  surfaces only `state` and `dropped_frames` from `/control/status`, so the two
+  fields that would have exposed E59 — `audio_format` and the new
+  `decoded_audio_frames` — are reachable only by curling the bridge. A camera
+  whose audio decoder dies looks perfectly healthy in HA. A diagnostic sensor
+  per audio-consuming camera would close that gap; it is small, and the value is
+  precisely that nobody had to notice eleven silent sessions by hand.
+
+- **E60 (open) The doorbell drops ~12% of its frames to "consumer falling
+  behind".** `dropped ... frame(s) -- consumer falling behind` climbs to roughly
+  300 per session on the doorbell, every rotation. It was noticed while
+  measuring E58, and one plausible cause was the CFR-25 re-rate that E58 fixed:
+  the publisher was encoding about 67% more frames than the source produced, so
+  the consumer had correspondingly more work. That is a hypothesis, not a
+  finding — the other candidates are the per-frame pixel copy and the 1440x1440
+  source resolution, neither ruled out. **Re-measure now that the doorbell
+  publishes at its real rate**; if the count does not move, the re-rate was not
+  the cause and the remaining candidates are worth the next look.

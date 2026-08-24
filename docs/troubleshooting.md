@@ -19,6 +19,7 @@ the component READMEs.
 - [Alarm.com rate-limiting (HTTP 429)](#alarmcom-rate-limiting-http-429)
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
+- [A live view drifts further behind real time the longer it runs](#a-live-view-drifts-further-behind-real-time-the-longer-it-runs)
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [A camera's stream carries no audio, or the audio stops](#a-cameras-stream-carries-no-audio-or-the-audio-stops)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
@@ -353,6 +354,48 @@ the live session by up to one rotation.
 
 ---
 
+## A live view drifts further behind real time the longer it runs
+
+**Symptom.** The picture is fine and nothing errors, but the live view lags real
+time and the lag *grows*: a few seconds after a minute, tens of seconds after
+several. A clip recorded straight off the RTSP path with `-c copy` is shorter
+than the wall time it was recorded over.
+
+**Cause.** The publisher's video timeline is advancing per frame **written**
+instead of per second **elapsed**, so it publishes less media than wall time and
+a consumer playing it at real speed falls behind by exactly the shortfall. The
+known trigger is `-r <fps>` before `-i` on ffmpeg's raw video input: it forces
+the input stream's rate and overrides `-use_wallclock_as_timestamps`. The ratio
+is exact — a camera fed at 9 fps on an input declared 15 fps publishes 9/15 of
+wall time, measured as 24.07 s of media per 40 s.
+
+**Check.** Compare published duration against wall time by recording the path
+for a known interval and probing the result:
+
+```sh
+docker exec telus-cam-bridge sh -c \
+  'ffmpeg -hide_banner -loglevel error -rtsp_transport tcp \
+     -i "rtsp://bridge:$(cat /shared/rtsp_password)@127.0.0.1:8554/<path>" \
+     -t 30 -c copy -f mpegts /tmp/probe.ts && \
+   ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/probe.ts'
+```
+
+A healthy stream reports ≈30 s. Then check the publisher's own command line —
+`docker exec telus-cam-bridge sh -c 'tr "\0" " " < /proc/<pid>/cmdline'` — where
+there must be **no `-r` before `-i pipe:0`**.
+
+**Fix / design.** The camera's frame rate is declared with the rawvideo demuxer's
+`-framerate <fps>` instead, which leaves the timestamps to
+`-use_wallclock_as_timestamps`. Note that simply deleting the rate declaration
+trades this symptom for another one: the demuxer then falls back to its default
+25 fps and re-rates the output, duplicating frames for a slower camera (visible
+as `More than 1000 frames duplicated` in the ffmpeg log, plus encode load and
+bitrate well above the camera's real rate) or dropping them for a faster one, and
+`-g <fps>` no longer spans ~1 s. See
+[camera-bridge.md](camera-bridge.md) for the measurements.
+
+---
+
 ## A camera's stream carries no audio, or the audio stops
 
 **Symptom.** A camera published by the bridge plays video but no sound, or the
@@ -368,25 +411,52 @@ Naming a camera in only the second is a misconfiguration, not a partial setup:
 no audio track is ever offered for it, so the bridge logs
 `JANUS_CONSUME_AUDIO names this camera but JANUS_REQUEST_AUDIO does not` **once**
 and treats consumption as off. Check `/control/status` — `audio_consumed` is the
-resolved answer, `audio_format` is the shape the running encoder was launched
-with (`null` when audio is not being published).
+resolved answer, `audio_format` is the shape of a frame the camera has actually
+decoded (`null` until one has been), and `decoded_audio_frames` is the count of
+those frames.
+
+**Read those two together first.** `audio_consumed: true` with
+`audio_format: null` and `decoded_audio_frames: 0` means the bridge has never
+decoded a single audio frame from this camera — the published track is silence
+the sink generated, not audio the camera sent. If the counter is climbing
+between two polls, audio *is* flowing and the problem is downstream.
 
 If `audio_consumed` is `true` and there is still no sound:
 
+- **A malformed packet may have killed the decoder thread.** aiortc's Opus
+  decoder has no error handling where its H.264 one does, and its decode loop is
+  a thread target, so one bad packet ends the session's `audio-decoder` thread
+  permanently — while RTP keeps arriving, the video watchdog keeps saying
+  `streaming`, and the sink keeps filling the audio input with silence. The
+  bridge patches that decoder (`bridge/aiortc_opus_patch.py`); the symptom of
+  the patch being absent or having stopped applying is
+  `Exception in thread audio-decoder` in the container log, one per session,
+  with `decoded_audio_frames` pinned at `0`. See
+  [camera-bridge.md](camera-bridge.md#aiortcs-opus-decoder-is-patched-to-survive-a-bad-packet).
 - **The camera may not be sending any.** The gateway offers the track whether or
   not the camera fills it. The stream still carries an audio track — the bridge
-  keeps it alive with silence — so a silent track is not a broken one.
+  keeps it alive with silence — so a silent track is not a broken one. This is
+  the case `decoded_audio_frames` separates from the one above: a camera that
+  sends nothing and a decoder that died both publish silence, and before that
+  counter existed nothing in the status could tell them apart.
 - **The consumer may not accept the codec.** The bridge publishes mono **AAC**
   specifically because HA's HLS worker takes only aac/mp3 and Frigate's `-c copy`
   preset needs an mp4-legal codec. A consumer configured to expect something else
   will drop it.
-- **Audio dying is not detected.** The frame-silence watchdog is video-only, so a
-  camera whose audio has stopped still reports `state: "streaming"` with a fresh
-  `last_frame_at` and nothing reconnects. Watch `dropped_audio_frames` for a
-  consumer falling behind; a stream that simply went quiet leaves no counter at
-  all. Restarting the container is the blunt recovery.
+- **Audio dying is not automatically recovered.** The frame-silence watchdog is
+  video-only, so a camera whose audio stops still reports `state: "streaming"`
+  with a fresh `last_frame_at` and nothing reconnects. It is *detectable* —
+  `decoded_audio_frames` stops advancing between polls — but the recovery is
+  still manual, and restarting the container is the blunt version of it. Watch
+  `dropped_audio_frames` separately for a consumer falling behind; a stream that
+  simply went quiet drops nothing.
 
-Two log lines worth grepping: `ffmpeg has stopped reading the audio pipe`
+Three log lines worth grepping:
+`OpusDecoder: dropped an undecodable packet and kept the audio decoder alive`
+(the patched decoder throwing away a packet libopus rejected — expected at most
+once per session, and the line carries the packet's length and first 16 bytes,
+which is how the still-unidentified offending packet gets identified),
+`ffmpeg has stopped reading the audio pipe`
 (ffmpeg stopped draining input 1 — the publisher is rebuilt) and
 `audio format changed mid-session` (the decoded PCM shape changed, so the
 encoder is relaunched with the real one — expected at most once, on the first
@@ -399,13 +469,13 @@ muxer's interleaver stops accepting audio packets, and the pipe backs up until
 the sink rebuilds the publisher — kicking every RTSP reader each time, while the
 video itself keeps flowing. The known cause is `-r <fps>` on ffmpeg's raw video
 input, which overrides `-use_wallclock_as_timestamps` and makes that timeline
-advance per frame *written* rather than per second *elapsed*; the audio-enabled
-command line omits it for exactly this reason (see
+advance per frame *written* rather than per second *elapsed*; no command line the
+bridge builds carries it, on either path, for exactly this reason (see
 [camera-bridge.md](camera-bridge.md)). Confirm with
 `docker exec telus-cam-bridge sh -c 'tr "\0" " " < /proc/<pid>/cmdline'` for the
-ffmpeg process: there must be **no `-r` before `-i pipe:0`** on a publisher that
-has a second `-i pipe:<n>`. Any *other* cause of a video timeline running behind
-real time would produce the same symptom.
+ffmpeg process: there must be **no `-r` before `-i pipe:0`** — the camera's frame
+rate is declared as `-framerate <fps>` there instead. Any *other* cause of a
+video timeline running behind real time would produce the same symptom.
 
 ---
 
