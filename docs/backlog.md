@@ -1322,8 +1322,15 @@ when it ships.
   300 per session on the doorbell, every rotation. It was noticed while
   measuring E58, and one plausible cause was the CFR-25 re-rate that E58 fixed:
   the publisher was encoding about 67% more frames than the source produced, so
-  the consumer had correspondingly more work. That is a hypothesis, not a
-  finding — the other candidates are the per-frame pixel copy and the 1440x1440
-  source resolution, neither ruled out. **Re-measure now that the doorbell
-  publishes at its real rate**; if the count does not move, the re-rate was not
-  the cause and the remaining candidates are worth the next look.
+  the consumer had correspondingly more work.
+
+  **That hypothesis is now disproven.** Measured after the `-framerate` fix put
+  the doorbell back on its real 15 fps: 46 `consumer falling behind` warnings and
+  5,455 dropped frames in the first twelve minutes — no better than before. So
+  the CFR-25 re-rate was not the cause, and the remaining candidates are the
+  per-frame pixel copy (`frame.to_ndarray` runs in an executor for every frame,
+  at 1440x1440) and the source resolution itself. The bounded queue is
+  `maxsize=4`, so a consumer that stalls for four frames' worth of wall time
+  drops; at 1440x1440 that is roughly 6 MB of copying per second before the
+  encoder sees anything. Worth measuring where the time actually goes before
+  changing anything.
