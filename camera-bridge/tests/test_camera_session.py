@@ -70,7 +70,15 @@ Pinned here:
                           and a keepalive that sends into a dead websocket ends
                           its task quietly instead of finishing with an
                           exception nothing ever retrieves.
- 10. dropped frames    -- each session's drop counter is folded into a
+ 10. audio experiment  -- JANUS_REQUEST_AUDIO (default OFF) leaves the
+                          mountpoint-create body byte-identical to what has
+                          always shipped; with it on, a REJECTED audio create
+                          falls back to that same video-only body instead of
+                          failing the session, so a diagnostic can never feed
+                          the consecutive-failure escape hatch. A track this
+                          bridge does not consume is DRAINED, because aiortc
+                          decodes it regardless and queues it unbounded.
+ 11. dropped frames    -- each session's drop counter is folded into a
                           per-camera lifetime total in the status dict when the
                           session ends (healthy rotation and failure path
                           alike), so /control/status keeps the count across
@@ -78,6 +86,7 @@ Pinned here:
 """
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import pathlib
@@ -1098,6 +1107,340 @@ async def test_janus_keepalive_dies_quietly_when_the_session_is_already_dead():
 
 
 # --------------------------------------------------------------------------
+# 6b. The JANUS_REQUEST_AUDIO experiment, and the track nothing consumes
+# --------------------------------------------------------------------------
+
+class ScriptedGateway:
+    """A Janus streaming-plugin gateway, scripted well enough to drive the REAL
+    connect_and_watch end to end. Answers create/attach/message by inspecting
+    the request rather than by call order, so an extra create (the audio
+    fallback) does not desynchronise the script."""
+
+    OFFER = ("v=0\r\n"
+             "m=video 9 UDP/TLS/RTP/SAVPF 126\r\n"
+             "a=rtpmap:126 H264/90000\r\n"
+             "a=ice-ufrag:NOTAREALUFRAG\r\n")
+
+    def __init__(self, reject_audio_with=None):
+        import asyncio as _asyncio
+        self.sent = []
+        self.creates = []          # every mountpoint-create body, in order
+        self.reject_audio_with = reject_audio_with
+        self.closed = 0
+        self._out = _asyncio.Queue()
+
+    async def _emit(self, msg, txn=None):
+        msg = dict(msg)
+        if txn is not None:
+            msg.setdefault("transaction", txn)
+        await self._out.put(json.dumps(msg))
+
+    async def send(self, raw):
+        msg = json.loads(raw)
+        self.sent.append(msg)
+        txn = msg.get("transaction")
+        kind = msg.get("janus")
+        if kind == "create":
+            await self._emit({"janus": "success", "data": {"id": 11}}, txn)
+        elif kind == "attach":
+            await self._emit({"janus": "success", "data": {"id": 22}}, txn)
+        elif kind == "message":
+            body = msg.get("body") or {}
+            request = body.get("request")
+            if request == "create":
+                self.creates.append(body)
+                if body.get("audio") and self.reject_audio_with is not None:
+                    await self._emit(self.reject_audio_with, txn)
+                else:
+                    await self._emit({"janus": "success", "plugindata":
+                                      {"data": {"stream": {"id": 77}}}}, txn)
+            elif request == "watch":
+                await self._emit({"janus": "ack"}, txn)
+                await self._emit({"janus": "event",
+                                  "jsep": {"type": "offer", "sdp": self.OFFER}}, txn)
+            elif request == "start":
+                await self._emit({"janus": "success"}, txn)
+                await self._emit({"janus": "webrtcup"})
+
+    async def close(self):
+        self.closed += 1
+        await self._out.put(None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self._out.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
+
+
+class FakePc:
+    """RTCPeerConnection's surface as janus_client uses it. Keeps the handlers
+    it is given so a test can fire the `track` event by hand."""
+
+    def __init__(self, *args, **kwargs):
+        import types
+        self.handlers = {}
+        self.iceConnectionState = "new"
+        self.connectionState = "new"
+        self.remote_description = None
+        self.localDescription = types.SimpleNamespace(type="answer", sdp="v=0\r\n")
+        self.closed = 0
+
+    def on(self, event):
+        def register(fn):
+            self.handlers[event] = fn
+            return fn
+        return register
+
+    async def setRemoteDescription(self, desc):
+        self.remote_description = desc
+
+    async def createAnswer(self):
+        return "answer"
+
+    async def setLocalDescription(self, answer):
+        pass
+
+    async def addIceCandidate(self, candidate):
+        pass
+
+    async def close(self):
+        self.closed += 1
+
+
+class FakeRemoteTrack:
+    """aiortc's RemoteStreamTrack surface, including the part that matters: an
+    UNBOUNDED queue that the receiver's decoder thread fills and that only
+    recv() ever empties. stop() marks the track ended -- which is precisely why
+    it is not a release: a stopped track's queue still grows, it just can no
+    longer be drained."""
+
+    def __init__(self, kind):
+        self.kind = kind
+        self.queue = asyncio.Queue()
+        self.readyState = "live"
+        self.stops = 0
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise RuntimeError("MediaStreamError")
+        frame = await self.queue.get()
+        if frame is None:
+            self.stop()
+            raise RuntimeError("MediaStreamError")
+        return frame
+
+    def stop(self):
+        self.stops += 1
+        self.readyState = "ended"
+
+
+@contextlib.contextmanager
+def janus_rig(gateway):
+    """Point janus_client's RTCPeerConnection and websockets.connect at fakes."""
+    from bridge import janus_client as jc
+
+    class WsShim:
+        """Everything the real websockets module has, except connect()."""
+
+        def __init__(self, real, connect):
+            self._real = real
+            self.connect = connect
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    async def fake_connect(url, **kwargs):
+        return gateway
+
+    saved_pc, saved_ws = jc.RTCPeerConnection, jc.websockets
+    jc.RTCPeerConnection = FakePc
+    jc.websockets = WsShim(saved_ws, fake_connect)
+    try:
+        yield jc
+    finally:
+        jc.RTCPeerConnection, jc.websockets = saved_pc, saved_ws
+
+
+async def _watch_once(gateway):
+    """Run the REAL connect_and_watch against `gateway`; returns the session."""
+    with janus_rig(gateway) as jc:
+        session = jc.JanusCameraSession(
+            {"id": "cam", "mac_address": "AA:BB:CC:DD:EE:FF", "model": "ADC-V",
+             "firmware": "1"},
+            {"proxy_url": "rtsp://relay.invalid/stream", "janus_gateway_url": "wss://gw.invalid",
+             "janus_token": "TOKEN", "ice_servers": []})
+        await asyncio.wait_for(session.connect_and_watch(), timeout=10)
+        return session
+
+
+VIDEO_ONLY_KEYS = {
+    "request", "is_private", "type", "media_uri", "add_sps_pps", "is_virtual",
+    "streaming_type", "timeout_seconds", "max_timeout_seconds", "video",
+    "videoport", "videopt", "videortpmap", "videofmtp", "name", "model", "firmware",
+}
+
+
+async def test_the_audio_experiment_is_off_by_default_and_changes_nothing():
+    """With JANUS_REQUEST_AUDIO false the mountpoint-create body must be exactly
+    what this bridge has always sent -- same keys, same order, byte-identical
+    JSON. This is the whole basis for calling the experiment reversible."""
+    saved = c.JANUS_REQUEST_AUDIO
+    c.JANUS_REQUEST_AUDIO = False
+    try:
+        gateway = ScriptedGateway()
+        session = await _watch_once(gateway)
+        await session.close()
+    finally:
+        c.JANUS_REQUEST_AUDIO = saved
+
+    assert len(gateway.creates) == 1, gateway.creates
+    body = gateway.creates[0]
+    assert not any(k.startswith("audio") for k in body), body
+    # Byte-identical, key order included -- this is the wire, not a dict compare.
+    assert json.dumps(body) == json.dumps({
+        "request": "create", "is_private": True, "type": "rtp",
+        "media_uri": "rtsp://relay.invalid/stream",
+        "add_sps_pps": False, "is_virtual": False, "streaming_type": "Live",
+        "timeout_seconds": 180, "max_timeout_seconds": 900,
+        "video": True, "videoport": 0, "videopt": 126,
+        "videortpmap": "H264/90000",
+        "videofmtp": "profile-level-id=42e01f;packetization-mode=1",
+        "name": "AA:BB:CC:DD:EE:FF_Live", "model": "ADC-V", "firmware": "1",
+    }), f"the video-only create body changed on the wire: {json.dumps(body)}"
+    assert set(body) == VIDEO_ONLY_KEYS, sorted(set(body) ^ VIDEO_ONLY_KEYS)
+
+
+async def test_the_audio_experiment_asks_for_opus_alongside_the_video():
+    """With the knob on, the audio keys mirror the video ones and nothing else
+    moves: same single create, video keys untouched, a dynamic payload type that
+    cannot collide with the video 126."""
+    saved = c.JANUS_REQUEST_AUDIO
+    c.JANUS_REQUEST_AUDIO = True
+    try:
+        gateway = ScriptedGateway()
+        session = await _watch_once(gateway)
+        await session.close()
+    finally:
+        c.JANUS_REQUEST_AUDIO = saved
+
+    assert len(gateway.creates) == 1, "an accepted audio create must not be retried"
+    body = gateway.creates[0]
+    assert body["audio"] is True and body["audioport"] == 0
+    assert body["audiortpmap"] == "opus/48000/2", body
+    assert body["audiopt"] != body["videopt"], (
+        f"the audio payload type collides with the video one ({body['audiopt']})")
+    for key in VIDEO_ONLY_KEYS:
+        assert key in body, f"the audio body dropped {key}"
+
+
+async def test_a_rejected_audio_create_falls_back_instead_of_failing_the_session():
+    """The fail-safe, in both rejection shapes.
+
+    A rejected experiment must cost NOTHING. If it raised, camera_session.py
+    would count a consecutive failure for every rotation of every camera -- five
+    in a row and MAX_CONSECUTIVE_SESSION_FAILURES hard-exits the process, which
+    with `restart: unless-stopped` behind it is a container restart loop caused
+    purely by a diagnostic. So the create is retried once with the byte-identical
+    video-only body and the session proceeds normally.
+
+    Both shapes matter: the streaming plugin reports a refused mountpoint at the
+    PLUGIN level ({"janus": "success", ... "error_code": ...}), which the
+    original code could only ever have seen as a KeyError on ["stream"]["id"].
+    """
+    rejections = [
+        {"janus": "success", "plugindata":
+         {"data": {"error_code": 456,
+                   "error": "Can't add 'rtp' stream from rtsp://relay.invalid/stream"}}},
+        {"janus": "error", "error": {"code": 458, "reason": "No such handle"}},
+    ]
+    saved = c.JANUS_REQUEST_AUDIO
+    c.JANUS_REQUEST_AUDIO = True
+    try:
+        for rejection in rejections:
+            gateway = ScriptedGateway(reject_audio_with=rejection)
+            # No raise: connect_and_watch completing is the assertion.
+            session = await _watch_once(gateway)
+            await session.close()
+
+            assert len(gateway.creates) == 2, (
+                f"expected the audio create plus one video-only retry, got "
+                f"{len(gateway.creates)}: {gateway.creates}")
+            first, second = gateway.creates
+            assert first.get("audio") is True, first
+            assert set(second) == VIDEO_ONLY_KEYS, (
+                "the fallback body is not the video-only body this bridge has always "
+                f"sent: {sorted(set(second) ^ VIDEO_ONLY_KEYS)}")
+            assert json.dumps(second) == json.dumps(
+                {k: v for k, v in first.items() if not k.startswith("audio")}), (
+                "the fallback body is not byte-identical to the video-only body")
+            # And the session really did carry on: it watched and started the
+            # mountpoint the RETRY created, not the rejected one.
+            requests = [m["body"]["request"] for m in gateway.sent
+                        if m.get("janus") == "message"]
+            assert requests == ["create", "create", "watch", "start"], requests
+    finally:
+        c.JANUS_REQUEST_AUDIO = saved
+
+
+async def test_an_offered_track_we_do_not_consume_is_drained_not_ignored():
+    """aiortc auto-creates a recvonly transceiver for every offered m-line and
+    starts its receiver whether or not anyone reads the track: the decoder
+    thread pushes each decoded frame into an UNBOUNDED RemoteStreamTrack queue.
+    Silently dropping a non-video track therefore leaks for the whole ~165s life
+    of every session -- a per-rotation memory sawtooth, once per camera, forever.
+
+    Draining is the fix, and stop() is NOT: aiortc's MediaStreamTrack.stop()
+    only sets an ended flag and emits an event nothing in aiortc listens for, so
+    a stopped track's queue keeps growing while recv() refuses to empty it. The
+    assertion below is exactly that difference -- the queue must reach zero.
+    Ending the track must also NOT mark the session dead: only the video track
+    decides whether this session is alive.
+    """
+    gateway = ScriptedGateway()
+    session = await _watch_once(gateway)
+    on_track = session.pc.handlers["track"]
+
+    audio = FakeRemoteTrack("audio")
+    on_track(audio)
+    for i in range(200):
+        audio.queue.put_nowait(f"frame{i}")
+    for _ in range(400):
+        if audio.queue.qsize() == 0:
+            break
+        await asyncio.sleep(0.005)
+    drained = audio.queue.qsize()
+
+    # The video track still reaches the frame queue -- the leak fix must not
+    # have swallowed the one track this bridge exists to publish.
+    video = FakeRemoteTrack("video")
+    on_track(video)
+    video.queue.put_nowait("video-frame")
+    for _ in range(400):
+        if not session._track_queue.empty():
+            break
+        await asyncio.sleep(0.005)
+    got_video = session._track_queue.qsize()
+
+    audio.queue.put_nowait(None)          # the decoder stopping, as at pc.close()
+    await asyncio.sleep(0.05)
+    dead_after_audio_ended = session._dead.is_set()
+    await session.close()
+
+    assert drained == 0, (
+        f"{drained} of 200 frames were left queued on a track nothing consumes -- "
+        "this is the unbounded RemoteStreamTrack._queue growing for the life of "
+        "every session")
+    assert got_video == 1, "the video track stopped reaching the frame queue"
+    assert not dead_after_audio_ended, (
+        "an audio track ending marked the whole session dead -- it would force a "
+        "reconnect on every session that is offered audio")
+
+
+# --------------------------------------------------------------------------
 # 7. Backoff
 # --------------------------------------------------------------------------
 
@@ -1173,6 +1516,10 @@ TESTS = [
     test_a_hanging_close_does_not_wedge_the_loop,
     test_janus_close_never_abandons_the_websocket,
     test_janus_keepalive_dies_quietly_when_the_session_is_already_dead,
+    test_the_audio_experiment_is_off_by_default_and_changes_nothing,
+    test_the_audio_experiment_asks_for_opus_alongside_the_video,
+    test_a_rejected_audio_create_falls_back_instead_of_failing_the_session,
+    test_an_offered_track_we_do_not_consume_is_drained_not_ignored,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,
 ]
