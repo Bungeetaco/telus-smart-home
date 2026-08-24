@@ -118,6 +118,14 @@ separate, deliberately-redundant safety nets -- don't collapse them, and don't
 change `SESSION_MAX_LIFETIME_S` without re-verifying Alarm.com's actual
 server-side timeout live (it's not documented anywhere; 180s was observed).
 
+`tests/test_camera_session.py` holds all three nets to their behaviour against
+scripted fake sessions, with no network and no ffmpeg, so a regression fails
+there rather than surfacing days later as a frozen feed:
+
+```bash
+TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py
+```
+
 ## RTSP authentication
 
 **As of v1.4.0 the RTSP server requires credentials.** It previously ran on

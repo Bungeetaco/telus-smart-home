@@ -45,7 +45,6 @@ from homeassistant.util import dt as dt_util
 from .bridge_client import bridge_get
 from .const import (
     CAMERA_BRIDGE_CLIP_URL_TEMPLATE,
-    CLIP_LINK_TTL_SECONDS,
     CONF_CLIP_LINK_SECRET,
     DOMAIN,
 )

@@ -1339,16 +1339,26 @@ def test_fixtures_carry_no_account_identifiers():
 
 
 async def main():
+    failures = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith("test_"):
             continue
-        if inspect.iscoroutinefunction(fn):
-            await fn()
+        try:
+            if inspect.iscoroutinefunction(fn):
+                await fn()
+            else:
+                fn()
+        except AssertionError as exc:
+            print(f"  FAIL {name}: {exc}")
+            failures += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ERROR {name}: {exc!r}")
+            failures += 1
         else:
-            fn()
-        print(f"  ok  {name}")
-    print("\nall arming_devices tests passed")
+            print(f"  ok   {name}")
+    print("\nRESULT:", "PASS" if not failures else f"FAIL ({failures})")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

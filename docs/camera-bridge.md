@@ -138,6 +138,10 @@ rotations** (see below) and the gap bridged by held frames, the margin could be
 tightened from 60s to 15s — matching `FRAME_SILENCE_TIMEOUT_S` — keeping the
 freeze-bridged gaps as infrequent as possible while staying safely under 180s.
 
+`camera-bridge/tests/test_camera_session.py` enforces all three against
+scripted fake sessions, so a regression fails CI rather than surfacing days
+later as a frozen feed.
+
 Two checks that must never be collapsed or reordered:
 
 - The **rotation-deadline check runs even when no frame ever arrives.** The
