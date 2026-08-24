@@ -78,6 +78,25 @@ class TalkMediaTooLarge(TalkMediaError):
 
 
 
+def _redact_media_url(url: str) -> str:
+    """audio_url with userinfo and query string stripped, safe for logs/errors.
+
+    The URL is caller-supplied and routinely a Home Assistant media URL, which
+    can carry a signed access token in its query string (e.g. authSig on a
+    media-source URL) -- and nothing stops a caller embedding user:pass@
+    userinfo either. Scheme, host and path identify the source; the rest is the
+    same class of live capability token the snapshot handler already refuses to
+    log."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    redacted = f"{parts.scheme}://{host}{parts.path}"
+    if parts.query:
+        redacted += "?<query redacted>"
+    return redacted
+
+
 def _failure_reason(err: BaseException) -> str:
     """Short, stable label for a failed talk -- the value that gets counted.
 
@@ -231,8 +250,10 @@ class TalkManager:
         connector rather than spinning a fresh one per call), bounded by a
         connect/read timeout AND a hard size cap enforced while streaming so a
         runaway body can't be buffered whole. A path is read off disk under the
-        same cap. Neither the url nor the path is a secret, so both may be
-        logged."""
+        same cap. The path is not a secret and may be logged as-is; the URL may
+        carry a signed access token in its query string (an HA media-source
+        authSig, for one), so it only ever reaches a log line or an exception
+        message through _redact_media_url."""
         if audio_url:
             return await self._fetch_url(audio_url)
         if audio_path:
@@ -248,15 +269,26 @@ class TalkManager:
                 async for chunk in resp.content.iter_chunked(64 * 1024):
                     buf.write(chunk)
                     if buf.tell() > c.TALK_MEDIA_MAX_BYTES:
-                        raise TalkMediaTooLarge(url)
+                        raise TalkMediaTooLarge(_redact_media_url(url))
         except TalkMediaError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            raise TalkMediaError(f"could not fetch audio_url: {e}") from e
+            # str(e) for a ClientResponseError embeds the full request URL,
+            # which for an HA media-source audio_url includes its signed access
+            # token -- the same leak the snapshot handler had. Describe the
+            # failure without the raw URL, and break the exception chain (`from
+            # None`): a chained cause is re-formatted, raw URL and all, when the
+            # control server logs this TalkMediaError with exc_info.
+            status = getattr(e, "status", None)
+            detail = f"HTTP {status}" if status is not None else type(e).__name__
+            raise TalkMediaError(
+                f"could not fetch audio_url {_redact_media_url(url)}: {detail}"
+            ) from None
         data = buf.getvalue()
         if not data:
             raise TalkMediaError("audio_url returned an empty body")
-        log.info("talkdown: fetched %d bytes of audio from %s", len(data), url)
+        log.info("talkdown: fetched %d bytes of audio from %s",
+                 len(data), _redact_media_url(url))
         return data
 
     async def _read_path(self, path: str) -> bytes:
@@ -508,7 +540,7 @@ class TalkManager:
 
         if stop_event is not None and stop_event.is_set():
             # Stopped during discovery -- don't open a session just to close it.
-            log.info("talkdown: stopped before the session was armed")
+            log.info("talkdown: %s: stopped before the session was armed", camera_id)
             return {"path": "full_duplex", "codec": codec or c.TALK_CODEC,
                     "chunks": 0, "bytes": 0, "seconds": 0.0, "played_seconds": 0.0,
                     "renegotiations": 0, "stopped": True}

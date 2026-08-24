@@ -17,7 +17,8 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 | --- | --- |
 | `custom_components/telus_smarthome/` | HA integration. Entry: `__init__.py`. Auth patch: `telus_auth_patch.py`. Platforms: `alarm_control_panel.py`, `binary_sensor.py`, `lock.py`, `camera.py`, `event.py`, etc. Bridge client: `bridge_client.py`. Talk service: `speak_service.py`. |
 | `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Control API: `control_server.py`. Config: `config.py`. |
-| `camera-bridge/{Dockerfile,docker-compose.yml,mediamtx.yml,install.sh}` | Build + runtime. |
+| `camera-bridge/{Dockerfile,docker-compose.yml,mediamtx.yml,entrypoint.sh}` | Build + runtime. |
+| `install.sh` (repo root) | Interactive installer for both components. |
 | `docs/` | Full documentation set — see `docs/README.md`. |
 
 ## Build, run, verify

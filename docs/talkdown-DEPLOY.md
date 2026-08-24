@@ -36,8 +36,9 @@ Confirm it came up clean:
     ssh <ha-host> 'sudo docker logs --tail 50 telus-cam-bridge'
     ssh <ha-host> 'curl -s http://127.0.0.1:8199/control/health'   # -> {"status": "ok"}
 
-At this point the talk route exists but returns 403 (`talkdown_disabled`) — that
-is expected until step 3.
+At this point the talk route is live — talkdown is enabled by default. A
+`403 talkdown_disabled` here means `TALKDOWN_ENABLED` was set `false`; see
+step 3.
 
 ## 2. Deploy the HA integration (sync the separate copy)
 

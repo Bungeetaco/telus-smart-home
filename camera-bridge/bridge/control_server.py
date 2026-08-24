@@ -2416,7 +2416,14 @@ async def start_control_server(
 ) -> web.AppRunner:
     app = create_app(telus_session, login_lock, camera_registry, camera_status, lifecycle,
                      talk_manager)
-    runner = web.AppRunner(app)
+    # Access logging is opt-in (config.CONTROL_ACCESS_LOG). Every request here
+    # is loopback polling from Home Assistant, so the one-INFO-line-per-request
+    # "aiohttp.access" output is routine noise that ages real warnings out of
+    # the container's capped log-rotation window; failures still log through
+    # the route handlers themselves. access_log=None is aiohttp's supported way
+    # to disable it -- the kwarg is forwarded to the request handler factory.
+    runner = (web.AppRunner(app) if c.CONTROL_ACCESS_LOG
+              else web.AppRunner(app, access_log=None))
     await runner.setup()
     site = web.TCPSite(runner, c.CONTROL_HOST, c.CONTROL_PORT)
     await site.start()

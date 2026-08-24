@@ -1,9 +1,10 @@
 """Shared helpers for polling the camera-bridge's local control server.
 
-Used by camera.py, event.py, and binary_sensor.py's automation-rule
-entities -- each needs the same "read the shared secret off disk, then make
-a Bearer-authed GET" sequence against a different endpoint, so it lives here
-once rather than three times.
+Used throughout the integration -- camera.py, event.py, switch.py,
+sensor.py, the settings/arming-device coordinators, and the
+speak/clip/bypass/unpair services -- each needs the same "read the shared
+secret off disk, then make a Bearer-authed GET" sequence against a
+different endpoint, so it lives here once rather than in every caller.
 """
 
 from __future__ import annotations
