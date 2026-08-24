@@ -16,7 +16,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 | Path | What it is |
 | --- | --- |
 | `custom_components/telus_smarthome/` | HA integration. Entry: `__init__.py`. Auth patch: `telus_auth_patch.py`. Platforms: `alarm_control_panel.py`, `binary_sensor.py`, `lock.py`, `camera.py`, `event.py`, etc. Bridge client: `bridge_client.py`. Talk service: `speak_service.py`. |
-| `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Control API: `control_server.py`. Config: `config.py`. |
+| `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. aiortc patch: `aiortc_opus_patch.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Control API: `control_server.py`. Config: `config.py`. |
 | `camera-bridge/{Dockerfile,docker-compose.yml,mediamtx.yml,entrypoint.sh}` | Build + runtime. |
 | `install.sh` (repo root) | Interactive installer for both components. |
 | `docs/` | Full documentation set — see `docs/README.md`. |
@@ -72,7 +72,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   state of the evidence, and it is what stops the next person trusting a guess or
   re-deriving a settled question.
 - **Tests are part of the change too, on the same terms as the docs.** The bridge
-  has a real regression suite (`camera-bridge/tests/`, eleven files, run in full by
+  has a real regression suite (`camera-bridge/tests/`, thirteen files, run in full by
   CI) covering behaviour that fails *silently* in production — a camera that
   freezes instead of erroring, a setting that reads back a value it never wrote,
   an audio stream that drifts. **Run it before proposing a bridge change**, and
@@ -130,6 +130,14 @@ Each of these looks like something to clean up and is not. See
   guard.** If you change what a patch touches, update that module's guard AND
   `.github/scripts/check_patch.py` (which also asserts the private *instance*
   attributes the replaced `async_login` depends on).
+- **`camera-bridge/bridge/aiortc_opus_patch.py` replaces `aiortc.codecs.opus.OpusDecoder.decode`.**
+  Upstream it has no error handling (its H.264 twin does) and `decoder_worker` — a
+  thread target — has none either, so one malformed Opus packet permanently kills a
+  session's `audio-decoder` thread and the published audio becomes pure silence with
+  every health signal still green. Same model as the three above: import-time patch,
+  import-time guard, exercised by the every-bridge-module-imports CI job and
+  `tests/test_opus_decoder_patch.py`. Delete it only when upstream fixes this — the
+  guard fires if upstream grows its own handler, which is what that would look like.
 
 ## Where to read more
 

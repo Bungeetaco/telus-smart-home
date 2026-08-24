@@ -11,6 +11,11 @@ Load-bearing flags, found by empirical testing against this exact stack:
   -pkt_size 1200    keep RTP payloads under MediaMTX's repacketization threshold --
                     letting MediaMTX repacketize strips DTS continuity and produces
                     "No dts in N consecutive packets" in HA's stream_worker.
+  -framerate <fps>  declare the camera's rate to the RAWVIDEO DEMUXER, never as
+                    `-r <fps>` (which overrides -use_wallclock_as_timestamps) and
+                    never by omission (the demuxer then defaults to 25fps and
+                    re-rates every stream). See the comment on common_in for the
+                    measurements -- this one flag has three distinct behaviours.
 Without both of these, the Generic Camera config flow's live "can we read the
 stream" verification step times out with no clue in the REST response as to why.
 
@@ -65,8 +70,10 @@ config.JANUS_CONSUME_AUDIO):
   write_silence_to, which sizes the fill from elapsed real time), so the video
   timeline has to advance at real time too or the muxer's interleaver holds one
   of them back forever. That is what `-r` on the video input silently prevented
-  -- see the comment where it is now omitted. `-af aresample=async=1`
-  (fill-and-trim only, no stretching) absorbs what is left.
+  -- it is absent from every command line this file builds, and the camera's rate
+  is declared with the demuxer's `-framerate` instead (see the comment on
+  common_in). `-af aresample=async=1` (fill-and-trim only, no stretching) absorbs
+  what is left.
 
   The encoder is AAC, and that is not a free choice: Home Assistant's HLS stream
   worker accepts only aac/mp3 for audio, and Frigate's `-c copy` recording preset
@@ -221,7 +228,7 @@ class FfmpegSink:
         self._wh = (width, height)
         fps = max(1, min(int(round(fps)), 30))
         # Exposed so callers can log/reason about the fps actually given to ffmpeg
-        # (for -r/-g) rather than whatever raw value they originally passed in --
+        # (for -framerate/-g) rather than whatever raw value they originally passed in --
         # confirmed live 2026-07-18 that logging the pre-clamp value elsewhere
         # (camera_session.py) made the doorbell's real 30fps look like "39fps" in
         # logs, since a burst-artifact measurement can exceed this clamp.
@@ -240,8 +247,8 @@ class FfmpegSink:
 
         # Audio input/output fragments, spliced into common_in/common_out below so
         # every encoder variant picks them up by construction. Empty when audio is
-        # off, which keeps the video-only command line byte-identical to what has
-        # always shipped.
+        # off, and they are the ONLY difference between the two command lines --
+        # the video input itself is now identical either way (see common_in).
         audio_in: list[str] = []
         audio_out: list[str] = []
         audio_read_fd = audio_write_fd = None
@@ -279,7 +286,7 @@ class FfmpegSink:
                 #
                 # This flag is NOT what makes the two-input pipeline stall; that
                 # was `-r` on the video input (see the long comment there).
-                # Measured on the deployed 7.1.5 with `-r` removed, the pipeline
+                # Measured on the deployed 7.1.5 without `-r`, the pipeline
                 # stays drained with the flag on BOTH inputs as well -- so the
                 # asymmetry is deliberate, not load-bearing. It has not been run
                 # live in the both-on form and there is no reason to.
@@ -301,55 +308,81 @@ class FfmpegSink:
                 "-af", "aresample=async=1",
             ]
 
-        # `-r <fps>` before `-i` sets the RAWVIDEO DEMUXER's frame rate, and doing
-        # so silently overrides -use_wallclock_as_timestamps: the video timeline
+        # The camera's frame rate is declared with the rawvideo demuxer's own
+        # `-framerate`, NEVER with `-r` before `-i`. The two look interchangeable
+        # and are not, and both halves of that matter -- on BOTH command lines,
+        # audio-enabled or not.
+        #
+        # `-r <fps>` before `-i` forces the INPUT STREAM's frame rate, which
+        # silently overrides -use_wallclock_as_timestamps: the video timeline
         # then advances by exactly 1/fps per frame WRITTEN, not by elapsed real
-        # time. Video-only that is invisible (nothing else shares the timeline),
-        # which is why it shipped for so long -- but with a second input it is
-        # fatal, because the audio timeline IS real time (write_silence_to sizes
-        # the fill from the wallclock). Any shortfall between the fps ffmpeg was
-        # declared and the rate frames actually arrive at then makes audio outrun
-        # video permanently, the muxer's interleaver stops accepting audio, and
-        # the pipe backs up until _write_audio_bytes calls the sink dead --
-        # "ffmpeg has stopped reading the audio pipe", restarting the encoder
-        # (and kicking every RTSP reader) every few seconds.
+        # time. A camera delivering fewer frames than the fps it was measured at
+        # therefore publishes less media than wall time -- so an HLS consumer
+        # falls progressively further behind live -- and with a second input it
+        # is outright fatal, because the audio timeline IS real time
+        # (write_silence_to sizes the fill from the wallclock). Audio then
+        # outruns video permanently, the muxer's interleaver stops accepting
+        # audio, and the pipe backs up until _write_audio_bytes calls the sink
+        # dead -- "ffmpeg has stopped reading the audio pipe", restarting the
+        # encoder (and kicking every RTSP reader) every few seconds.
+        #
+        # Declaring NOTHING is not the fix either, and this is the part that is
+        # easy to miss: the rawvideo demuxer's `framerate` option defaults to 25
+        # (`ffmpeg -h demuxer=rawvideo`), so with no declaration at all every
+        # stream is re-rated to a constant 25fps regardless of the camera --
+        # duplicating frames for a slower one and DROPPING them for a faster one
+        # -- and `-g <fps>` then spans a different number of SECONDS than the ~1s
+        # it is chosen for. `-framerate <fps>` sets the demuxer's rate (so the
+        # output stays CFR at the camera's own rate, and the GOP stays ~1s) while
+        # leaving the packet timestamps to -use_wallclock_as_timestamps, which is
+        # exactly the combination this pipeline needs.
         #
         # Measured INSIDE the deployed container (ffmpeg 7.1.5-0+deb13u1, Debian
-        # 13, h264_vaapi), feeding both pipes at real-time pacing with the input
-        # declared -r 25 while frames were written at 15fps -- i.e. exactly the
-        # fps-misdetection this file's own fps clamp and camera_session.py's
-        # plausibility check already guard against:
-        #   * as shipped:      audio backlog crossed 512 kB in ~10s, every run,
-        #                      to -f null, to an mpegts file and to a live RTSP
-        #                      publish. 11s of wallclock produced 6.2s of video
-        #                      (ratio 15/25), proving the timeline, not the
-        #                      encoder or the muxer, was the problem.
-        #   * without `-r`:    backlog stayed at 0 for a 100s RTSP publish;
-        #                      22s of wallclock produced 21.96s of video.
+        # 13, h264_vaapi, 1280x720 -> 960x540, publishing live RTSP into
+        # MediaMTX), 40s of wallclock per run:
+        #                        media/wall   frames written -> encoded   GOP
+        #   declared 15, fed  9fps
+        #     -r 15            24.07s/40s     361 -> 361  (15fps out)     1.0s
+        #     nothing          40.04s/40s     361 -> 1001 (25fps out)     0.6s
+        #     -framerate 15    40.07s/40s     361 -> 601  (15fps out)     1.0s
+        #   declared 30, fed 30fps
+        #     -r 30            40.03s/40s    1201 -> 1201 (30fps out)     1.0s
+        #     nothing          40.08s/40s    1201 -> 1002 (25fps out,     1.2s
+        #                                    199 frames DROPPED)
+        #     -framerate 30    40.03s/40s    1201 -> 1201 (30fps out)     1.0s
+        #   declared  6, fed  6fps  (a rate one camera on this account runs at)
+        #     -r 6             40.17s/40s     241 -> 241  (6fps out)      1.0s
+        #     nothing          40.08s/40s     241 -> 1002 (25fps out)     0.24s
+        #     -framerate 6     40.17s/40s     241 -> 241  (6fps out)      1.0s
+        # The `-r` rows are the E58 defect: 40s of wall time published as 24s of
+        # media, the exact 9/15 ratio of written-to-declared fps. The "nothing"
+        # rows are why removing the flag is not enough on its own. The libx264
+        # path was measured alongside the hardware one and matches row for row.
+        #
+        # With the audio input attached, same build, declared 15 while frames
+        # were written at 9fps -- the shortfall that stalls with `-r`:
+        #   * -r 15:         audio backlog crossed the sink's 512 kB limit at
+        #                    9.6s, video timeline 24.07s per 40s of wall time.
+        #   * nothing:       backlog stayed at 0 bytes for a 100s RTSP publish;
+        #                    timeline 100.0s/100.0s. ffmpeg logs "More than 1000
+        #                    frames duplicated" (the re-rate to 25fps).
+        #   * -framerate 15: backlog stayed at 0 bytes for a 100s RTSP publish;
+        #                    timeline 100.0s/100.0s, output CFR 15, no duplicate
+        #                    warning.
         # Bisected against the alternatives on that same build, ALL of which
-        # still stalled at ~10s: -thread_queue_size (4096, either or both
-        # inputs), dropping -analyzeduration/-probesize, -use_wallclock_as_
-        # timestamps on both inputs or neither, -fps_mode passthrough/vfr,
+        # still stall at ~10s with `-r` present: -thread_queue_size (4096, either
+        # or both inputs), dropping -analyzeduration/-probesize, -use_wallclock_
+        # as_timestamps on both inputs or neither, -fps_mode passthrough/vfr,
         # -max_interleave_delta 0, dropping -af aresample, and swapping the input
-        # ORDER. None of them is the fix; removing `-r` is, and it is the only
-        # one that is.
+        # ORDER. None of them is the fix; the input's rate declaration is.
         #
-        # NOT a 7.x quirk: the same reproduction and the same fix were confirmed
-        # on ffmpeg n9.0.1 (libx264). The earlier "works offline, fails live"
-        # split was the test feed happening to run at exactly the declared rate.
-        #
-        # Frame COUNT is unchanged -- ffmpeg still encodes one output frame per
-        # frame written (211 output frames for 210 written, measured), so -g's
-        # keyframe-every-fps-frames behaviour and the encode load are the same as
-        # before; only the timestamps on them changed.
-        #
-        # Kept for the video-only argv, which must stay byte-identical to the
-        # long-proven one (see test_audio_consumption_is_off_by_default...), and
-        # where the flag is harmless because nothing shares its timeline.
-        video_rate = [] if audio_format is not None else ["-r", str(fps)]
+        # NOT a 7.x quirk: the same reproduction and the same behaviour were
+        # confirmed on ffmpeg n9.0.1 (libx264). The earlier "works offline, fails
+        # live" split was the test feed happening to run at exactly the declared
+        # rate.
         common_in = [
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}",
-            *video_rate, "-use_wallclock_as_timestamps", "1",
+            "-framerate", str(fps), "-use_wallclock_as_timestamps", "1",
             "-i", "pipe:0",
             *audio_in,
         ]

@@ -50,6 +50,7 @@ Contract (as implemented -- this is what callers must match):
                                                  "dropped_frames": <int>,
                                                  "audio_consumed": <bool>,
                                                  "audio_format": <str or null>,
+                                                 "decoded_audio_frames": <int>,
                                                  "dropped_audio_frames": <int>}, ...}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
@@ -65,22 +66,31 @@ Contract (as implemented -- this is what callers must match):
       total as each session ends -- which also means the field updates on
       session end, not per frame, and lags the live session by up to one
       rotation.
-      The three audio fields are ADDITIVE and deliberately separate from "fps"
+      The four audio fields are ADDITIVE and deliberately separate from "fps"
       and "dropped_frames", which are a contract about the VIDEO stream that
       callers already read: a number that quietly started counting two different
       things would be worse than no number at all. "audio_consumed" is whether
       JANUS_CONSUME_AUDIO resolved to on for this camera (which requires
       JANUS_REQUEST_AUDIO to name it too -- if it does not, this reads false and
-      the bridge logged why once). "audio_format" is the raw PCM shape the
-      running ffmpeg's audio input was launched with, as
-      "<rate>Hz/<channels>ch/<sample format>", or null when audio is not being
-      published; it changes only when the publisher is rebuilt.
-      "dropped_audio_frames" is the lifetime total of decoded AUDIO frames
-      dropped because the consumer fell behind, accumulated across rotations
-      exactly like "dropped_frames".
+      the bridge logged why once). "audio_format" is the raw PCM shape of a
+      frame this camera has actually DECODED, as
+      "<rate>Hz/<channels>ch/<sample format>", and null until one has been --
+      it is an OBSERVATION, never the shape ffmpeg was launched with (that is
+      config.AUDIO_DEFAULT_FORMAT until a frame arrives, and reporting it made
+      this field read "48000Hz/2ch/s16" for eleven consecutive sessions that
+      published pure silence). "decoded_audio_frames" is the lifetime total of
+      decoded audio frames handed to the publisher, updated as each frame
+      arrives rather than folded in at session end, so consumption on with this
+      stuck at 0 is a silent stream. "dropped_audio_frames" is the lifetime
+      total of decoded AUDIO frames dropped because the consumer fell behind,
+      accumulated across rotations exactly like "dropped_frames" -- it cannot
+      see audio that never decodes at all, since a stream producing nothing
+      drops nothing.
       NOTE for callers building health checks on this: the frame-silence
       watchdog is video-only, so a camera whose audio has stopped still reports
-      state "streaming" with a fresh "last_frame_at".
+      state "streaming" with a fresh "last_frame_at". Nothing here RECONNECTS a
+      camera on dead audio; comparing two polls of "decoded_audio_frames" is
+      how a caller detects it.
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>

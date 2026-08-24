@@ -15,6 +15,13 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSession
 from aiortc.sdp import candidate_from_sdp
 
 from . import config as c
+# Imported for its import-time side effect, and imported HERE because this module
+# is what builds the RTCPeerConnection that creates the Opus decoder. Without it,
+# one malformed Opus packet kills the session's audio-decoder thread outright
+# (aiortc's Opus decoder has no error handling where its H.264 one does), and the
+# published audio track is silence for the life of the session -- which is exactly
+# what was happening. See the module docstring for the measurements.
+from . import aiortc_opus_patch  # noqa: F401
 # Single definition of "what shape is this decoded audio frame" -- the sink's raw
 # PCM guard compares against exactly this tuple, so it must not be re-derived here.
 from .ffmpeg_sink import audio_format_of

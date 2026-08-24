@@ -91,8 +91,16 @@ Pinned here:
                           and "ICE never came up" all used to print the same
                           five words.
  13. audio consumption -- JANUS_CONSUME_AUDIO (default OFF) leaves the ffmpeg
-                          command line byte-identical, the session video-only and
-                          an offered track drained. With it on, the SAME
+                          command line free of every audio token (pinned byte for
+                          byte), the session video-only and an offered track
+                          drained. The video input itself is the same either way:
+                          it declares the camera's rate with `-framerate <fps>`
+                          and never with `-r`, which would override
+                          -use_wallclock_as_timestamps and advance the timeline
+                          per frame written rather than per second elapsed --
+                          publishing less media than wall time, and stalling the
+                          audio pipe outright when a second input shares that
+                          timeline. With it on, the SAME
                           publisher grows a second input and the decoded audio is
                           written into it -- rebuilding the publisher to add
                           audio would black the RTSP path on every rotation. The
@@ -1877,10 +1885,16 @@ async def test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour
     what happens to an offered track.
 
     This is the whole basis for shipping the feature: a camera nobody opted in
-    for keeps publishing exactly the video-only stream it always did, from
-    exactly the same argv. An audio input that appears "just in case" would be a
-    second stream the muxer has to interleave, which changes video timing for
-    everyone.
+    for keeps publishing a video-only stream, from an argv that carries not one
+    audio token. An audio input that appears "just in case" would be a second
+    stream the muxer has to interleave, which changes video timing for everyone.
+
+    The byte-for-byte argv below is pinned for the same reason it always was --
+    "no audio tokens" would also be true of a command line that had quietly
+    changed some other way -- but it is no longer the pre-audio argv verbatim:
+    the video input declares its rate with `-framerate <fps>` where it used to
+    use `-r <fps>`, which is E58's fix and applies to BOTH shapes (see
+    test_the_video_input_declares_its_rate_with_framerate_never_r).
     """
     assert c.janus_consume_audio_mode("any-camera") == "off", (
         f"JANUS_CONSUME_AUDIO defaults to {c.JANUS_CONSUME_AUDIO!r}, which is not off")
@@ -1894,22 +1908,20 @@ async def test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour
             for token in ("-map", "-c:a", "-af", "-b:a", "-analyzeduration"):
                 assert token not in args, (backend, token, args)
             assert [a for a in args if a.startswith("pipe:")] == ["pipe:0"], args
-            # The other half of the asymmetry pinned in
-            # test_every_encoder_variant_gets_the_audio_input_and_encoder: `-r`
-            # stays on the video-only input. It makes the video timeline advance
-            # per frame written rather than per second elapsed, which is fatal
-            # once a second input shares that timeline and unobservable when
-            # nothing does -- so removing it here would be an untested change to
-            # the pipeline both cameras have always published with.
+            # The video input is the SAME either way now (see
+            # test_the_video_input_declares_its_rate_with_framerate_never_r):
+            # `-framerate`, never `-r`. Audio adds a second input and the
+            # audio encoder, and changes nothing about input 0.
             video_in = args[:args.index("-i")]
-            assert _subsequence_at(video_in, ["-r", "15"]) > 0, (backend, args)
+            assert "-r" not in video_in, (backend, args)
+            assert _subsequence_at(video_in, ["-framerate", "15"]) > 0, (backend, args)
     # ...and the software variant in full, byte for byte, because "no audio
     # tokens" would also be true of an argv that had quietly changed some other way.
     (software_args, _), = await _captured_ffmpeg_args("software", None)
     assert software_args == [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "1280x720",
-        "-r", "15", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
+        "-framerate", "15", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
         "-vf", "scale=960:540",
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
         "-g", "15", "-bf", "0",
@@ -1980,7 +1992,85 @@ async def test_a_consume_enabled_camera_publishes_its_audio():
         f"only {len(audio_writes)} decoded audio frames reached the publisher across "
         "three sessions -- audio is not being published")
     assert state.get("audio_consumed") is True, state
+    # OBSERVED, not the shape ffmpeg was launched with -- see
+    # test_audio_status_reports_only_what_was_actually_decoded.
     assert state.get("audio_format") == "48000Hz/2ch/s16", state
+    assert state.get("decoded_audio_frames", 0) > 10, (
+        f"decoded_audio_frames did not follow the frames that reached the "
+        f"publisher: {state.get('decoded_audio_frames')!r} against "
+        f"{len(audio_writes)} writes")
+
+
+async def test_audio_status_reports_only_what_was_actually_decoded():
+    """/control/status must not claim audio that never existed.
+
+    This is the field that hid a real outage. `audio_format` used to be rendered
+    from what the running ffmpeg had been LAUNCHED with, and when no frame has
+    been decoded yet that is `AUDIO_DEFAULT_FORMAT` -- literally
+    ("s16", 48000, 2). So a camera whose aiortc audio-decoder thread had died on
+    its first malformed Opus packet, whose published track was pure silence for
+    eleven consecutive sessions, reported a confident
+    `"audio_format": "48000Hz/2ch/s16"` the entire time, alongside
+    `state: "streaming"` and a fresh `last_frame_at` (the frame-silence watchdog
+    is video-only). Nothing in the status could distinguish "audio is flowing"
+    from "audio has never once decoded".
+
+    So: `audio_format` is null until a real frame is observed, and
+    `decoded_audio_frames` -- which no field previously covered -- is the count
+    that makes flow checkable at a glance. `dropped_audio_frames` cannot do that
+    job: a stream that simply never decodes drops nothing.
+    """
+    # 1. Consumption on, publisher up with its audio input, and NOT ONE audio
+    #    frame ever decoded -- the silent-stream failure exactly.
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=None)],
+                      SESSION_MAX_LIFETIME_S=5.0, AUDIO_SILENCE_TOPUP_S=0.05) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                            timeout=8.0, why="a streaming session")
+            await run_until(ctx, lambda x: x.sink is not None
+                            and len(x.sink.pcm_writes) >= 3,
+                            timeout=8.0, why="the audio input's silence top-up")
+            silent = dict(ctx.state)
+            launched_with = ctx.sink.start_calls[0][3]
+            silence_writes = len(ctx.sink.pcm_writes)
+            await stop(ctx)
+
+    assert silent.get("state") == "streaming", silent
+    assert launched_with == c.AUDIO_DEFAULT_FORMAT, (
+        f"the bootstrap this test is about did not happen: {launched_with}")
+    assert silence_writes > 1, (
+        "the publisher's audio input was not being kept alive with silence, so "
+        "this is not the scenario the status field lied about")
+    assert silent.get("audio_format") is None, (
+        f"audio_format reported {silent.get('audio_format')!r} for a camera that "
+        "has never decoded an audio frame -- that is the AUDIO_DEFAULT_FORMAT "
+        "bootstrap being reported as an observation, which is how eleven "
+        "sessions of pure silence went unnoticed")
+    assert silent.get("decoded_audio_frames") == 0, (
+        f"decoded_audio_frames must be 0 when nothing decoded, got "
+        f"{silent.get('decoded_audio_frames')!r}")
+    assert silent.get("audio_consumed") is True, silent
+
+    # 2. The same camera once frames really do decode: both fields move, and the
+    #    format is the one the FRAMES carry, not the one ffmpeg was started with.
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02, audio_fmt=("s16", 16000, 1),
+                            audio_peek=None, audio_samples=320)],
+                      SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("decoded_audio_frames", 0) >= 3,
+                            timeout=10.0, why="decoded audio frames")
+            flowing = dict(ctx.state)
+            await stop(ctx)
+
+    assert flowing.get("audio_format") == "16000Hz/1ch/s16", (
+        f"audio_format is not the shape the decoded frames carry: "
+        f"{flowing.get('audio_format')!r}")
+    assert flowing.get("decoded_audio_frames") >= 3, flowing
 
 
 async def test_the_rotation_gap_is_filled_with_wallclock_derived_silence():
@@ -2124,9 +2214,10 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
     It also pins ffmpeg's positional option grammar: the audio input options must
     sit contiguously in front of their own `-i`, and the maps/encoder after the
     last input. An option that drifts past its `-i` silently belongs to something
-    else -- and the absence of `-r` from the video input, which is the one thing
-    that makes a two-input publish survive at all (see the assertion for the
-    measurements).
+    else. The video input's own rate declaration -- the one thing that makes a
+    two-input publish survive at all -- is pinned in
+    test_the_video_input_declares_its_rate_with_framerate_never_r, which covers
+    both shapes.
     """
     audio_format = ("s16", 48000, 2)
     seen = {}
@@ -2148,18 +2239,9 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
             assert args.count("-use_wallclock_as_timestamps") == 1, (
                 f"{backend}: the audio input was given -use_wallclock_as_timestamps "
                 f"as well as the video input: {args}")
-            # THE invariant this whole feature stands on: with a second input,
-            # `-r` must NOT be on the video input. It sets the rawvideo demuxer's
-            # frame rate, which overrides -use_wallclock_as_timestamps and makes
-            # the video timeline advance per frame WRITTEN instead of per second
-            # elapsed. The audio timeline is real time (write_silence_to fills
-            # from the wallclock), so any shortfall against the declared fps --
-            # a dropped frame, a burst-contaminated fps measurement -- makes
-            # audio outrun video until ffmpeg stops draining the audio pipe
-            # altogether. Measured on the deployed ffmpeg 7.1.5 and on n9.0.1:
-            # declared 25fps + frames written at 15fps stalls in ~10s with `-r`
-            # and never stalls without it. It reads like a harmless declaration
-            # of the source rate, and the video-only argv still carries it.
+            # THE invariant this whole feature stands on -- restated in full,
+            # for both shapes, in
+            # test_the_video_input_declares_its_rate_with_framerate_never_r.
             assert "-r" not in args[:args.index("-i")], (
                 f"{backend}: `-r` is back on the video input of an audio-enabled "
                 f"argv -- the video timeline then ignores the wallclock and "
@@ -2188,6 +2270,61 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
     for backend, arglists in seen.items():
         for args in arglists:
             assert args.count("-c:a") == 1 and args.count("-map") == 2, (backend, args)
+
+
+async def test_the_video_input_declares_its_rate_with_framerate_never_r():
+    """`-framerate <fps>` on the raw video input, on EVERY argv this sink builds,
+    and `-r` on none of them. Both halves fail silently in production, in
+    opposite directions.
+
+    `-r <fps>` before `-i` forces the input stream's frame rate and in doing so
+    overrides `-use_wallclock_as_timestamps`: the timeline advances 1/fps per
+    frame WRITTEN instead of per second ELAPSED. A camera delivering fewer frames
+    than its measured fps then publishes less media than wall time -- nothing
+    errors, the picture looks fine, and an HLS consumer simply drifts further
+    behind live for as long as the stream runs. With a second input it is worse
+    than silent: the audio timeline really is wallclock, audio outruns video, and
+    ffmpeg stops draining the audio pipe within seconds. Measured in the deployed
+    container (ffmpeg 7.1.5, h264_vaapi, live RTSP publish), input declared 15fps
+    with frames written at 9fps: 40s of wall time published as 24.07s of media,
+    and with audio attached the pipe backlog crossed the sink's 512 kB limit at
+    9.6s.
+
+    Dropping the declaration entirely is NOT the fix, which is the half that is
+    easy to get wrong: the rawvideo demuxer's own `framerate` defaults to 25, so
+    an input with no rate at all is re-rated to a constant 25fps -- 361 written
+    frames encoded as 1001 for a 15fps camera, and 1201 written encoded as 1002
+    (199 DROPPED) for a 30fps one -- while `-g <fps>` then spans 0.6s or 1.2s
+    instead of the ~1s it exists to produce. `-framerate <fps>` declares the rate
+    to the demuxer without touching the timestamps: same run, 40.07s of media per
+    40s of wall time, 15fps out, 1.0s GOP, and the audio pipe backlog flat at 0
+    bytes across a 100s publish.
+    """
+    for backend in ("vaapi", "nvenc", "software"):
+        for audio_format in (None, ("s16", 48000, 2)):
+            captured = await _captured_ffmpeg_args(backend, audio_format)
+            assert captured, (backend, audio_format)
+            for args, _pass_fds in captured:
+                video_in = args[:args.index("-i")]
+                assert "-r" not in video_in, (
+                    f"{backend} (audio={audio_format is not None}): `-r` is on the "
+                    f"video input -- the timeline then advances per frame written, "
+                    f"not per second elapsed: {args}")
+                assert _subsequence_at(video_in, ["-framerate", "15"]) > 0, (
+                    f"{backend} (audio={audio_format is not None}): the video input "
+                    f"does not declare `-framerate 15`, so ffmpeg falls back to the "
+                    f"rawvideo demuxer's default 25fps and re-rates the output: "
+                    f"{args}")
+                # ...and the declaration belongs to input 0, not to whatever
+                # follows it: `-framerate` is a demuxer option, so a copy that
+                # drifted past `-i pipe:0` would silently apply to the audio
+                # input or to the output instead.
+                assert args.count("-framerate") == 1, (backend, args)
+                # -g is still the same fps, unscaled -- the ~1s keyframe interval
+                # is only ~1s because the output rate is the declared rate.
+                assert _subsequence_at(args, ["-g", "15"]) > args.index("-i"), (
+                    f"{backend}: -g no longer follows the input as a plain frame "
+                    f"count at the declared fps: {args}")
 
 
 async def test_consume_without_request_degrades_to_off_and_says_so_once():
@@ -2466,9 +2603,11 @@ TESTS = [
     test_an_offered_track_we_do_not_consume_is_drained_not_ignored,
     test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour,
     test_a_consume_enabled_camera_publishes_its_audio,
+    test_audio_status_reports_only_what_was_actually_decoded,
     test_the_rotation_gap_is_filled_with_wallclock_derived_silence,
     test_an_audio_format_change_forces_a_publisher_rebuild,
     test_every_encoder_variant_gets_the_audio_input_and_encoder,
+    test_the_video_input_declares_its_rate_with_framerate_never_r,
     test_consume_without_request_degrades_to_off_and_says_so_once,
     test_the_consume_knob_takes_the_same_three_value_forms,
     test_the_offered_audio_track_is_pumped_only_when_the_session_consumes,
