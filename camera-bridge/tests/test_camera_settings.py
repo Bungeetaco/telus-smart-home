@@ -899,6 +899,88 @@ async def test_unknown_field_name_is_a_caller_mistake():
         assert portal.writes == []
 
 
+async def test_each_diagnostics_read_carries_its_own_long_timeout():
+    """Every one of the three diagnostics reads must override the shared
+    session's 15s default with DIAGNOSTICS_READ_TIMEOUT_S. The signal read is
+    answered by alarm.com querying the camera itself and was measured live at
+    25s on one model -- without the override the bridge's OWN client cancels it
+    and the /diagnostics route answers 502 for a camera that is merely slow.
+    The constant must also sit between the measured 25s and the HA side's 45s
+    route budget, or one of the two ends stops meaning anything."""
+    assert 25 < cs.DIAGNOSTICS_READ_TIMEOUT_S < 45, cs.DIAGNOSTICS_READ_TIMEOUT_S
+
+    seen = []
+    real_get_doc = cs._get_doc
+
+    async def recording_get_doc(telus, url, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return await real_get_doc(telus, url, **kwargs)
+
+    async with portal_at(8500) as (portal, telus):
+        cs._get_doc = recording_get_doc
+        try:
+            await cs.get_diagnostics(telus, CAM)
+        finally:
+            cs._get_doc = real_get_doc
+
+    assert len(seen) == 3, f"expected three sequential reads, saw {len(seen)}"
+    for timeout in seen:
+        assert timeout is not None, "a diagnostics read inherited the session default"
+        assert timeout.total == cs.DIAGNOSTICS_READ_TIMEOUT_S, timeout
+
+
+async def test_get_doc_timeout_overrides_the_session_default():
+    """A per-request ClientTimeout must take precedence over the session's own,
+    in BOTH directions: with the override a read slower than the session default
+    completes, and without it the session default still cancels that same read.
+
+    Margins follow docs/development.md's timing guidance -- 0.3s session default,
+    1.5s route, 10s override -- far enough apart that a loaded CI runner cannot
+    flip either outcome.
+    """
+    import aiohttp
+
+    async def slow_signal(request):
+        await asyncio.sleep(1.5)
+        return web.json_response({"data": {
+            "id": CAM, "type": "video/signalStrengthInfo",
+            "attributes": {"normalizedSignalStrength": 76}}})
+
+    app = web.Application()
+    app.router.add_get("/web/api/video/{kind}/{cid}", slow_signal)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 8501)
+    await site.start()
+    saved = c.TELUS_BASE
+    c.TELUS_BASE = "http://127.0.0.1:8501/"
+    try:
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=0.3)) as session:
+            telus = FakeTelus(session)
+            url = cs._SIGNAL_URL.format(base=c.TELUS_BASE, cid=CAM)
+
+            doc = await cs._get_doc(telus, url,
+                                    timeout=aiohttp.ClientTimeout(total=10))
+            assert cs._flatten(doc)["normalizedSignalStrength"] == 76
+
+            # The prove-it-can-fail half: the same read WITHOUT the override is
+            # cancelled by the session default -- which pins both that the
+            # default still applies when no override is given, and that the
+            # success above came from the override rather than from a session
+            # that never enforced its timeout at all.
+            try:
+                await cs._get_doc(telus, url)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                raise AssertionError(
+                    "the session's 0.3s default did not cancel a 1.5s read")
+    finally:
+        c.TELUS_BASE = saved
+        await runner.cleanup()
+
+
 async def main():
     failures = 0
     for name, fn in sorted(globals().items()):

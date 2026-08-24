@@ -75,7 +75,14 @@ TELUS SSO login (telus_auth.py)
    credential update) and overrides the `.env` values if present, so a freshly
    recreated container picks up the latest credentials even if it missed a live
    push. Both `username` and `password` are parsed before either is assigned, so
-   a malformed file can never leave a mismatched pair.
+   a malformed file can never leave a mismatched pair. **Every corruption shape
+   degrades, never crashes:** truncated JSON, invalid UTF-8 (a torn write on the
+   shared mount), or valid JSON of the wrong shape (`[]`, `null`, a string) is
+   logged as a warning and ignored, and the bridge starts on its `.env`
+   credentials. This matters because the bad file survives the restart — a crash
+   here would loop the container through a fresh SSO login against the
+   Cloudflare-fronted edge on every restart. Pinned by
+   `tests/test_credentials_fallback.py`.
 2. **Initial login with retry.** `_login_with_retry` runs the SSO login with a
    short bounded backoff (`2, 4, 8s`). A `RateLimited` failure is handled
    separately — it sleeps for the server's own `Retry-After` rather than the
@@ -91,7 +98,11 @@ TELUS SSO login (telus_auth.py)
 4. **Start background loops.** `discover_and_launch_cameras` re-polls TELUS every
    `CAMERA_DISCOVERY_INTERVAL_S` (300s) for newly added cameras;
    `watch_credentials_fallback` polls `credentials.json` every 30s for credential
-   changes. The control server also runs (see [control-api.md](control-api.md)).
+   changes; an unreadable or corrupt file (including invalid UTF-8 or valid JSON
+   that is not an object) makes it warn and skip that cycle, never die — the
+   background tasks run under a bare `asyncio.gather`, so a crashed watcher task
+   would take the whole process with it. The control server also runs (see
+   [control-api.md](control-api.md)).
 
 ### Always-warm cameras
 

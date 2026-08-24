@@ -71,7 +71,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   state of the evidence, and it is what stops the next person trusting a guess or
   re-deriving a settled question.
 - **Tests are part of the change too, on the same terms as the docs.** The bridge
-  has a real regression suite (`camera-bridge/tests/`, ten files, run in full by
+  has a real regression suite (`camera-bridge/tests/`, eleven files, run in full by
   CI) covering behaviour that fails *silently* in production — a camera that
   freezes instead of erroring, a setting that reads back a value it never wrote,
   an audio stream that drifts. **Run it before proposing a bridge change**, and

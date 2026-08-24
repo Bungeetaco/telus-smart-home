@@ -309,7 +309,8 @@ def _raise_for_status(resp: aiohttp.ClientResponse) -> None:
 
 
 async def _get_doc(telus: TelusSession, url: str, *,
-                   missing_ok: bool = False) -> dict | None:
+                   missing_ok: bool = False,
+                   timeout: aiohttp.ClientTimeout | None = None) -> dict | None:
     """GET one JSON:API settings/diagnostics document.
 
     With ``missing_ok`` a 404 returns None instead of raising -- used only for
@@ -317,8 +318,17 @@ async def _get_doc(telus: TelusSession, url: str, *,
     (a mains-powered camera has no battery status). 401/403/429/5xx still raise
     in that mode, so an auth or rate-limit problem is never mistaken for
     "device doesn't have this".
+
+    ``timeout`` overrides the shared session's 15s default for this one request
+    -- used only by get_diagnostics, whose signal read alarm.com answers by
+    querying the camera live. None means "inherit the session default", and the
+    kwarg is only forwarded when set: aiohttp treats an EXPLICIT timeout=None as
+    "disable timeouts entirely", not as "use the session default".
     """
-    async with telus.session.get(url, headers=telus.api_headers) as resp:
+    kwargs: dict[str, Any] = {"headers": telus.api_headers}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    async with telus.session.get(url, **kwargs) as resp:
         if missing_ok and resp.status == 404:
             return None
         _raise_for_status(resp)
@@ -1178,6 +1188,18 @@ async def get_general_settings(telus: TelusSession, camera_id: str) -> dict:
 # coarse `signalStrengthEnum`, NOT `signalStrength`/`rssi`. Candidate lists are
 # kept because a different camera model returns a different subset, and `raw`
 # always carries whatever actually came back.
+# Per-request ceiling on each diagnostics read, overriding the shared upstream
+# session's 15s default (telus_auth.TelusSession.__aenter__). The signal read is
+# answered by alarm.com querying the camera itself and was measured live at 25s
+# on one indoor camera (docs/troubleshooting.md) -- under the session default
+# the bridge's OWN client cancelled that read at 15s and the route answered 502.
+# Kept above the measured 25s and under the HA side's 45s route budget
+# (const.py CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS), so the bridge times out first
+# with three reads' worth of headroom. The settings getters stay on the session
+# default: their document reads are fast, and widening every request would hide
+# a genuinely wedged upstream for longer everywhere.
+DIAGNOSTICS_READ_TIMEOUT_S = 35
+
 _SIGNAL_KEYS = ("normalizedSignalStrength", "signalStrength", "signalStrengthValue")
 _BATTERY_KEYS = ("batteryLevel", "batteryPercentage", "batteryLevelValue")
 _STATUS_KEYS = ("connectionStatus", "deviceStatus", "status", "deviceStatusValue")
@@ -1233,13 +1255,19 @@ async def get_diagnostics(telus: TelusSession, camera_id: str) -> dict:
     The three reads are issued sequentially rather than concurrently: this is
     polled state, and alarm.com's rate limits are undocumented and can lock the
     account, so it is not worth turning one poll into a three-request burst.
+
+    Each read carries its own DIAGNOSTICS_READ_TIMEOUT_S ceiling instead of the
+    shared session's 15s default -- the signal read alone can legitimately take
+    25s on some models (see the constant's comment).
     """
+    read_timeout = aiohttp.ClientTimeout(total=DIAGNOSTICS_READ_TIMEOUT_S)
     parts = {}
     for name, template in (("signal_strength", _SIGNAL_URL),
                            ("battery", _BATTERY_URL),
                            ("device_status", _DEVSTATUS_URL)):
         url = template.format(base=c.TELUS_BASE, cid=camera_id)
-        parts[name] = _flatten(await _get_doc(telus, url, missing_ok=True))
+        parts[name] = _flatten(await _get_doc(telus, url, missing_ok=True,
+                                              timeout=read_timeout))
 
     signal_key = _resolve(parts["signal_strength"], _SIGNAL_KEYS)
     return {

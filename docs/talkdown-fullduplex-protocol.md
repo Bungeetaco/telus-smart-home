@@ -606,7 +606,12 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   MWS parsers/helpers: `parse_doorbell_camera_list` (ids, credentials, all four
   endpoint variants, capability flags, plus the no-doorbell / logged-out / wrong-root
   edges), `_parse_action_ack` (that `ts` and `s` are BOTH required, and that a
-  teardown parse never raises), `config.parse_retry_after` (delta-seconds, HTTP-date,
+  teardown parse never raises), `parse_live_video_stream` (the TokenStatus
+  envelope, endpoint ordering, and the full webrtc/srtp/rtsp records — including
+  that the SRTP keys are the base64-*decoded* bytes of `ack`/`vck`, not the
+  base64 text — plus the xmlns-namespaced / logged-out / wrong-root edges),
+  `decode_srtp_key` (a 30-byte round-trip, and `None` for a missing or
+  non-base64 value), `config.parse_retry_after` (delta-seconds, HTTP-date,
   past date, missing, garbage) and `TalkManager._session_deadline` (an implausible
   `cstet` is ignored). These were previously verified by hand against a live
   capture, so nothing re-checked them when a field name changed. Still open: the
@@ -848,7 +853,12 @@ recorded. None of these block the shipped feature; all were found while groundin
   retried on its own schedule and walked straight back into the limiter. Both
   routes' reads and writes now go through one `_rate_limited` helper that emits
   the server's own wait as an integer `Retry-After` header plus a
-  `{"error": "rate_limited", "retry_after": N}` body.
+  `{"error": "rate_limited", "retry_after": N}` body. The same helper now also
+  fronts the camera settings and diagnostics reads and both halves of every
+  settings write (the pre-read and the setter call); the settings bundle's two
+  MWS-backed sections (siren/privacy) remain the deliberate exception — a
+  rate-limited MWS read is absorbed internally and those sections degrade to
+  `null` rather than failing the response.
 
 - **E30 (DONE) `max_exposure` and `camera_triggered_clip_duration`
   are routed.**

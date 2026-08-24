@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 
 import aiohttp
 from aiohttp import web
@@ -57,6 +58,14 @@ CLIP_VIEW_PATH = f"/api/{DOMAIN}/clip"
 # Location) out of shared caches, and stop the clip's own referrer from leaking
 # the signed link onward to alarm.com's relay host.
 _SAFE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+
+# Every real id is a short numeric string from alarm.com JSON:API, and every
+# link this install ever minted came from make_clip_link with such an id, so
+# this conservative shape rejects no legitimate link. It exists because aiohttp
+# percent-decodes match_info: without it, CR/LF/ANSI bytes in the path segment
+# would reach the HA log via the rejection warnings below (unauthenticated
+# log injection), and oversized garbage would get free HMAC work.
+_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def clip_link_sig(secret: str, video_event_id: str, expiry: int) -> str:
@@ -110,6 +119,13 @@ class TelusClipRedirectView(HomeAssistantView):
 
     async def get(self, request: web.Request, video_event_id: str) -> web.Response:
         """Validate the signature and expiry, re-mint via the bridge, redirect."""
+        if not _EVENT_ID_RE.fullmatch(video_event_id):
+            # Deliberately NOT logging the id -- an id that fails this check is
+            # attacker-controlled bytes, and echoing it into the log is the
+            # injection this guard exists to prevent.
+            LOGGER.warning("Rejected clip link with malformed event id")
+            return web.Response(status=401, text="Invalid clip link.", headers=_SAFE_HEADERS)
+
         try:
             expiry = int(request.query.get("exp", ""))
         except ValueError:
@@ -164,5 +180,17 @@ class TelusClipRedirectView(HomeAssistantView):
                 status=503, text="Camera bridge is still starting up. Try again in a minute.",
                 headers=_SAFE_HEADERS)
 
+        download_url = body.get("download_url")
+        if not isinstance(download_url, str) or not download_url:
+            # A bridge response without a usable URL is a shape drift, not a
+            # client error -- surface it as the same retryable 503 instead of
+            # letting the KeyError become a 500 + traceback on this
+            # unauthenticated endpoint. Safe to log the id here: it has passed
+            # both the shape check and the HMAC.
+            LOGGER.warning("Bridge clip response missing download_url for event %s", video_event_id)
+            return web.Response(
+                status=503, text="Could not fetch the clip from alarm.com. Try again in a minute.",
+                headers=_SAFE_HEADERS)
+
         return web.Response(
-            status=302, headers={"Location": body["download_url"], **_SAFE_HEADERS})
+            status=302, headers={"Location": download_url, **_SAFE_HEADERS})

@@ -74,8 +74,9 @@ Conventions every suite follows:
 | Suite | What it pins |
 |---|---|
 | `test_camera_session.py` | The per-camera reconnect loop: rotation before Alarm.com's ~180s server-side kill, the ffmpeg publisher that outlives it, the frame hold that bridges reconnect gaps, fps measurement, sink repair, and the consecutive-failure escape hatch. |
-| `test_camera_settings.py` | The website settings wire shape — JSON:API on read, a flat object on write — reconstructed from captured fixtures, plus capability gating, bounds and option-list handling. |
-| `test_control_server_routes.py` | The camera-settings, siren and privacy control routes: status codes, error vocabulary, and the fields the integration reads back. |
+| `test_camera_settings.py` | The website settings wire shape — JSON:API on read, a flat object on write — reconstructed from captured fixtures, plus capability gating, bounds and option-list handling, and the per-request 35s ceiling each diagnostics read carries over the shared session's 15s default (without it, a slow-but-healthy camera's signal read is cancelled by the bridge's own client and answered as a 502). |
+| `test_control_server_routes.py` | The camera-settings, siren and privacy control routes: status codes (including the honest 429 + `Retry-After` on a rate-limited settings/diagnostics read or settings write), error vocabulary, and the fields the integration reads back — plus the events/history `limit` clamp and that a failed snapshot fetch is logged without its signed URL. |
+| `test_credentials_fallback.py` | The credentials.json fallback reader and watcher: a torn write (invalid UTF-8) or a wrong-shape file must degrade to the .env credentials instead of killing the process into a login-hammering restart loop, and a valid file must still be adopted. |
 | `test_arming_devices.py` | The Bluetooth arming-device client and its routes, including the irreversible unpair. |
 | `test_partitions.py` | Selective sensor bypass — above all the refusals, each of which is a case where writing anyway would leave a zone silently unprotected. |
 | `test_mws_json_actions.py` | The JSON-envelope MWS actions (camera siren, privacy mode) and the dual XML/JSON ack dispatcher. |

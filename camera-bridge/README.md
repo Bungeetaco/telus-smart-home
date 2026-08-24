@@ -257,6 +257,13 @@ and write these files without any new host path or supervisor config change.
     what was last applied -- a safety net for a missed live push (bridge
     down, transient network issue between the two `--network host`
     containers, secret mismatch, etc) without waiting for a restart.
+  - **A corrupt file never kills the bridge.** Truncated JSON, invalid
+    UTF-8 (a torn write on the shared mount), or valid JSON that is not an
+    object is logged as a warning and ignored on both paths: startup keeps
+    the `.env` credentials, the watcher skips that cycle and keeps polling.
+    The bad file outlives any restart, so crashing on it would restart-loop
+    the container through repeated SSO logins. Pinned by
+    `tests/test_credentials_fallback.py`.
 
 Net effect: a credential change made through HA's UI reaches this bridge
 either immediately (live push) or within 30s (fallback watcher) or at next

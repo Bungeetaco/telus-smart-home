@@ -13,6 +13,7 @@ Run from the camera-bridge directory:
 
     TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_parsers.py
 """
+import base64
 import os
 import pathlib
 import sys
@@ -51,6 +52,34 @@ GDCLR = '''<gdclr ts="0" dsl="false" s="true">
 GDCLR_EMPTY = '<gdclr ts="0" s="true"><dcl /></gdclr>'
 # Session token rejected: ts != 0 and an error message rather than data.
 GDCLR_LOGGED_OUT = '<gdclr ts="1" s="false" em="Session expired" />'
+
+# A GetLiveVideoStream response with one endpoint of each protocol, shaped like
+# the anonymized capture in parse_live_video_stream's docstring. The srtp keys
+# are the base64 of "testkey0123456789" / "videokey0123456789" so the tests can
+# assert the DECODED bytes -- the camera consumes raw key+salt, not base64 text.
+LVSR = '''<lvsr TokenStatus="0" Resolution="1440x1440" StreamId="1">
+  <vsel>
+    <vsei st="3">
+      <webrtc SignalingServerUrl="https://sig.example/ws"
+              SignalingServerToken="ST-abc"
+              CameraAuthToken="CAM-xyz"
+              HalfDuplexReenableAudioDelayInMs="500"
+              MaxLoadTimeSeconds="30"/>
+    </vsei>
+    <vsei st="1">
+      <srtp aip="203.0.113.9" ap="5006" ack="dGVzdGtleTAxMjM0NTY3ODk="
+            acc="AES_CM_128" aca="HMAC_SHA1_80" ac="1"
+            oassrc="3735928559" iassrc="3405692433" ivssrc="3405692433"
+            vip="203.0.113.9" vp="5004" vck="dmlkZW9rZXkwMTIzNDU2Nzg5"
+            sdp=""/>
+    </vsei>
+    <vsei st="0">
+      <rtsp rtspurl="rtsp://cam.example/live" csda="false" bfmrs="200"/>
+    </vsei>
+  </vsel>
+</lvsr>'''
+# Session token rejected: no stream data, only the error envelope.
+LVSR_LOGGED_OUT = '<lvsr TokenStatus="1" ErrorMessage="Session expired" />'
 
 
 def test_doorbell_parser():
@@ -92,6 +121,80 @@ def test_doorbell_parser_edge_cases():
     except ValueError:
         pass
     print("  ok  gdclr edge cases: no doorbell, logged-out token status, wrong root")
+
+
+def test_live_video_stream_parser():
+    out = mws_client.parse_live_video_stream(LVSR)
+    assert out["ok"] is True and out["token_status"] == mws_client.TOKEN_STATUS_OK, out
+    assert out["error"] is None, out
+    assert out["resolution"] == "1440x1440" and out["stream_id"] == 1, out
+    assert [e["type"] for e in out["endpoints"]] == ["webrtc", "srtp", "rtsp"], out
+
+    webrtc, srtp, rtsp = out["endpoints"]
+    # webrtc is the primary talkdown path; every field here is what the bridge
+    # would hand to the signaling client.
+    assert webrtc["signaling_server_url"] == "https://sig.example/ws"
+    assert webrtc["signaling_server_token"] == "ST-abc"
+    assert webrtc["camera_auth_token"] == "CAM-xyz"
+    assert webrtc["half_duplex_reenable_ms"] == 500
+    assert webrtc["max_load_s"] == 30
+
+    # ack_key/vck_key must be the DECODED bytes of ack/vck -- the camera
+    # consumes the raw key+salt, and feeding it the base64 text instead would
+    # produce garbled (not absent) audio.
+    assert srtp["ack"] == "dGVzdGtleTAxMjM0NTY3ODk="
+    assert srtp["ack_key"] == b"testkey0123456789", srtp
+    assert srtp["vck"] == "dmlkZW9rZXkwMTIzNDU2Nzg5"
+    assert srtp["vck_key"] == b"videokey0123456789", srtp
+    assert srtp["aip"] == "203.0.113.9" and srtp["ap"] == 5006
+    assert srtp["acc"] == "AES_CM_128" and srtp["aca"] == "HMAC_SHA1_80"
+    assert srtp["ac"] == 1
+    assert srtp["oassrc"] == 3735928559
+    assert srtp["iassrc"] == 3405692433 and srtp["ivssrc"] == 3405692433
+    assert srtp["vip"] == "203.0.113.9" and srtp["vp"] == 5004
+    assert srtp["crypto_suite"] == mws_client.SRTP_CRYPTO_SUITE
+
+    assert rtsp["rtspurl"] == "rtsp://cam.example/live"
+    assert rtsp["csda"] is False
+    assert rtsp["bfmrs"] == 200
+    print("  ok  lvsr parser: envelope, webrtc/srtp/rtsp fields, decoded srtp keys")
+
+
+def test_live_video_stream_edge_cases():
+    # Namespace-tolerant, like the gdclr parser: a server-side xmlns must not
+    # silently break every element lookup.
+    namespaced = LVSR.replace("<lvsr ", '<lvsr xmlns="urn:example" ', 1)
+    out = mws_client.parse_live_video_stream(namespaced)
+    assert out["ok"] is True, out
+    assert [e["type"] for e in out["endpoints"]] == ["webrtc", "srtp", "rtsp"], out
+    assert out["endpoints"][0]["signaling_server_token"] == "ST-abc"
+    assert out["endpoints"][1]["ack_key"] == b"testkey0123456789"
+
+    # Rejected token: callers must see the failure, not an empty success.
+    out = mws_client.parse_live_video_stream(LVSR_LOGGED_OUT)
+    assert out["ok"] is False, out
+    assert out["token_status"] == mws_client.TOKEN_STATUS_LOGGED_OUT, out
+    assert out["error"] == "Session expired", out
+    assert out["endpoints"] == [], out
+
+    try:
+        mws_client.parse_live_video_stream("<somethingelse/>")
+        raise AssertionError("a response without <lvsr> should raise")
+    except ValueError:
+        pass
+    print("  ok  lvsr edge cases: xmlns tolerated, logged-out token status, wrong root")
+
+
+def test_decode_srtp_key():
+    # Round-trip: the decode must give back exactly the original raw bytes
+    # (an AES_CM_128 key+salt is 30 of them).
+    known = bytes(range(30))
+    assert mws_client.decode_srtp_key(base64.b64encode(known).decode()) == known
+    # Malformed input yields None -- a missing key downstream, not a crash.
+    assert mws_client.decode_srtp_key(None) is None
+    assert mws_client.decode_srtp_key("") is None
+    assert mws_client.decode_srtp_key("!!!not-base64!!!") is None
+    print("  ok  decode_srtp_key: round-trip, None for None/empty/invalid input")
 
 
 def test_action_acks():
@@ -144,6 +247,8 @@ def test_session_deadline():
 def main():
     failures = 0
     for test in (test_doorbell_parser, test_doorbell_parser_edge_cases,
+                 test_live_video_stream_parser, test_live_video_stream_edge_cases,
+                 test_decode_srtp_key,
                  test_action_acks, test_retry_after, test_session_deadline):
         try:
             test()
