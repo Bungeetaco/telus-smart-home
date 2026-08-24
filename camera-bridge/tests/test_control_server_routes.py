@@ -57,7 +57,10 @@ import sys
 import tempfile
 import types
 
+import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
@@ -739,6 +742,163 @@ async def test_mws_routes_report_unavailable_without_a_talk_manager():
           "/settings still answers with both MWS sections null")
 
 
+async def test_a_rate_limited_website_call_answers_429_not_502():
+    """The settled 429 mapping, extended to the website settings routes.
+
+    The settings read, the diagnostics read, and both upstream calls inside a
+    settings write used to let a RateLimited fall into the blanket
+    `except Exception` and answer 502 telus_error with no Retry-After -- the
+    one status that tells a caller "retry", against the very edge that just
+    asked it to wait. The MWS halves of the settings bundle keep their
+    deliberate absorb-and-hold behavior; that is pinned separately by
+    test_a_rate_limited_read_is_held_and_does_not_sink_the_response.
+    """
+    async def limited(_telus, _camera_id, **_fields):
+        raise RateLimited(120)
+
+    def shim(setter):
+        return types.SimpleNamespace(
+            CameraSettingsError=cs.camera_settings.CameraSettingsError,
+            get_audio_settings=limited if setter is not limited else _settings,
+            get_image_settings=limited,
+            get_general_settings=limited,
+            get_led_settings=_settings_led, set_led_settings=_settings_led,
+            get_notification_settings=_settings_notifications,
+            set_notification_settings=_settings_notifications,
+            get_video_config=limited, get_diagnostics=limited,
+            set_call_volume=setter)
+
+    async def check(resp, route):
+        body = await resp.json()
+        assert resp.status == 429, (
+            f"{route} answered {resp.status} for a rate-limited edge; 502 "
+            "tells the caller to retry straight back into the limiter")
+        assert resp.headers.get("Retry-After") == "120", (
+            f"{route} must carry the server's own wait in Retry-After: "
+            f"{resp.headers.get('Retry-After')!r}")
+        assert body == {"error": "rate_limited", "retry_after": 120}, (
+            f"{route}: {body}")
+
+    # The reads, and a write whose PRE-READ is limited (get_audio_settings).
+    async with _app(settings_module=shim(cs.camera_settings.set_call_volume)) \
+            as (client, headers, _calls):
+        await check(await client.get(
+            f"/control/cameras/{CAM_DENIED}/settings", headers=headers),
+            "settings read")
+        await check(await client.get(
+            f"/control/cameras/{CAM_DENIED}/diagnostics", headers=headers),
+            "diagnostics read")
+        await check(await client.post(
+            f"/control/cameras/{CAM_DENIED}/settings/volume", headers=headers,
+            json={"volume": 5}), "volume write (limited pre-read)")
+
+    # The write call itself: pre-read succeeds, the setter is limited.
+    async with _app(settings_module=shim(limited)) as (client, headers, _calls):
+        await check(await client.post(
+            f"/control/cameras/{CAM_DENIED}/settings/volume", headers=headers,
+            json={"volume": 5}), "volume write (limited setter)")
+    print("  ok  429 mapping: the settings read, diagnostics, and both halves "
+          "of a settings write answer 429 with the server's Retry-After")
+
+
+async def test_events_and_history_limits_are_clamped():
+    """`limit` reaches the live account verbatim as a page size, so bound it.
+
+    telus_rest sends it as pageSize (events) / numberOfEvents (history) with no
+    check of its own; before the clamp, ?limit=100000000 asked alarm.com for a
+    hundred-million-event page on an account whose rate limits are undocumented.
+    Clamping (unlike the refuse-not-clamp rule on the settings writes) is safe
+    here because nothing is written to hardware. The non-integer fallback to 20
+    is unchanged.
+    """
+    received = []
+
+    async def fake_list(_telus, limit):
+        received.append(limit)
+        return []
+
+    saved = (cs.list_video_events, cs.list_history_events)
+    cs.list_video_events = fake_list
+    cs.list_history_events = fake_list
+    try:
+        async with _app() as (client, headers, _calls):
+            for route in ("/control/events", "/control/history"):
+                for query, expect in (("limit=-5", 1),
+                                      ("limit=100000000", 100),
+                                      ("limit=abc", 20),
+                                      ("limit=20", 20)):
+                    received.clear()
+                    resp = await client.get(f"{route}?{query}", headers=headers)
+                    assert resp.status == 200, (route, query, resp.status)
+                    assert received == [expect], (
+                        f"{route}?{query} reached the upstream call as "
+                        f"{received}, expected [{expect}]")
+    finally:
+        cs.list_video_events, cs.list_history_events = saved
+    print("  ok  limit clamp: events and history bound limit to 1..100, and a "
+          "non-integer still falls back to 20")
+
+
+async def test_snapshot_errors_never_log_the_signed_url():
+    """An upstream HTTP error on the snapshot fetch must not print the URL.
+
+    str(aiohttp.ClientResponseError) embeds the request URL, and for the
+    snapshot fetch that is the SIGNED, short-lived snapshot URL -- a live
+    capability token. The old blanket log.exception printed it into the
+    container log on every failed fetch. The failure must still be logged
+    (status and camera id); hygiene is not silence.
+    """
+    token = "SIGNED-SNAPSHOT-TOKEN-THAT-MUST-NOT-BE-LOGGED"
+    url = URL(f"https://relay.example.invalid/snapshot?signature={token}")
+
+    async def raising(_telus, _camera_id):
+        raise aiohttp.ClientResponseError(
+            aiohttp.RequestInfo(url=url, method="GET",
+                                headers=CIMultiDictProxy(CIMultiDict()),
+                                real_url=url),
+            (), status=500, message="Internal Server Error")
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    # The module logger is muted at import (CRITICAL) so error-path tests don't
+    # print tracebacks. This test asserts on what IS logged, so it re-opens the
+    # logger for its duration, captures into a list, and keeps propagate off so
+    # nothing reaches the real handlers.
+    logger = logging.getLogger("bridge.control_server")
+    handler = _Capture()
+    old_level, old_propagate = logger.level, logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    saved = cs.get_snapshot_url
+    cs.get_snapshot_url = raising
+    try:
+        async with _app() as (client, headers, _calls):
+            resp = await client.get(f"/control/cameras/{CAM_DENIED}/snapshot",
+                                    headers=headers)
+            body = await resp.json()
+    finally:
+        cs.get_snapshot_url = saved
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    assert resp.status == 502 and body == {"error": "telus_error"}, (
+        f"the response contract is unchanged: {resp.status} {body}")
+    formatted = [logging.Formatter().format(record) for record in records]
+    assert any("snapshot" in text and "500" in text for text in formatted), (
+        f"the failure must still be logged with its status: {formatted}")
+    for text in formatted:
+        assert token not in text and "relay.example.invalid" not in text, (
+            f"a signed snapshot URL reached the log: {text!r}")
+    print("  ok  snapshot: an upstream HTTP error logs status + camera id only; "
+          "the signed URL appears in no log record")
+
+
 async def main():
     failures = 0
     tests = (test_records_are_found_inside_the_ack_envelope,
@@ -754,7 +914,10 @@ async def main():
              test_privacy_refuses_only_an_explicit_false,
              test_a_logged_out_token_is_re_minted_exactly_once,
              test_settings_errors_map_to_their_documented_status,
-             test_mws_routes_report_unavailable_without_a_talk_manager)
+             test_mws_routes_report_unavailable_without_a_talk_manager,
+             test_a_rate_limited_website_call_answers_429_not_502,
+             test_events_and_history_limits_are_clamped,
+             test_snapshot_errors_never_log_the_signed_url)
     for test in tests:
         try:
             result = test()

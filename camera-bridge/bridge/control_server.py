@@ -77,6 +77,7 @@ Contract (as implemented -- this is what callers must match):
       502 {"error": "telus_error"} if the TELUS-side fetch itself fails.
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/metrics
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
 
     Talkdown counters: attempts, succeeded/stopped/failed, failures by reason,
     endpoint and codec usage, renegotiations, seconds of audio played, and the
@@ -88,6 +89,12 @@ Contract (as implemented -- this is what callers must match):
     Content-Type: application/json
     Body: {"audio_url": "<http(s) url the bridge fetches>"}   and/or
           {"audio_path": "<path readable by the bridge>"}
+      Optional body fields: "codec" (string, case-insensitive -- only "mulaw"
+      is currently defined; omit for the default; an unknown value is the 400
+      bad_codec below), "conditioning" (bool -- false disables the default
+      audio filter chain, config.TALK_AUDIO_FILTER), and "audio_filter"
+      (string -- an explicit ffmpeg -af chain that overrides both the default
+      chain and "conditioning"; the empty string "" disables conditioning).
       Play a short audio clip (typically HA-rendered TTS) through the camera's
       speaker via two-way audio (talkdown). audio_url wins if both are given.
       Enabled by default (config.TALKDOWN_ENABLED); returns 403 when it has been
@@ -97,6 +104,7 @@ Contract (as implemented -- this is what callers must match):
     Responses:
       200 {"status": "spoken", "path": "webrtc"|"srtp"}
       400 {"error": "malformed"}          -- bad JSON / neither audio field / bad audio
+      400 {"error": "bad_codec"}          -- "codec" not in the supported set
       401 {"error": "bad_secret"}         -- Authorization missing/wrong
       403 {"error": "talkdown_disabled"}  -- TALKDOWN_ENABLED was set false
       404 {"error": "unknown_camera"}     -- camera_id not in camera_registry
@@ -210,7 +218,12 @@ Contract (as implemented -- this is what callers must match):
     Shared error bodies across all eight: 400 {"error": "malformed"} for a bad
     body, 404 {"error": "unknown_camera"}, 422 {"error": "unsupported"} when the
     device itself reports it cannot do the thing, 502 {"error": "telus_error"}
-    on an upstream failure.
+    on an upstream failure, and 429 {"error": "rate_limited", "retry_after":
+    <int>} with a Retry-After header when the alarm.com edge rate-limits a
+    website call. The settings bundle's MWS halves are the exception to that
+    last one: a rate-limited siren/privacy read is absorbed and held for the
+    server's wait, degrading those sections to null instead of failing the
+    response.
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/settings
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -252,6 +265,7 @@ Contract (as implemented -- this is what callers must match):
       account.
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras/<camera_id>/diagnostics
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
 
     Response: 200 {"signal_strength": ..., "battery": ..., "device_status": ...,
                     "raw": {...}}
@@ -1045,6 +1059,15 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             async with telus_session.session.get(snapshot_url) as resp:
                 resp.raise_for_status()
                 jpeg_bytes = await resp.read()
+        except aiohttp.ClientResponseError as err:
+            # str(ClientResponseError) embeds the request URL, and for the fetch
+            # above that is the SIGNED snapshot URL -- so the blanket handler
+            # below would print a live capability token into the log. Status and
+            # camera id only, and no exc_info, since the traceback formats the
+            # same exception text.
+            log.warning("Control endpoint: on-demand snapshot fetch failed for %s "
+                        "(HTTP %s)", camera_id, err.status)
+            return web.json_response({"error": "telus_error"}, status=502)
         except Exception:
             log.exception("Control endpoint: on-demand snapshot fetch failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1135,6 +1158,13 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             limit = int(request.query.get("limit", "20"))
         except ValueError:
             limit = 20
+        # Clamped, not refused, unlike the settings writes: this is a page size
+        # passed verbatim to the live account (telus_rest sends it as pageSize),
+        # not a value written to hardware, so bounding it changes nothing a
+        # caller was promised -- while an absurd number would ask alarm.com for
+        # an arbitrarily large response on an account whose rate limits are
+        # undocumented.
+        limit = max(1, min(100, limit))
 
         try:
             events = await _fetch_with_relogin(telus_session, login_lock, list_video_events, limit)
@@ -1204,6 +1234,9 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             limit = int(request.query.get("limit", "20"))
         except ValueError:
             limit = 20
+        # Same clamp as handle_events, same reasoning: numberOfEvents goes to
+        # the live account as-is.
+        limit = max(1, min(100, limit))
 
         try:
             events = await _fetch_with_relogin(telus_session, login_lock, list_history_events, limit)
@@ -1536,6 +1569,14 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             general = await _fetch_with_relogin(
                 telus_session, login_lock, camera_settings.get_general_settings,
                 camera_id)
+        except RateLimited as err:
+            # The same mapping the siren/privacy routes settled on: a 502 here
+            # tells a caller "upstream broke, retry", which walks it straight
+            # back into the limiter. The MWS halves of this bundle keep their
+            # own absorb-and-hold behavior (_mws_account_fetch) -- this covers
+            # the four website GETs above, which used to fall into the blanket
+            # handler below.
+            return _rate_limited(err, "camera settings read", camera_id)
         except Exception:
             log.exception("Control endpoint: camera settings fetch failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1573,6 +1614,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         try:
             diagnostics = await _fetch_with_relogin(
                 telus_session, login_lock, camera_settings.get_diagnostics, camera_id)
+        except RateLimited as err:
+            return _rate_limited(err, "diagnostics read", camera_id)
         except Exception:
             log.exception("Control endpoint: diagnostics fetch failed for %s", camera_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1634,6 +1677,11 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         try:
             current = await _fetch_with_relogin(telus_session, login_lock, getter, camera_id)
+        except RateLimited as err:
+            # Caught ahead of the generic handler on BOTH upstream calls for the
+            # same reason CameraSettingsError is: a rate limit is not an upstream
+            # failure, and 502 is the one status that tells a caller to retry.
+            return _rate_limited(err, "settings pre-read", camera_id)
         except camera_settings.CameraSettingsError as err:
             return _settings_error(err, camera_id, "settings pre-read")
         except Exception:
@@ -1653,6 +1701,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         try:
             result = await _fetch_with_relogin(
                 telus_session, login_lock, _bound(setter, **fields), camera_id)
+        except RateLimited as err:
+            return _rate_limited(err, setter.__name__, camera_id)
         except camera_settings.CameraSettingsError as err:
             return _settings_error(err, camera_id, setter.__name__)
         except Exception:

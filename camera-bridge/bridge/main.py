@@ -130,11 +130,16 @@ def _load_fallback_credentials_if_present() -> str | None:
         # number, a nested object) is exactly as likely as a truncated file, and
         # previously escaped this handler entirely to kill the process at import
         # time -- a crash loop, since the bad file is still there on restart.
+        # ValueError rather than the narrower json.JSONDecodeError for the same
+        # reason: a torn write on the shared mount (invalid UTF-8 mid-file)
+        # raises UnicodeDecodeError out of json.load, which is a ValueError but
+        # NOT a JSONDecodeError, and took the same crash-loop route. Same
+        # pattern as restart_guard._read_recent.
         username = data["username"].strip()
         password = data["password"].strip()
     except FileNotFoundError:
         return None
-    except (json.JSONDecodeError, KeyError, AttributeError, TypeError, OSError):
+    except (ValueError, KeyError, AttributeError, TypeError, OSError):
         log.warning("Fallback credentials file present but unreadable/corrupt; "
                      "using .env credentials", exc_info=True)
         return None
@@ -210,8 +215,19 @@ async def watch_credentials_fallback(telus: TelusSession, login_lock: asyncio.Lo
                 data = json.load(f)
         except FileNotFoundError:
             continue
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):
+            # ValueError, not just json.JSONDecodeError: a torn write on the
+            # shared mount raises UnicodeDecodeError (a ValueError that is NOT
+            # a JSONDecodeError), which used to kill this task -- and, via the
+            # bare asyncio.gather in main(), the whole process.
             log.warning("credentials.json unreadable/corrupt this cycle, skipping", exc_info=True)
+            continue
+
+        if not isinstance(data, dict):
+            # Valid JSON of the wrong shape ([] , a string, a number) would
+            # otherwise raise AttributeError on the .get() below, before the
+            # shape-guarded username/password extraction ever runs.
+            log.warning("credentials.json is not a JSON object this cycle, skipping")
             continue
 
         updated_at = data.get("updated_at")

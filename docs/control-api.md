@@ -102,7 +102,7 @@ Shared error responses across the authed routes:
 | --- | --- | --- |
 | `401` | `{"error": "bad_secret"}` | Missing/wrong `Authorization` header |
 | `502` | `{"error": "telus_error"}` | The upstream TELUS/alarm.com call failed |
-| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited us. Carries a `Retry-After` header with the **server's own** wait — honour it rather than retrying on your own schedule, or the next attempt walks straight back into the limiter. Raised by the siren and privacy routes; the settings poll absorbs it internally instead |
+| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited us. Carries a `Retry-After` header with the **server's own** wait — honour it rather than retrying on your own schedule, or the next attempt walks straight back into the limiter. Emitted by the camera settings, diagnostics, siren, privacy, partition, bypass, arming-device and Bluetooth-disarming routes. The one exception: the settings read's two **MWS** sections (siren/privacy) absorb a rate limit internally — held for the server's wait and degraded to `null` — rather than failing the response |
 
 ---
 
@@ -500,6 +500,7 @@ Errors shared by all ten (individual routes note anything extra):
 | `401` | `{"error": "bad_secret"}` | Missing/wrong `Authorization` header |
 | `404` | `{"error": "unknown_camera"}` | `camera_id` not in the camera registry |
 | `422` | `{"error": "unsupported"}` | The device reports no support for that field or capability |
+| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited the upstream call. Carries a `Retry-After` header with the **server's own** wait — honour it (see the shared table above) |
 | `502` | `{"error": "telus_error"}` | The upstream TELUS/alarm.com call failed |
 | `503` | `{"error": "mws_unavailable"}` | Siren and privacy only — no mobile MWS session exists to act through |
 
@@ -991,9 +992,14 @@ no siren"; treating it as `true` offers a control that will fail.
 Because these are two extra MWS POSTs on top of three website GETs, this route
 is the most expensive read in the API. Poll it slowly.
 
-**Errors:** `401 bad_secret`, `404 unknown_camera`, `502 telus_error`. Note there
-is **no `503` here** — unlike the siren and privacy *write* routes, a missing
-mobile session degrades this read to `null` sections instead of failing it.
+**Errors:** `401 bad_secret`, `404 unknown_camera`, `429 rate_limited`,
+`502 telus_error`. Note there is **no `503` here** — unlike the siren and
+privacy *write* routes, a missing mobile session degrades this read to `null`
+sections instead of failing it. The `429` comes from the **website** half: a
+rate-limited website GET fails the read with the server's `Retry-After`, while a
+rate-limited MWS read is absorbed like any other MWS failure — the negative
+result is held for the server's wait and the siren/privacy sections degrade to
+`null`.
 
 **Example**
 
@@ -1057,7 +1063,17 @@ response, and a camera that reports none of them is normal, not an error. A
 caller must not create a sensor for a `null` field — an "unknown" battery sensor
 on a wired camera is noise, not diagnostics.
 
-**Errors:** `401 bad_secret`, `404 unknown_camera`, `502 telus_error`.
+**A healthy response can take tens of seconds.** The three upstream reads run
+sequentially, and alarm.com appears to answer the signal read by querying the
+camera live — measured on one account at 1.6s for a doorbell and **25s** for an
+indoor camera. The bridge allows each read up to 35s
+(`DIAGNOSTICS_READ_TIMEOUT_S`, see [configuration.md](configuration.md)) instead
+of its usual 15s upstream timeout, so a caller's own client timeout must sit
+well above that — the Home Assistant integration budgets 45s for this route. A
+short client timeout abandons responses the bridge would have delivered.
+
+**Errors:** `401 bad_secret`, `404 unknown_camera`, `429 rate_limited`,
+`502 telus_error`.
 
 **Example**
 
@@ -1760,7 +1776,7 @@ Most recent camera video-clip events across all cameras, newest first.
 
 | Param | Default | Notes |
 | --- | --- | --- |
-| `limit` | `20` | Max number of events. A non-integer value falls back to `20`. |
+| `limit` | `20` | Max number of events. Clamped to `1`–`100` — it is passed to the upstream account as a page size, so it is bounded rather than forwarded verbatim. A non-integer value falls back to `20`. |
 
 **Response**
 
@@ -1806,7 +1822,7 @@ camera clips only).
 
 | Param | Default | Notes |
 | --- | --- | --- |
-| `limit` | `20` | Max number of entries. A non-integer value falls back to `20`. |
+| `limit` | `20` | Max number of entries. Clamped to `1`–`100` — it is passed to the upstream account as a page size, so it is bounded rather than forwarded verbatim. A non-integer value falls back to `20`. |
 
 **Response**
 

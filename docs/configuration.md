@@ -210,6 +210,13 @@ crash-restart guard.
 | `JANUS_KEEPALIVE_INTERVAL_S` | `25` | Janus keepalive interval. Kept well under Janus's ~60s server-side idle-session GC. |
 | `CAMERA_DISCOVERY_INTERVAL_S` | `300` | How often to re-poll for the camera list so a newly added camera starts streaming without a restart. Only additions are acted on; existing camera tasks are never torn down by this poll, to avoid killing a working stream over a transient hiccup. |
 
+One more timeout lives in `camera_settings.py` rather than `config.py`, beside
+the diagnostics reads it bounds:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `DIAGNOSTICS_READ_TIMEOUT_S` | `35` | Per-request ceiling on each of the three upstream reads behind `/control/cameras/<id>/diagnostics`, overriding the shared upstream session's 15s default for those requests only. The signal read is answered by alarm.com querying the camera live and measures up to 25s on some models; the value sits above that and under the HA side's 45s route budget (`CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS`). The settings getters keep the session default — their document reads are fast. |
+
 **Restart-frequency guard** (`restart_guard.py`) — throttles the hard-exit escape
 hatch above so a sustained upstream outage doesn't become an unbounded
 crash-restart loop (measured once at 89 restarts in 7 days). State lives on disk

@@ -78,6 +78,16 @@ ignore.
 `deviceStatusInfos` returns `connectionStatus` (`0` on a healthy camera here),
 plus the SSID, connection type and frequency band again.
 
+**`signalStrengthInfos` is not a cached read.** Measured live on one account, it
+answers in 1.6s on a doorbell but **25s** on an indoor camera — latency that
+suggests alarm.com queries the camera itself for the figure (inferred from the
+timing, not confirmed anywhere). Budget for tens of seconds when calling it: the
+bridge gives each of its three diagnostics reads a 35s per-request ceiling
+(`DIAGNOSTICS_READ_TIMEOUT_S`, see [configuration.md](configuration.md)) precisely
+because a 15s client timeout cancels a legitimately slow signal read. The slow
+figure is attributed to the signal read; the battery and device-status reads have
+not shown comparable latency, but were not timed in isolation.
+
 These are the website equivalents of the mobile `GetSettings*` actions. The first
 three are now diagnostic sensors in Home Assistant, so a camera degrading to poor
 Wi-Fi is no longer invisible; the `.asmx` ones remain unused, and are the older

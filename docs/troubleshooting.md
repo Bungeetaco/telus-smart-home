@@ -14,6 +14,7 @@ the component READMEs.
 
 - [Push websocket drops every few minutes](#push-websocket-drops-every-few-minutes)
 - [Container restart-loop against an upstream outage](#container-restart-loop-against-an-upstream-outage)
+- [Bridge warns that credentials.json is unreadable or corrupt](#bridge-warns-that-credentialsjson-is-unreadable-or-corrupt)
 - [Alarm.com rate-limiting (HTTP 429)](#alarmcom-rate-limiting-http-429)
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
@@ -128,6 +129,40 @@ entries within an hour means the guard is (correctly) throttling. Deleting the
 file is harmless — it just resets the count. Watch container restart counts
 (`docker ps` / `docker inspect`) to confirm the floor is engaging rather than
 a free-running loop.
+
+---
+
+## Bridge warns that credentials.json is unreadable or corrupt
+
+**Symptom.** The bridge log shows `Fallback credentials file present but
+unreadable/corrupt; using .env credentials` at startup, or
+`credentials.json unreadable/corrupt this cycle, skipping` /
+`credentials.json is not a JSON object this cycle, skipping` repeating every
+30 s from the fallback watcher. The bridge keeps running.
+
+**Cause.** The credential-fallback file on the shared mount
+(`<shared dir>/credentials.json`, written by the HA integration on every
+credential update) is corrupt: truncated JSON, invalid UTF-8 from a torn
+write, or valid JSON that is not a `{"username", "password", "updated_at"}`
+object. The bridge deliberately **degrades instead of exiting** on every one
+of these shapes — startup falls back to the `.env` credentials and the
+watcher skips the cycle — because the bad file survives a container restart,
+so exiting would turn one corrupt file into a `restart: unless-stopped` loop
+that re-runs a full SSO login against the Cloudflare-fronted edge on every
+cycle (see [rate-limiting](#alarmcom-rate-limiting-http-429)).
+
+HA's own writer uses a temp file plus atomic rename, so it should not
+produce a torn file by itself; this hardening is defensive (the corruption
+shapes are reproduced in tests, not captured from a live incident). A torn
+file in practice points at an unclean host shutdown, another writer, or the
+filesystem under the bind mount.
+
+**Fix.** Re-run the integration's **Reconfigure** (or Reauth) flow in Home
+Assistant — every successful credential update rewrites the file atomically.
+Deleting the file is also safe: the bridge then simply uses its `.env`
+credentials until HA next writes one. If the warning recurs without any HA
+credential update in between, suspect the shared mount itself (disk full,
+filesystem errors) — the file is written by HA and only read by the bridge.
 
 ---
 
@@ -559,7 +594,11 @@ bridge but three sequential alarm.com reads behind it, and alarm.com appears to
 query the camera itself for the signal figure. Measured live in one account: 1.6s
 on a doorbell and **25s** on an indoor camera. That is normal, not a fault — it is
 why the diagnostics fetch uses `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` (45s) instead
-of the shared 10s bridge timeout.
+of the shared 10s bridge timeout. On the bridge side, each of those three upstream
+reads carries its own 35s ceiling (`DIAGNOSTICS_READ_TIMEOUT_S` in
+`camera_settings.py`), distinct from the bridge's shared 15s upstream-session
+timeout — that override is what lets a 25s signal read succeed instead of being
+cancelled by the bridge's own client and answered as a 502.
 
 A single camera failing no longer blanks the others: the poll degrades that
 camera (keeping its previous reading) and logs
@@ -606,15 +645,19 @@ anyway; that is a UI choice, not an API constraint.
 
 ## A control answers `429`, or Home Assistant keeps retrying into a rate limit
 
-The siren and privacy routes answer `429` with a `Retry-After` header carrying
-**the server's own wait**, plus `{"error": "rate_limited", "retry_after": N}`.
-Honour that value rather than retrying on your own schedule — the next attempt
-otherwise walks straight back into the limiter, and Alarm.com's limits are
-undocumented and can lock the account.
+The camera settings and diagnostics reads, every camera settings write (both its
+pre-read and the write itself), and the siren, privacy, partition, bypass,
+arming-device and Bluetooth-disarming routes answer `429` with a `Retry-After`
+header carrying **the server's own wait**, plus
+`{"error": "rate_limited", "retry_after": N}`. Honour that value rather than
+retrying on your own schedule — the next attempt otherwise walks straight back
+into the limiter, and Alarm.com's limits are undocumented and can lock the
+account.
 
-The camera-settings poll absorbs a rate limit internally instead of surfacing it:
-it caches the negative result for the server's stated wait, so the next cycle does
-not re-hammer the edge.
+The one absorb: the settings read's two MWS-backed sections (siren and privacy)
+swallow a rate-limited MWS read internally — the negative result is cached for
+the server's stated wait and those sections degrade to `null` — so the response
+stays `200` and the next cycle does not re-hammer the edge.
 
 ---
 
