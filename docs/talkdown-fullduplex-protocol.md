@@ -1140,3 +1140,67 @@ that look worth having.
 
   What is still not known, and does not matter here: whether the endpoint would
   *also* accept the browser's form. Nothing needs it to.
+
+## Deferred candidates from the full-tree hardening review
+
+A four-lens review (security, stability, structure, polish) of both codebases
+selected five items — the per-request diagnostics timeout, the control-server
+429/clamp/log hardening, the clip-view guards, the credentials-fallback
+robustness, and the LVSR parser coverage, all shipped — and deliberately
+deferred the rest. Logged here per the rule that a gap noticed is a gap
+recorded; each entry carries the reason it was deferred, which is the evidence
+the next reviewer needs.
+
+- **E45 (open) Bridge adopts a pre-existing `control_secret` file without
+  re-tightening its permissions.** Rotation rewrites the file at `0o600` within
+  one cycle, so the exposure window is bounded — low urgency, but adopting a
+  looser-permissioned file silently is still wrong. Fix and test live in
+  `control_server.py` / `test_control_server_routes.py`.
+
+- **E46 (open) `mws_client` silently downgrades from defusedxml to stdlib
+  `ElementTree` when the import fails.** In the shipped container the fallback
+  is dead code (`requirements.txt` pins defusedxml, the image installs
+  wheels-only), so the production value is near zero; hoisting to a hard
+  top-level import deliberately changes startup failure behaviour for
+  out-of-container runs, so it needs a decision, not a drive-by. A stale
+  comment in `mobile_auth` about the same fallback rides along.
+
+- **E47 (open) `JanusCameraSession.close()` can leak the Janus websocket when
+  `pc.close()` raises or hangs, and `_keepalive_loop` dies with an unretrieved
+  exception when the websocket drops between keepalives.** Both sit inside the
+  load-bearing session-rotation machinery, where close-ordering interacts with
+  cancellation semantics — the exact territory whose comments document
+  previously-shipped bugs. Needs a dedicated change that has read
+  `camera_session.py` and `janus_client.py` in full and runs
+  `test_camera_session.py` deliberately; not a concurrent quick fix. The
+  keepalive half is log-noise only (the recv loop owns marking the session
+  dead).
+
+- **E48 (open) The docs set contradicts itself about `beautifulsoup4`.** The
+  dependency was dropped as unused, and at least one page still names it.
+  Doc-only; verify with a fresh grep before editing.
+
+- **E49 (open) `mobile_auth`'s `_device_fields` / `_read_body_text` are
+  imported by `mws_client` under underscore names** — the documented still-open
+  item; rename public. Bundle with correcting `development.md`'s still-open
+  entry on entity naming from `device.__class__.__name__`, which needs its own
+  repo-wide grep to confirm no naming path uses class names before the hazard
+  claim is deleted.
+
+- **E50 (open) The integration's `async_bridge_post` ignores the bridge's
+  429/`Retry-After` contract**, so a rate-limited siren/privacy/settings action
+  surfaces as a raw "429, message=Too Many Requests" toast. Natural follow-up
+  to the bridge-side 429 mapping now that settings routes emit it; wording
+  should match the actually-observed responses. Same shape applies to the
+  speak service, which surfaces bridge 413/504/400 talk failures as raw
+  aiohttp errors — both are integration-side, so verification is by reading,
+  compiling and HA logs only.
+
+- **E51 (open) Observability additions that lost the batch-size contest:**
+  a `by_path` counter in the talk metrics recording which transport ran
+  (webrtc vs srtp), and surfacing the per-camera dropped-frame count — today
+  log-only inside `camera_session.py` — via `/control/status`. The
+  dropped-frame half touches the rotation loop's file and so belongs with E47's
+  dedicated session. Consuming the bridge's diagnostics as HA camera entity
+  attributes is a separate, deliberate feature (new attributes, new coordinator
+  fetch, MINOR-vs-PATCH call), not hardening.
