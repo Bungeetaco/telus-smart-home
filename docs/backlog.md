@@ -1112,18 +1112,36 @@ when it ships.
 
 ## Downstream (listen) audio
 
-- **E53 (open) Does the upstream serve a downstream audio track?** The bridge
-  publishes video only, and the reason is closer to home than it looks: the
-  Janus mountpoint the bridge creates asks for video only, so a video-only
-  offer proves nothing about the camera. Two facts point the other way — the
-  mobile API reports `sdsa=true` (supports downstream audio) for the reference
-  doorbell, and its `<rtsp>` endpoint carries a `csda` listen-audio flag — while
-  the website path's `supportsAudio=false` is paired with `audioUpStreamUrl`
-  and so is evidence about *upstream* (talkdown), not necessarily about listen.
-  `JANUS_REQUEST_AUDIO` (default off) asks for Opus alongside the video and
-  lets the offer-summary diagnostic answer it, with a fail-safe retry so a
-  refusal costs a log line and nothing else. **Open until observed on the live
-  deployment**; record the outcome here and in `alarm-com-api.md`.
+- **E53 (ANSWERED — yes, with a caveat) The upstream does serve a downstream
+  audio track.** With `JANUS_REQUEST_AUDIO` on, the gateway offers
+  `audio(port=9,opus)` alongside the video for **both** cameras on this
+  account. The video-only offer seen by default is entirely explained by the
+  bridge's own create body, which asks for video only. Two further facts fell
+  out of the same observation:
+
+  - **`liveVideoHighestResSources` has no `supportsAudio` and no
+    `audioUpStreamUrl` attribute at all.** The real attribute set is
+    `coturnAddressesTuplets, errorEnum, iceServers, isMjpeg, janusGatewayUrl,
+    janusToken, proxyStreamTimeoutTime, proxyUrl, spsAndPpsRequired,
+    urlEncoded, visualVerificationRecord`. Earlier reasoning that treated a
+    `supportsAudio=false` as evidence about audio was reasoning about a field
+    this endpoint does not return.
+  - **THE CAVEAT, and it is serious: asking for audio broke the indoor
+    camera.** With audio negotiated, camera 2049 repeatedly failed
+    `RuntimeError('no frames received before timeout')` with the ICE
+    connection going `closed`, reconnecting every ~23 s and reaching three
+    consecutive failures — two short of the escape hatch that hard-exits the
+    process. The doorbell (2048) streamed normally at 15 fps throughout the
+    same window. The experiment was rolled back and both cameras recovered
+    immediately.
+
+  **Unverified:** why the indoor camera fails. Candidates are that negotiating
+  a second m-line changes the answer in a way that camera's relay path does
+  not tolerate, or that the relay stops sending video once audio is accepted
+  but not consumed. It is also not proven that the doorbell would stay healthy
+  over a long run — it was observed for minutes, not hours. Any further work
+  here must be per-camera (the knob is currently global) and must be watched,
+  because the failure mode marches toward the restart guard.
 
 - **E54 (open) Consuming downstream audio, if E53 says it exists.** Not
   started, and deliberately not bundled with the experiment. The publish path
@@ -1164,3 +1182,38 @@ when it ships.
   intercom notification, a quick reply, an away-mode greeting — has to pattern
   match the feed instead of triggering on a press. Closing this is small and
   unblocks all of them.
+
+## Upstream library
+
+- **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
+  library the integration is built on carries a notice that its maintainer has
+  moved and no longer has an Alarm.com system to test against, on an indefinite
+  timeline. The repository is not archived or disabled, but its last functional
+  commit predates the notice by more than a year — so in practice the library
+  has been dormant for as long as this project has been active, and the notice
+  formalises a status quo rather than changing it.
+
+  **No action is required now, and pinning is why.** `manifest.json` pins an
+  exact version, Renovate keeps it in the never-auto-merge group, and the CI
+  smoke test imports all three monkeypatches and asserts the private instance
+  attributes the replaced `async_login` depends on — so an upstream change
+  cannot reach this project silently, and an upstream that never changes cannot
+  reach it at all. The project already reimplements the parts it most depends
+  on (the bridge re-does auth from scratch; the integration patches login, the
+  websocket heartbeat and the push handler).
+
+  What the pause does change is the calculus for later. The "when a bump PR
+  appears" procedure in [development.md](development.md) is now unlikely ever
+  to fire, and nobody upstream will adapt the library if Alarm.com changes
+  something. Triggers that should reopen this: the pinned version failing on a
+  Python version the runtime moves to, a security advisory against it or its
+  dependencies, or a change this project wants in code it currently reaches by
+  monkeypatch.
+
+  **The likely eventual answer is vendoring, not forking.** Three internals are
+  already monkeypatched with compatibility guards precisely because they cannot
+  be changed in place; vendoring the library into the integration would turn
+  those patches into ordinary edits and delete the guard machinery
+  (`check_patch.py` included) along with the pin. It is not worth doing on
+  spec — do it when one of the triggers above forces the question, and record
+  the outcome here.

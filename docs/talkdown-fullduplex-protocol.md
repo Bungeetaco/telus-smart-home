@@ -31,8 +31,11 @@ orchestration) → `control_server.py` (`POST /control/cameras/{id}/talk`).
 ## Why the "obvious" paths do NOT work for this doorbell
 
 - **Website REST/Janus path** (what the rest of the bridge uses for *video*):
-  for the doorbell `liveVideoHighestResSources` returns
-  `supportsAudio=false, audioUpStreamUrl=null` — no talk. Dead end.
+  it carries no **upstream** audio — `liveVideoHighestResSources` returns no
+  talk URL of any kind (it has no `audioUpStreamUrl` attribute; see
+  [alarm-com-api.md](alarm-com-api.md) §1.4.1 for the real attribute set). Dead
+  end for talk. Note this says nothing about *downstream* audio, which that
+  path does offer when asked — backlog E53.
 - **`GetLiveVideoStream` `<webrtc>`/`<srtp>` endpoints** (the app's path for
   newer ADC cameras): the VDB750 returns **only `<rtsp>`** (video + listen),
   `SupportsWebRTC=false`, `StreamProtocol=0` (RTSP). So `talk_webrtc.py` /
