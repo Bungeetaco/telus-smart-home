@@ -3,7 +3,7 @@
 Three unrelated sources of numbers live here: the Skybell configuration options
 that come from pyalarmdotcomajax's device model; the bridge-served camera
 settings -- the speaker/call volume (the volume talkdown actually plays at --
-see docs/talkdown-fullduplex-protocol.md, E9) and the brightness of the device's
+see docs/backlog.md, E9) and the brightness of the device's
 status LED (E32).
 
 Both bridge-served numbers ride the camera settings coordinator; neither is a
@@ -236,7 +236,7 @@ class CameraStatusLedBrightnessNumber(CameraSettingsEntity, NumberEntity):
     capability flag: `supports_brightness` is FALSE on the reference doorbell,
     which can turn its LED off but not dim it, so this entity is never created
     there. It exists for a model whose `ledmn`/`ledmx` say otherwise
-    (docs/talkdown-fullduplex-protocol.md, E32) -- which also means nothing here
+    (docs/backlog.md, E32) -- which also means nothing here
     has ever run against real hardware, hence following CameraCallVolumeNumber
     above field for field rather than inventing anything.
 

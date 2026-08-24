@@ -36,7 +36,7 @@ From `manifest.json`:
 | `iot_class` | `cloud_polling` |
 | `config_flow` | `true` |
 | `dependencies` | none |
-| `requirements` | `beautifulsoup4>=4.10.0`, `pyalarmdotcomajax==0.5.13` |
+| `requirements` | `pyalarmdotcomajax==0.5.13` |
 
 The config-entry schema is at **version 4** (see [Config-entry
 migrations](#config-entry-migrations)). Despite the `cloud_polling` IoT class,
@@ -1024,7 +1024,13 @@ The two are used deliberately and differently:
 
 A write the device refuses (`422`) surfaces as a `HomeAssistantError` on the
 service call rather than being swallowed, so a control that has stopped being
-supported is visible instead of appearing to work.
+supported is visible instead of appearing to work. A rate-limited write (`429`)
+surfaces the same way, worded "Alarm.com is rate-limiting this account; the
+change was not applied -- try again in {N}s" — `async_bridge_post` takes the
+wait from the bridge's `Retry-After` header, falls back to the response body's
+`retry_after`, and ends "try again later" when neither is readable. The
+integration only reports the server's wait; it never retries the write, so a
+retry cannot walk straight back into the limiter.
 
 The bridge's image and video/clip settings routes have **no entities yet** — the
 URL templates are in `const.py` so the control surface is described in one place,

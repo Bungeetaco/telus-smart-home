@@ -275,8 +275,8 @@ Assistant UI. There are no YAML settings.
 | `integration_type` | `hub` | Presented as a hub integration. |
 | `iot_class` | `cloud_polling` | Talks to a cloud service by polling (plus a websocket, see the options below). |
 | `dependencies` | `[]` | No other HA integrations required. |
-| `requirements` | `beautifulsoup4>=4.10.0`, `pyalarmdotcomajax==0.5.13` | Python packages installed on setup. |
-| `version` | `1.5.1` | Integration version. |
+| `requirements` | `pyalarmdotcomajax==0.5.13` | Python packages installed on setup. |
+| `version` | the current release | Integration version — the single source of truth, kept in lockstep with the git tag (see [development.md](development.md)). |
 
 The config-entry schema is at **version 4** (`ADCFlowHandler.VERSION`); older
 entries are migrated forward.

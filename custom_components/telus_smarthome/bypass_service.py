@@ -21,7 +21,7 @@ person who asked for both, in that order, on purpose. Folding this into
 `CONF_FORCE_BYPASS` was never an option anyway -- upstream this is
 `POST /web/api/devices/partitions/{id}/bypassSensors`, a standalone partition
 action applied immediately, not an arm-time option (see the E25 entry in
-`docs/talkdown-fullduplex-protocol.md`).
+`docs/backlog.md`).
 
 The bridge's `POST /control/partitions/{id}/bypass` does the write. It pre-reads
 the partition and enforces the panel's own `canBypassSensorWhenArmed` /

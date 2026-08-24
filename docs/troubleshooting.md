@@ -15,6 +15,7 @@ the component READMEs.
 - [Push websocket drops every few minutes](#push-websocket-drops-every-few-minutes)
 - [Container restart-loop against an upstream outage](#container-restart-loop-against-an-upstream-outage)
 - [Bridge warns that credentials.json is unreadable or corrupt](#bridge-warns-that-credentialsjson-is-unreadable-or-corrupt)
+- [Bridge warns it could not re-tighten permissions on the control secret](#bridge-warns-it-could-not-re-tighten-permissions-on-the-control-secret)
 - [Alarm.com rate-limiting (HTTP 429)](#alarmcom-rate-limiting-http-429)
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
@@ -166,6 +167,40 @@ filesystem errors) — the file is written by HA and only read by the bridge.
 
 ---
 
+## Bridge warns it could not re-tighten permissions on the control secret
+
+**Symptom.** The bridge log shows, at every startup:
+
+```
+Could not re-tighten permissions on <shared dir>/control_secret; it may remain group/world-readable
+```
+
+with a traceback. The bridge starts normally and the control API works.
+
+**Cause.** The bridge re-tightens an adopted `control_secret` file to mode
+`0600` at startup when it finds group/other permission bits set (a file it
+generates itself is always born `0600`; a looser one arrives by being restored
+from a backup or written under a permissive umask). The chmod is best-effort:
+this warning means it failed — typically because the file is owned by a
+different uid on the shared bind mount than the one the bridge runs as. The
+secret is served unchanged either way; a permissions problem never regenerates
+it, so the HA side keeps authenticating. But the file really does remain
+readable to other users of the shared directory until fixed.
+
+A one-time
+`Re-tightened <shared dir>/control_secret from mode <old mode> to 0600`
+warning is the healthy sibling of this message: the chmod succeeded, nothing
+to do.
+
+**Fix.** On the host, chown the file to the uid the bridge container runs as
+(or remove it and restart the container — the bridge regenerates it at `0600`,
+and the HA side picks up the new value on its next request since it re-reads
+the file every time). Then check how the loose file got there: a backup/restore
+procedure or umask that produces group/world-readable files in the shared
+directory will do the same to the next restore.
+
+---
+
 ## Alarm.com rate-limiting (HTTP 429)
 
 **Symptom.** Logins, REST polls, or event fetches begin failing; the cloud
@@ -301,8 +336,13 @@ If you touch `camera_session.py` or `janus_client.py`, read them in full first.
 is the rotation/frame-hold working as designed. A feed that freezes for ~60 s
 then goes dark is the frame-hold expiring on a genuinely offline camera.
 Per-camera health (`state`, `consecutive_failures`, `last_frame_at`, `fps`,
-`last_error`) is available from the bridge's `GET /control/status` endpoint
-(same auth as the other control endpoints).
+`dropped_frames`, `last_error`) is available from the bridge's
+`GET /control/status` endpoint (same auth as the other control endpoints).
+`dropped_frames` is the lifetime count of frames the ingest queue discarded
+because the consumer fell behind — a steadily climbing total on one camera says
+the encode side cannot keep up with that stream, where the picture alone just
+looks subtly choppy. It updates when each ~165 s session ends, so it can lag
+the live session by up to one rotation.
 
 ---
 
@@ -366,6 +406,14 @@ playing.
 
 Also note **400**: the endpoint rejects a `codec` other than `mulaw` on this
 doorbell model (see next entry), and rejects malformed request bodies.
+
+Triggered through `telus_smarthome.speak` rather than curl, these failures
+arrive as `HomeAssistantError` messages naming the camera entity instead of raw
+statuses — including **413** (the clip exceeds the bridge's size cap,
+`TALK_MEDIA_MAX_BYTES`), **504** (the talk timed out on the bridge before the
+clip finished) and **400** (the bridge could not fetch or decode the audio; the
+service always sends a well-formed body, so a malformed-body `400` cannot come
+from it). The wordings identify the same causes as the table above.
 
 **Auth reminder.** The talk endpoint (like the other control endpoints) is
 Bearer-authed with the bridge control secret from the shared directory
@@ -653,6 +701,13 @@ header carrying **the server's own wait**, plus
 retrying on your own schedule — the next attempt otherwise walks straight back
 into the limiter, and Alarm.com's limits are undocumented and can lock the
 account.
+
+The Home Assistant entities surface this rather than retrying: a rate-limited
+siren press, privacy toggle, camera-settings, arming-device or
+Bluetooth-disarming write raises a `HomeAssistantError` beginning "Alarm.com is
+rate-limiting this account" and carrying the server's wait ("try again in
+{N}s", or "try again later" when no wait is readable). The integration never
+retries the write itself — repeat the action after the stated interval.
 
 The one absorb: the settings read's two MWS-backed sections (siren and privacy)
 swallow a rate-limited MWS read internally — the negative result is cached for

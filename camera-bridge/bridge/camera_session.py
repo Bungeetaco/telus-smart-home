@@ -55,10 +55,28 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     status[camera_id] = {
         "state": "connecting", "consecutive_failures": 0, "last_frame_at": None,
         "fps": None, "hardware_encode": None, "last_error": None,
+        "dropped_frames": 0,
     }
 
     def _update_status(**fields):
         status[camera_id].update(fields)
+
+    # Lifetime total of frames dropped because the consumer fell behind (see
+    # janus_client._pump_track). Kept here because each session's own counter
+    # dies with it at every ~165s rotation, so before this the throttled log
+    # lines were the only trace -- now /control/status carries the running
+    # total per camera.
+    dropped_frames_total = 0
+
+    async def _retire_session(sess):
+        # The single exit for a finished/failed session: fold its drop counter
+        # into the lifetime total BEFORE the close, which is bounded but can
+        # time out and abandon the session object entirely. Close ordering,
+        # bounding and error handling are unchanged (_close_with_timeout).
+        nonlocal dropped_frames_total
+        dropped_frames_total += sess.dropped_frames
+        _update_status(dropped_frames=dropped_frames_total)
+        await _close_with_timeout(sess, camera_id)
 
     # The ffmpeg/RTSP publisher deliberately outlives individual Janus sessions.
     # Alarm.com kills every session server-side at ~180s, forcing a rotation
@@ -351,7 +369,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # seconds. Bounded by SESSION_CLOSE_TIMEOUT_S, so even a
                         # hung close only costs 5s of the wait.
                         if session:
-                            await _close_with_timeout(session, camera["id"])
+                            await _retire_session(session)
                             session = None
                         await asyncio.sleep(hold_s)
                     os._exit(1)
@@ -369,7 +387,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # real streaming problem when it was actually just an orphaned session
                 # nobody had told to stop yet.
                 if session:
-                    await _close_with_timeout(session, camera["id"])
+                    await _retire_session(session)
                     session = None
                 if rate_limited:
                     # Honor Cloudflare's own Retry-After instead of the fixed
@@ -399,7 +417,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 _start_hold()
             finally:
                 if session:
-                    await _close_with_timeout(session, camera["id"])
+                    await _retire_session(session)
     finally:
         await _stop_hold()
         if sink:

@@ -218,6 +218,39 @@ def test_action_acks():
     print("  ok  action acks: ts+s both required, teardown parse never raises")
 
 
+def test_defusedxml_is_a_hard_import():
+    """A build without defusedxml must fail at import, not fall back to stdlib
+    ElementTree -- the fallback would drop entity-expansion protection with no
+    indication, which is exactly the silent failure this suite exists to catch.
+    Simulated by importing both MWS modules in a subprocess whose meta path
+    blocks defusedxml."""
+    import subprocess
+    blocker = (
+        "import sys\n"
+        "class _Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'defusedxml' or name.startswith('defusedxml.'):\n"
+        "            raise ImportError('defusedxml blocked for test')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _Block())\n"
+        "for mod in ('bridge.mws_client', 'bridge.mobile_auth'):\n"
+        "    try:\n"
+        "        __import__(mod)\n"
+        "    except ImportError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        print('IMPORTED', mod)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", blocker],
+        cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+        capture_output=True, text=True, env=dict(os.environ))
+    assert "IMPORTED" not in proc.stdout, (
+        "an MWS module imported without defusedxml -- the silent stdlib "
+        f"fallback is back: {proc.stdout!r} {proc.stderr!r}")
+    print("  ok  defusedxml hard import: MWS modules refuse to load without it")
+
+
 def test_retry_after():
     assert c.parse_retry_after("120") == 120.0
     soon = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90))
@@ -249,7 +282,8 @@ def main():
     for test in (test_doorbell_parser, test_doorbell_parser_edge_cases,
                  test_live_video_stream_parser, test_live_video_stream_edge_cases,
                  test_decode_srtp_key,
-                 test_action_acks, test_retry_after, test_session_deadline):
+                 test_action_acks, test_defusedxml_is_a_hard_import,
+                 test_retry_after, test_session_deadline):
         try:
             test()
         except AssertionError as exc:

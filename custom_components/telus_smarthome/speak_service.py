@@ -248,6 +248,25 @@ async def _post_talk(session, secret, entity_id, camera_id, audio_url) -> None:
                     "(set TALKDOWN_ENABLED=true and restart the bridge)")
             if resp.status == 422:
                 raise HomeAssistantError(f"speak: {entity_id} has no upstream (talk) audio path")
+            if resp.status == 413:
+                # Bridge answered media_too_large: it fetched the clip but it
+                # exceeds its size cap (config.TALK_MEDIA_MAX_BYTES).
+                raise HomeAssistantError(
+                    f"speak: the audio clip for {entity_id} exceeds the bridge's "
+                    "size cap (TALK_MEDIA_MAX_BYTES)")
+            if resp.status == 504:
+                # Bridge answered talk_timeout: the session hit the bridge's own
+                # TALK_SESSION_TIMEOUT_S before the clip finished playing.
+                raise HomeAssistantError(
+                    f"speak: the talk on {entity_id} timed out on the bridge "
+                    "before the clip finished playing")
+            if resp.status == 400:
+                # Bridge answered malformed. This service always sends a
+                # well-formed {"audio_url": ...} body, so from here a 400 means
+                # the bridge could not fetch the URL or decode what it fetched.
+                raise HomeAssistantError(
+                    f"speak: the bridge could not fetch or decode the audio for "
+                    f"{entity_id}")
             resp.raise_for_status()
     except HomeAssistantError:
         raise

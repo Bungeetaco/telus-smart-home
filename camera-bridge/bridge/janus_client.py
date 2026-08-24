@@ -235,8 +235,28 @@ class JanusCameraSession:
         while True:
             await asyncio.sleep(c.JANUS_KEEPALIVE_INTERVAL_S)
             txn = self._next_txn()
-            await self._send({"janus": "keepalive", "session_id": self._session_id,
-                               "transaction": txn})
+            try:
+                await self._send({"janus": "keepalive", "session_id": self._session_id,
+                                   "transaction": txn})
+            except asyncio.CancelledError:
+                raise
+            except websockets.ConnectionClosed:
+                # Routine, not exceptional: the server force-closes every session
+                # at ~180s and keepalives run every 25s, so a send into a
+                # just-dead websocket happens on ordinary rotations. The recv
+                # loop owns marking the session dead -- this loop just stops.
+                # Raising out of here instead left the task finished-with-an-
+                # exception; close() only cancel()s it (a no-op on a finished
+                # task), so nothing ever retrieved the exception and asyncio
+                # logged "Task exception was never retrieved" tracebacks at GC
+                # time as recurring error-level noise.
+                self._queues.pop(txn, None)
+                return
+            except Exception:
+                log.warning("%s: keepalive send failed; stopping keepalives",
+                            self.camera["id"], exc_info=True)
+                self._queues.pop(txn, None)
+                return
             # keepalive ack isn't otherwise consumed; drop its queue entry after a beat
             # to avoid leaking memory over a long-lived session.
             asyncio.ensure_future(self._drop_queue_later(txn))
@@ -272,6 +292,16 @@ class JanusCameraSession:
                     self._track_queue.get_nowait()
                 self._track_queue.put_nowait(frame)
 
+    @property
+    def dropped_frames(self) -> int:
+        """Frames _pump_track dropped because the consumer fell behind.
+
+        Per-SESSION, so it dies with each ~165s rotation; camera_session's loop
+        reads it as each session ends and folds it into the per-camera lifetime
+        total that /control/status serves -- otherwise the throttled log lines
+        above were the only trace the drops ever left."""
+        return self._dropped_frames
+
     async def frames(self):
         """Yield decoded frames until the session dies (track end, ICE/connection
         failure, websocket close) or the caller stops iterating. Never blocks
@@ -305,7 +335,29 @@ class JanusCameraSession:
             self._keepalive_task.cancel()
         if self._recv_task:
             self._recv_task.cancel()
-        if self.pc:
-            await self.pc.close()
-        if self._ws:
-            await self._ws.close()
+        try:
+            if self.pc:
+                await self.pc.close()
+        finally:
+            # Unconditional, same ordering as before (pc first, then ws). aiortc's
+            # pc.close() is a known-hangable call under certain ICE states (see
+            # lifecycle.py), and every camera_session call site bounds this whole
+            # coroutine with wait_for(SESSION_CLOSE_TIMEOUT_S) -- so pc.close() can
+            # raise, or the wait_for's CancelledError can land mid-close. A plain
+            # sequential close abandoned the websocket to alarm.com's Janus gateway
+            # open in both cases, and the rotation loop opens a fresh session every
+            # ~165s, so a wedged camera accumulated one leaked socket per rotation.
+            #
+            # The ws close is guarded so its own failure cannot mask pc.close()'s
+            # exception; a CancelledError (the enclosing wait_for's) is re-raised
+            # after the close attempt, never swallowed -- for the pc.close() one,
+            # by this finally finishing normally. websockets bounds close() with
+            # its own close_timeout, so this cleanup cannot itself hang the caller.
+            if self._ws:
+                try:
+                    await self._ws.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.debug("%s: websocket close failed during session close",
+                              self.camera["id"], exc_info=True)

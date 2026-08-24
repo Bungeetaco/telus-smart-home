@@ -209,6 +209,12 @@ a refactor to buy here.
 The shared secret is generated once (32 random bytes, hex-encoded) on first
 start if it doesn't already exist, and written to
 `/shared/control_secret` (mode `0600`) -- see "Shared directory" below.
+A pre-existing file the bridge adopts instead of generating (restored from a
+backup, or created under a permissive umask) is re-tightened to `0600` at
+startup if it is group/world-readable, with a warning naming the old mode; if
+the chmod fails (e.g. the file is owned by another uid on the shared mount) a
+warning is logged and the secret is served as-is -- a permissions problem
+never regenerates it, so the HA side keeps authenticating.
 Rotating it is manual: delete the file and restart this container (it
 regenerates); the HA side re-reads the file on its next credential push
 attempt, since it doesn't cache the secret in memory across HA restarts.
@@ -284,9 +290,11 @@ never blocked on this bridge being reachable.
   endpoint. Would need real design work (and that capture) if it ever
   becomes necessary.
 - `GET /control/status` (per-camera `state`, `consecutive_failures`,
-  `last_frame_at`, `fps`, `hardware_encode`, `last_error`) -- added, same
-  auth as every other endpoint. `camera_session.py`'s `run_camera_forever`
-  updates its own entry directly; the control server just reflects it.
+  `last_frame_at`, `fps`, `hardware_encode`, `dropped_frames`, `last_error`)
+  -- added, same auth as every other endpoint. `camera_session.py`'s
+  `run_camera_forever` updates its own entry directly; the control server just
+  reflects it. `dropped_frames` is the camera's lifetime consumer-fell-behind
+  drop total since process start, accumulated as each video session ends.
 - The control secret now rotates automatically every
   `config.CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days by default) via an
   atomic rewrite of `control_secret` -- safe with no coordination needed

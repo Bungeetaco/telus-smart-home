@@ -3,7 +3,7 @@
 Three unrelated sources of selects live here: the Skybell configuration options
 that come from pyalarmdotcomajax's device model; the bridge-served camera
 settings (the wired chime type of a TELUS doorbell, its notification format and
-its live-stream resolution -- docs/talkdown-fullduplex-protocol.md, E27); and
+its live-stream resolution -- docs/backlog.md, E27); and
 which partition a Bluetooth-paired phone disarms (E43), which is not a camera
 setting at all and rides the arming-devices coordinator instead.
 """

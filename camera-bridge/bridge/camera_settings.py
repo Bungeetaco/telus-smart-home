@@ -1,7 +1,7 @@
 """Camera audio / image / video settings and diagnostics, over the WEBSITE API.
 
 Backs the settings half of the enhancement backlog's E9 ("volume control -- it
-IS settable, via the website API", docs/talkdown-fullduplex-protocol.md): the
+IS settable, via the website API", docs/backlog.md): the
 speaker volume talkdown plays at lives at
 ``PUT web/api/video/settings/audioSettings/{id}`` even though the mobile API's
 ``<duav>`` element reports ``SupportsVolumeAdjustment="false"``. Endpoint and

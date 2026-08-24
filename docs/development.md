@@ -73,9 +73,9 @@ Conventions every suite follows:
 
 | Suite | What it pins |
 |---|---|
-| `test_camera_session.py` | The per-camera reconnect loop: rotation before Alarm.com's ~180s server-side kill, the ffmpeg publisher that outlives it, the frame hold that bridges reconnect gaps, fps measurement, sink repair, and the consecutive-failure escape hatch. |
+| `test_camera_session.py` | The per-camera reconnect loop: rotation before Alarm.com's ~180s server-side kill, the ffmpeg publisher that outlives it, the frame hold that bridges reconnect gaps, fps measurement, sink repair, the consecutive-failure escape hatch, and the per-camera `dropped_frames` accumulation into `/control/status` (on healthy rotation and failure paths alike). Also drives the real `JanusCameraSession` `close()`/keepalive against fake pc/websocket objects — the gateway websocket must be released even when `pc.close()` raises or is cancelled, and the keepalive task must end quietly (yet stay cancellable) when the websocket drops between keepalives. |
 | `test_camera_settings.py` | The website settings wire shape — JSON:API on read, a flat object on write — reconstructed from captured fixtures, plus capability gating, bounds and option-list handling, and the per-request 35s ceiling each diagnostics read carries over the shared session's 15s default (without it, a slow-but-healthy camera's signal read is cancelled by the bridge's own client and answered as a 502). |
-| `test_control_server_routes.py` | The camera-settings, siren and privacy control routes: status codes (including the honest 429 + `Retry-After` on a rate-limited settings/diagnostics read or settings write), error vocabulary, and the fields the integration reads back — plus the events/history `limit` clamp and that a failed snapshot fetch is logged without its signed URL. |
+| `test_control_server_routes.py` | The camera-settings, siren and privacy control routes: status codes (including the honest 429 + `Retry-After` on a rate-limited settings/diagnostics read or settings write), error vocabulary, and the fields the integration reads back — plus the events/history `limit` clamp, that a failed snapshot fetch is logged without its signed URL, and that the `control_secret` file ends at mode `0o600` however it arrived (generated fresh, or adopted group/world-readable and re-tightened with the secret unchanged). |
 | `test_credentials_fallback.py` | The credentials.json fallback reader and watcher: a torn write (invalid UTF-8) or a wrong-shape file must degrade to the .env credentials instead of killing the process into a login-hammering restart loop, and a valid file must still be adopted. |
 | `test_arming_devices.py` | The Bluetooth arming-device client and its routes, including the irreversible unpair. |
 | `test_partitions.py` | Selective sensor bypass — above all the refusals, each of which is a case where writing anyway would leave a zone silently unprotected. |
@@ -130,18 +130,18 @@ integration **monkeypatches `pyalarmdotcomajax` internals**, so a blind bump can
 break login. The setup:
 
 - **[Renovate](https://docs.renovatebot.com/)** (`renovate.json`) opens update
-  PRs for everything pinned: `pyalarmdotcomajax` + `beautifulsoup4` (via
-  Renovate's built-in `homeassistant-manifest` manager, which reads the
-  `requirements[]` array in `manifest.json`), the bridge's `requirements.txt`,
+  PRs for everything pinned: `pyalarmdotcomajax` (via Renovate's built-in
+  `homeassistant-manifest` manager, which reads the `requirements[]` array in
+  `manifest.json`), the bridge's `requirements.txt`,
   the Dockerfile base image, and the `MEDIAMTX_VERSION` Dockerfile `ARG` (a
   custom regex manager against GitHub releases -- the only pin with no built-in
   equivalent). *Enable it by installing the Renovate GitHub App on the repo* --
   the config alone does nothing without it. (Dependabot is a zero-install
   fallback but can't cover the MediaMTX `ARG`.)
-- **Auto-merge policy** (in `renovate.json`): low-risk updates (`python` base
-  image, `beautifulsoup4`) auto-merge once CI is green; **high-risk ones
-  (`pyalarmdotcomajax`, `aiortc`, `av`, `mediamtx`) never auto-merge** -- they get
-  a `review-required` label.
+- **Auto-merge policy** (in `renovate.json`): low-risk minor/patch updates
+  auto-merge once CI is green; **high-risk ones (`pyalarmdotcomajax`, `aiortc`,
+  `av`, `mediamtx`, `aiohttp`, `websockets`) and the `python` interpreter/base-image
+  pair never auto-merge** -- they get a `review-required` label.
 - **CI smoke test** (`.github/workflows/ci.yml`) runs on every PR:
   1. installs the integration requirements and imports `telus_auth_patch.py`,
      which runs its compatibility guard -- so a `pyalarmdotcomajax` bump that
@@ -188,10 +188,13 @@ this project's integration deliberately monkeypatches a library, so the risk is 
 - **Socket timeouts on the talkdown PUT session.** The safety deadline is only checked
   between chunks, so a single wedged PUT could pin the per-camera talk lock for
   aiohttp's 300s default; now `sock_connect`/`sock_read` are 5s.
-- **`DigestAuthMiddleware`** replaces the hand-rolled RFC 2617 implementation (see E21).
-- **Hardened XML parsing** in `mws_client.py` (defusedxml-first, matching `mobile_auth`),
-  with `defusedxml` and `yarl` (imported directly but previously undeclared) added to
-  `requirements.txt`.
+- **`DigestAuthMiddleware`** replaces the hand-rolled RFC 2617 implementation (see [backlog.md](backlog.md) E21).
+- **Hardened XML parsing** in `mws_client.py` and `mobile_auth.py`: both import
+  `defusedxml` unconditionally at module level, so a build without the hardened
+  parser fails at import (the every-module-imports CI job catches it) instead of
+  silently parsing with stdlib `ElementTree` and losing entity-expansion
+  protection. `defusedxml` and `yarl` (imported directly but previously
+  undeclared) are declared in `requirements.txt`.
 - **Public aiortc imports** (`MediaStreamError`/`MediaStreamTrack` come from the package
   root) and corrected `websockets` type annotations (`ClientConnection`; the legacy
   `WebSocketClientProtocol` alias has not been what `connect()` returns since 14.0).
@@ -219,11 +222,11 @@ this project's integration deliberately monkeypatches a library, so the risk is 
   local implementation embeds the expiry in the MAC and uses `compare_digest`. Keep it;
   revisit only if the notification-longevity requirement is dropped.
 
-**Still open (low priority):** entity naming derives from `device.__class__.__name__`, so
-a library class rename would silently change entity IDs rather than raising;
-`mws_client.py` imports two underscore-prefixed helpers from `mobile_auth` (intra-project,
-but they should be renamed public); `pylibsrtp` is pinned though only referenced in a
-commented-out fallback (it arrives transitively via aiortc anyway).
+**Still open (low priority):** `pylibsrtp` is pinned though only referenced in a
+commented-out fallback (it arrives transitively via aiortc anyway). (Entity IDs are
+not exposed to a `pyalarmdotcomajax` class rename: `device.__class__.__name__`
+appears only in `base_device.py` log lines; unique IDs come from `device.id_` and
+display names from `device.name` plus each platform's `_device_type_name` literal.)
 
 
 
@@ -259,7 +262,7 @@ two that drift apart. In short:
 - **[configuration.md](configuration.md)** for a new knob, env var or interval;
   **[troubleshooting.md](troubleshooting.md)** for a new failure mode; the
   `*-api-findings.md` pages when something is learned about an upstream API; the
-  enhancement backlog (`talkdown-fullduplex-protocol.md`) when an idea is
+  enhancement backlog ([backlog.md](backlog.md)) when an idea is
   deferred or closed, rather than losing it.
 - **[README.md](README.md)** (this folder's index) whenever a doc is added, so
   the index never goes stale.
