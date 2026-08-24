@@ -2,9 +2,11 @@
 TELUS camera's speaker via the camera bridge's two-way-audio (talkdown) endpoint.
 
 The service renders `message` to a media URL using HA's own TTS (or takes a
-`media_content_id` / direct URL as given), then POSTs {"audio_url": ...} to the
-bridge's POST /control/cameras/{id}/talk, authed with the same on-disk shared
-secret every other bridge call uses (bridge_client.read_control_secret). The
+`media_content_id` / direct URL as given), then POSTs {"audio_url": ...} --
+plus the optional `conditioning` / `audio_filter` audio-shaping fields, only
+when the caller set them -- to the bridge's POST /control/cameras/{id}/talk,
+authed with the same on-disk shared secret every other bridge call uses
+(bridge_client.read_control_secret). The
 bridge fetches that loopback URL and plays it -- HA never streams the bytes
 itself, so a large clip is the bridge's concern (it caps the fetch).
 
@@ -43,6 +45,9 @@ LOGGER = logging.getLogger(__name__)
 # One of message / media_content_id is required (checked in the handler so we can
 # raise a friendly HomeAssistantError rather than a schema error). entity_id is
 # optional -- when omitted we fall back to the doorbell (see _resolve_targets).
+# conditioning / audio_filter are the talk route's own optional audio-shaping
+# fields, forwarded verbatim and ONLY when the caller set them (see
+# _BRIDGE_PASSTHROUGH_FIELDS below).
 _SPEAK_SCHEMA = vol.Schema(
     {
         vol.Optional("entity_id"): cv.entity_ids,
@@ -50,8 +55,18 @@ _SPEAK_SCHEMA = vol.Schema(
         vol.Exclusive("media_content_id", "speak_source"): cv.string,
         vol.Optional("engine"): cv.entity_id,
         vol.Optional("language"): cv.string,
+        vol.Optional("conditioning"): cv.boolean,
+        vol.Optional("audio_filter"): cv.string,
     }
 )
+
+# Optional talk-route body fields forwarded to the bridge as given. An absent
+# field MUST stay absent from the POST body: the bridge's own defaults are the
+# contract (control_server.py's talk docstring -- "conditioning": false turns
+# off the default ffmpeg chain, "audio_filter" is an explicit -af chain that
+# overrides both, "" disables conditioning), and sending an invented value
+# would pin behaviour this service has no opinion about.
+_BRIDGE_PASSTHROUGH_FIELDS = ("conditioning", "audio_filter")
 
 # > the bridge's own TALK_SESSION_TIMEOUT_S (60s) so HA doesn't give up on a
 # slow-but-succeeding talk before the bridge itself would.
@@ -87,9 +102,11 @@ def async_register_speak_service(hass: HomeAssistant) -> None:
         if secret is None:
             raise HomeAssistantError("Camera bridge not reachable (no control secret on the shared mount)")
 
+        extras = {k: data[k] for k in _BRIDGE_PASSTHROUGH_FIELDS if k in data}
+
         session = async_get_clientsession(hass)
         for entity_id, camera_id in targets:
-            await _post_talk(session, secret, entity_id, camera_id, audio_url)
+            await _post_talk(session, secret, entity_id, camera_id, audio_url, extras)
 
     async def _handle_stop(call: ServiceCall) -> None:
         """Stop whatever is currently playing through the camera's speaker.
@@ -229,12 +246,15 @@ def _camera_id_for_entity(registry, entity_id: str) -> str | None:
     return ent.unique_id
 
 
-async def _post_talk(session, secret, entity_id, camera_id, audio_url) -> None:
+async def _post_talk(session, secret, entity_id, camera_id, audio_url, extras=None) -> None:
+    """POST one talk to the bridge. `extras` is the caller-provided subset of
+    _BRIDGE_PASSTHROUGH_FIELDS -- merged into the body as given, never
+    defaulted, so an omitted field leaves the bridge's own default in force."""
     url = CAMERA_BRIDGE_TALK_URL_TEMPLATE.format(camera_id=camera_id)
     try:
         async with session.post(
             url,
-            json={"audio_url": audio_url},
+            json={"audio_url": audio_url, **(extras or {})},
             headers={"Authorization": f"Bearer {secret}"},
             timeout=aiohttp.ClientTimeout(total=_POST_TIMEOUT_S),
         ) as resp:

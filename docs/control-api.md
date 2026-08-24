@@ -138,7 +138,12 @@ curl -s $BASE/control/health
 Live per-camera diagnostics maintained by the camera session loop
 (`camera_session.py`'s `run_camera_forever`, threaded a shared status dict by
 `main.py`). Useful for spotting reconnect churn or a stalled pipeline without
-grepping container logs.
+grepping container logs. The Home Assistant integration polls this route every
+30 s to back its per-camera stream-health sensors and its camera-bridge
+connectivity entity (see
+[ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity));
+the route answers from memory over loopback, so that poll — unlike the settings
+poll — costs no upstream requests.
 
 **Response**
 

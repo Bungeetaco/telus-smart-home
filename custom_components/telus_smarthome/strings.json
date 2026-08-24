@@ -125,6 +125,23 @@
           "connected": "Connected",
           "not_connected": "Not connected"
         }
+      },
+      "camera_stream_state": {
+        "name": "Stream state",
+        "state": {
+          "connecting": "Connecting",
+          "streaming": "Streaming",
+          "reconnecting": "Reconnecting",
+          "restart_deferred": "Restart deferred"
+        }
+      },
+      "camera_dropped_frames": {
+        "name": "Dropped frames"
+      }
+    },
+    "binary_sensor": {
+      "camera_bridge": {
+        "name": "Camera bridge"
       }
     },
     "number": {
@@ -214,6 +231,20 @@
               "other": "Other"
             }
           }
+        }
+      }
+    }
+  },
+  "services": {
+    "speak": {
+      "fields": {
+        "conditioning": {
+          "name": "Audio conditioning",
+          "description": "Whether the bridge runs its default ffmpeg conditioning chain over the audio before playing it. Set to false to play the clip exactly as decoded. Leave unset to keep the bridge's own default."
+        },
+        "audio_filter": {
+          "name": "Audio filter",
+          "description": "An explicit ffmpeg `-af` filter chain the bridge runs instead of the default conditioning (overrides `conditioning`). An empty string disables conditioning entirely. Leave unset to keep the bridge's own default."
         }
       }
     }

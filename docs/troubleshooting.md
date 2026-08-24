@@ -338,7 +338,12 @@ is the rotation/frame-hold working as designed. A feed that freezes for ~60 s
 then goes dark is the frame-hold expiring on a genuinely offline camera.
 Per-camera health (`state`, `consecutive_failures`, `last_frame_at`, `fps`,
 `dropped_frames`, `last_error`) is available from the bridge's
-`GET /control/status` endpoint (same auth as the other control endpoints).
+`GET /control/status` endpoint (same auth as the other control endpoints) —
+and, with the HA integration installed, as entities: each camera carries a
+**Stream state** and a **Dropped frames** diagnostic sensor, and a
+**Camera bridge** connectivity sensor says whether the bridge is answering at
+all, so this diagnosis usually needs no curl (see
+[ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity)).
 `dropped_frames` is the lifetime count of frames the ingest queue discarded
 because the consumer fell behind — a steadily climbing total on one camera says
 the encode side cannot keep up with that stream, where the picture alone just
@@ -371,7 +376,8 @@ Backends:
 
 - Confirm what actually engaged by reading ffmpeg's own log line for the
   publish process — it names the encoder in use. Hardware-encode status is also
-  reflected per camera in `GET /control/status` (`hardware_encode`).
+  reflected per camera in `GET /control/status` (`hardware_encode`), and in HA
+  as the same-named attribute on the camera's Stream state sensor.
 - **VAAPI not engaging:** verify `/dev/dri` is passed into the container and
   the GPU is visible to libva. A device that's present but broken will silently
   fall back to software per `start()`.
@@ -448,8 +454,10 @@ lo-fi, or — if you tried to raise quality — pure noise.
   speaker. Leave it on unless you have a reason not to.
 - **Per-request overrides:** send `"conditioning": false` to disable the
   default chain for one clip, or `"audio_filter": "<ffmpeg -af string>"` to
-  replace it. To disable conditioning globally, set the bridge's audio-filter
-  config to empty.
+  replace it. The `telus_smarthome.speak` service takes the same two optional
+  fields and forwards them to the bridge, so the override works from a Home
+  Assistant automation as well as from curl. To disable conditioning globally,
+  set the bridge's audio-filter config to empty.
 - Pacing is schedule-based with a short prebuffer, so long clips play
   drift-free and the device sustains many minutes without a server-side cutoff —
   audio artifacts are about the codec/speaker, not timing.

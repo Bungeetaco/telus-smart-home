@@ -150,6 +150,21 @@ These are covered in detail under [The update model](#the-update-model) and
     safe to call unconditionally from an automation)
     (see [talkdown-DEPLOY.md](talkdown-DEPLOY.md)), guarded so reloads are a
     no-op.
+
+    Besides the target/source fields (`entity_id`, `message` /
+    `media_content_id`, `engine`, `language`), `speak` takes two **optional**
+    audio-shaping fields forwarded verbatim to the bridge's talk route:
+    `conditioning` (boolean — `false` disables the bridge's default ffmpeg
+    conditioning chain for that one clip) and `audio_filter` (an explicit
+    ffmpeg `-af` chain that overrides both; `""` disables conditioning).
+    A field the caller did not set is **absent from the POST body**, never
+    defaulted — the bridge's own defaults are the contract (see
+    [control-api.md](control-api.md#post-controlcamerascamera_idtalk)).
+    The talk route's `codec` field is deliberately **not** exposed: only
+    mu-law works on the reference doorbell, and a one-option selector would
+    only invite a broken value. The passthrough is verified by `py_compile`
+    and code reading only — it has not been fired against a live doorbell,
+    and the integration has no test suite.
 13. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
     or un-bypasses named sensors on the alarm partition. **A bypassed zone does
     not trigger the alarm until it is put back**, which is why this is a service
@@ -502,7 +517,7 @@ Two screens (`async_step_init` → `async_step_modes`):
 | Platform | Backed by | Devices / capabilities exposed |
 | --- | --- | --- |
 | `alarm_control_panel` | library partitions | Arm home/away, arm night (if supported), disarm; arming/disarming transitional states; `uncleared_issues` attribute |
-| `binary_sensor` | library sensors + water sensors, plus virtual attribute entities | Door / window / motion / smoke / CO / glass-break (vibration) / moisture / freeze / safety states; plus per-device **Malfunction** and **Battery** diagnostic sensors |
+| `binary_sensor` | library sensors + water sensors, plus virtual attribute entities + the stream-health coordinator | Door / window / motion / smoke / CO / glass-break (vibration) / moisture / freeze / safety states; plus per-device **Malfunction** and **Battery** diagnostic sensors; plus the **Camera bridge** connectivity diagnostic on the integration service device (bridge-backed — see [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)) |
 | `lock` | library locks | Lock/unlock with locking/unlocking transitional states; optional code |
 | `cover` | library garage doors + gates | Open/close with opening/closing states; device class garage or gate |
 | `light` | library lights | On/off, brightness (if supported); optimistic state for lights without state tracking |
@@ -511,7 +526,7 @@ Two screens (`async_step_init` → `async_step_modes`):
 | `switch` | camera config options + bridge automation rules + bridge cameras + arming devices | Skybell binary-chime on/off; **video automation rule** pause/resume; camera **privacy mode**, **indoor chime**, **outdoor tone**, **status LED** and the three **TELUS-app notification** toggles (motion / button press / smart chime); per-phone **Disarm alarm on arrival**; **Panel Bluetooth pairing** (all bridge-backed) |
 | `select` | camera config options + bridge cameras + arming devices | Skybell **adjustable chime** volume and **motion sensitivity**; camera **wired chime type**, **TELUS-app notification format** and **live video resolution**; per-phone **enrolled partition**; **Bluetooth disarm window** (all but the Skybell options bridge-backed) |
 | `climate` | library thermostats | HVAC mode (heat/cool/auto/fan-only/off), setpoints, fan mode, humidity readout |
-| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status (bridge-backed) |
+| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status; per-camera **Stream state** and **Dropped frames** stream-health diagnostics (bridge-backed) |
 | `camera` | camera bridge | Live RTSP stream + on-demand snapshots (bridge-backed) |
 | `event` | camera bridge | Per-camera video-clip events + a system-wide activity event (bridge-backed) |
 
@@ -614,9 +629,12 @@ device's `debug_data` at warning level — a support aid.
 (see [Talkdown diagnostics](#talkdown-diagnostics)) under a synthetic **"TELUS
 Smart Home Integration"** service device rather than any Alarm.com device; the
 **Recent Events** activity-feed sensor on the **Activity** device it shares
-with the activity event entity; and the per-camera diagnostic (signal strength
+with the activity event entity; the per-camera diagnostic (signal strength
 / battery / device status) and solar-panel sensors on the camera devices (see
-[Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities)).
+[Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities));
+and the per-camera **Stream state** and **Dropped frames** stream-health
+sensors, also on the camera devices (see
+[Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)).
 The two covered here:
 
 - **`AuthHealthSensor`** — an enum diagnostic sensor
@@ -667,11 +685,20 @@ a real error.
 | `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, activity-feed sensor |
 | `AutomationRulesCoordinator` (switch.py) | `/control/automations` | 300 s | automation-rule switches |
 | `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors |
+| `StreamHealthCoordinator` (sensor.py) | `/control/status` | 30 s | per-camera stream-health sensors, camera-bridge connectivity binary sensor |
+| `TalkMetricsCoordinator` (sensor.py) | `/control/metrics` | 120 s | talkdown status/failure sensors |
 
 The camera-list interval (60 s) is kept below the bridge's own camera-discovery
 interval so a camera the bridge just found appears in HA on the next cycle. The
 camera and activity coordinators are created in `__init__.py` and shared via
-`hass.data` so multiple platforms read the same instance.
+`hass.data` so multiple platforms read the same instance. The stream-health
+coordinator's 30 s interval is safe where other intervals are cautious:
+`/control/status` answers from an in-memory dict the bridge's own camera loops
+maintain, entirely over loopback with **zero Alarm.com requests behind it**, so
+the short poll buys "the stream died" being visible within half a minute at no
+rate-limit cost —
+see [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)
+for how it is shared between `sensor.py` and `binary_sensor.py`.
 
 ### Camera platform
 
@@ -1085,6 +1112,8 @@ From `const.py` (timing and identity):
 | `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 120 | Camera settings + diagnostics poll |
 | `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` | 45 | Per-request timeout for the `/diagnostics` bridge read (the signal read alone can take ~25 s on some models); the `/settings` read keeps the shared 10 s default |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | 900 | Bluetooth arming devices **and** the panel-wide Bluetooth settings poll |
+| `TALK_METRICS_POLL_INTERVAL_SECONDS` | 120 | Talkdown-counter poll (`/control/metrics`) |
+| `STREAM_HEALTH_POLL_INTERVAL_SECONDS` | 30 | Stream-health poll (`/control/status`) — loopback-only, answered from bridge memory, zero Alarm.com cost |
 | `CLIP_LINK_TTL_SECONDS` | 90 days | Signed clip-link lifetime |
 
 Bridge control endpoints all live on `http://127.0.0.1:8199/control/…` (both
@@ -1092,7 +1121,8 @@ containers run `--network host`, so loopback reaches the bridge). The shared
 directory is HA's `/share/telus_cam_bridge` (mounted into the bridge at
 `/shared`). `hass.data` keys: `DATA_CONTROLLER`, `DATA_CAMERA_COORDINATOR`,
 `DATA_ACTIVITY_COORDINATOR`, `DATA_CAMERA_SETTINGS_COORDINATOR`,
-`DATA_ARMING_DEVICES_COORDINATOR`, `DATA_PANEL_BLUETOOTH_COORDINATOR`.
+`DATA_ARMING_DEVICES_COORDINATOR`, `DATA_PANEL_BLUETOOTH_COORDINATOR`,
+`DATA_STREAM_HEALTH_COORDINATOR`.
 
 The blacklisted sensor subtypes (`SENSOR_SUBTYPE_BLACKLIST`) — mobile phone,
 panel image sensor, fixed panic — are excluded from entity creation everywhere.
@@ -1108,7 +1138,7 @@ someone triggers a talk.
 
 | Entity | State | Useful attributes |
 | --- | --- | --- |
-| `sensor.…_talkdown_status` | `idle`, `ok`, `stopped`, `rejected`, `failed` | `last_failure_reason`, `last_played_seconds`, `last_camera_id`, `recent` (last 5) |
+| `sensor.…_talkdown_status` | `idle`, `ok`, `stopped`, `rejected`, `failed` | `last_failure_reason`, `last_played_seconds`, `last_camera_id`, `by_path` (talks per transport: `full_duplex` / `webrtc` / `srtp` — which audio path is actually being used is otherwise invisible from HA), `recent` (last 5) |
 | `sensor.…_talkdown_failures` | failed count since the bridge started (`total_increasing`) | `attempts`, `succeeded`, `stopped`, `rejected_in_progress`, `failures_by_reason`, `by_endpoint`, `by_codec`, `renegotiations`, `audio_seconds_played` |
 
 The state is deliberately coarse (`failed`, not `failed:media_error`) so it is
@@ -1139,3 +1169,59 @@ automation:
 `no_upstream_audio` suggests the device stopped advertising a talk path;
 `transport_error` / `network_error` point at the doorbell or the LAN;
 `media_error` means the audio you supplied could not be fetched or decoded.
+
+## Stream health and bridge connectivity
+
+Three entities surface the bridge's own video-pipeline diagnostics (the
+[`GET /control/status`](control-api.md#get-controlstatus) payload), so a stream
+stuck reconnecting — or a bridge container that is down altogether — is visible
+in Home Assistant instead of only in the bridge's container logs.
+
+| Entity | Platform | Device | State |
+| --- | --- | --- | --- |
+| **Stream state** | `sensor` (enum, diagnostic) | the camera device | `connecting`, `streaming`, `reconnecting`, or `restart_deferred` |
+| **Dropped frames** | `sensor` (`total_increasing`, diagnostic) | the camera device | lifetime count of frames the bridge dropped for that camera |
+| **Camera bridge** | `binary_sensor` (connectivity, diagnostic) | the integration service device | **on** while the last `/control/status` poll got an answer out of the bridge |
+
+All three ride one `StreamHealthCoordinator` polling `/control/status` every
+`STREAM_HEALTH_POLL_INTERVAL_SECONDS` (30 s). That interval is short where the
+TELUS-backed coordinators are deliberately slow, and safely so: the route
+answers from an in-memory dict the bridge's camera loops maintain themselves,
+entirely over loopback — zero Alarm.com requests per cycle. The coordinator is
+shared between `sensor.py` and `binary_sensor.py` through the same lazy
+`hass.data` getter pattern as the settings and arming-device coordinators
+(`async_get_stream_health_coordinator`, stashed under
+`DATA_STREAM_HEALTH_COORDINATOR`): whichever platform sets up first creates it,
+and the whole per-entry dict is popped on unload. Per-camera sensors are added
+from a coordinator listener (the same pattern as the camera platform), so a
+camera the bridge starts reporting later — or a bridge that comes up after HA —
+gets its sensors with no restart.
+
+**Stream state** pins the four states the bridge's `run_camera_forever` loop
+can report. `restart_deferred` is the most informative one: the camera hit the
+bridge's escape hatch, but `restart_guard` is holding the process before it
+exits. The vocabulary is owned by a separately-deployed bridge, so a state this
+build does not know degrades to **unknown** rather than erroring on every
+update, with the verbatim value still readable in the `raw_state` attribute.
+The supporting numbers ride along as attributes rather than more entities:
+`fps` and `hardware_encode` (pinned encoder properties the bridge learns once
+per camera, not live measurements worth a recorder series),
+`consecutive_failures`, `last_error`, `last_frame_at`, and `raw_state`.
+
+**Dropped frames** counts frames discarded because the consumer fell behind the
+decoder — a sustained climb is a quietly-degrading stream that otherwise only
+shows as throttled bridge log lines, and `total_increasing` lets an automation
+trigger on it. It resets to 0 when the bridge restarts, which the state class
+treats as a counter reset rather than a spike. The bridge folds each ~165 s
+session's counter into the total as the session **ends**, so the value can lag
+the live session's drops by up to one rotation.
+
+**Camera bridge** reports whether the local bridge container is answering its
+control API at all: **off** means the container is down, mid-restart, or its
+control secret is not on the shared mount yet (that last case reads as
+disconnected too). It deliberately breaks the plain coordinator-availability
+contract: a coordinator whose poll fails marks its entities unavailable, and
+for a connectivity sensor "the bridge is down" **is** the reportable state — an
+entity that goes unavailable exactly when it should say "off" can never say
+"off" at all. So it stays available once any poll attempt has completed,
+successful or not, and is unknown only before the first attempt finishes.

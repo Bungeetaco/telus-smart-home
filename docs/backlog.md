@@ -33,10 +33,8 @@ and evidence.
   actual battery camera.
 - **E41** (two questions) — whether panel-wide pairing off makes the per-device
   toggle inert, and the uncaptured `bluetoothDisarmingSettings` write shape.
-- **E51** (HA-attributes idea) — consuming the bridge's per-camera diagnostics
-  (including `dropped_frames`) as HA camera entity attributes; a deliberate
-  separate feature, not hardening. Both of E51's original halves, and E47, are
-  DONE.
+- **E52** — the nine non-English translation files lack translations for the
+  talkdown and camera-settings entity keys the English file carries.
 
 ## High value
 _Implemented since live testing:_ **E-COND audio conditioning (with per-request
@@ -1044,7 +1042,7 @@ when it ships.
   integration has no test suite and this was not run in a live HA instance;
   live confirmation needs a real rate limit or an oversized clip.
 
-- **E51 (DONE — both halves; one separate idea deliberately open)
+- **E51 (DONE — all parts)
   Observability additions that lost the batch-size contest.** The metrics half
   is shipped:
   `TalkMetrics` (`bridge/metrics.py`) keeps a `by_path` counter mirroring the
@@ -1078,7 +1076,42 @@ when it ships.
   the failure path), proven to fail against the pre-change code. See
   [control-api.md](control-api.md#get-controlstatus).
 
-  Still open, and deliberately a separate feature rather than hardening:
-  consuming the bridge's diagnostics (including `dropped_frames`) as HA camera
-  entity attributes — new attributes, a new coordinator fetch, and a
-  MINOR-vs-PATCH call.
+  The consuming-in-HA idea — held back as a deliberate separate feature — is
+  now DONE too, and shipped as **per-camera diagnostic sensors on the camera
+  device rather than camera-entity attributes**: a Stream state enum sensor
+  (the four `run_camera_forever` states pinned as options; an unknown future
+  bridge state degrades to unknown with the verbatim value in a `raw_state`
+  attribute, and `fps` / `hardware_encode` / `consecutive_failures` /
+  `last_error` / `last_frame_at` ride along as attributes) and a Dropped
+  frames `total_increasing` counter, both fed by a `StreamHealthCoordinator`
+  polling `GET /control/status` every 30 s (loopback-only, zero alarm.com
+  cost) and shared with `binary_sensor.py`, which adds a **camera-bridge
+  connectivity entity** on the integration service device — ON while the
+  last status poll got an answer, deliberately staying available when the
+  poll fails so it can actually say "off". Sensors — not attributes — because
+  an enum state and a `total_increasing` counter get recorder history and
+  can drive automations directly, which attributes on the camera entity
+  cannot. It was the MINOR call: shipped as its own new-capability release.
+  See [ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity).
+
+## Gaps found while implementing the stream-health entities
+
+- **E52 (open) The nine non-English translation files are missing the older
+  talkdown and camera-settings entity keys.** The integration ships ten
+  translation files (`translations/{en,ar,bn,es,fr,hi,pt,ru,ur,zh-Hans}.json`).
+  The English file names every entity, but the nine non-English files carry
+  only `auth_health`, the two event entities, and the stream-health keys
+  (`camera_stream_state`, `camera_dropped_frames`, `camera_bridge`) — those
+  last three were added in all ten languages when the stream-health entities
+  shipped, so the gap is pre-existing and was not widened. What the nine files
+  lack is everything between: the talkdown sensors (`talkdown_status`,
+  `talkdown_failures`), the camera diagnostic and solar sensors
+  (`camera_signal_strength`, `camera_battery`, `camera_device_status`,
+  `camera_solar_panel`), and the entire `number` / `switch` / `select` /
+  `button` groups (speaker volume, chime, LED, notification, privacy-mode,
+  siren, resolution and Bluetooth-disarming entities). A non-English HA
+  instance falls back to the English names for all of those, so nothing is
+  broken — but the files promise a localization they only partially deliver.
+  Closing it means translating the English file's remaining keys into the
+  other nine languages, keeping the key sets identical so the gap cannot
+  silently reopen.
