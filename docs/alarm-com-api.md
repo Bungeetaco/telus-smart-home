@@ -191,14 +191,29 @@ Signed-URL behaviour worth knowing:
 
 `liveVideoHighestResSources/{camera_id}` returns, under `data.attributes`:
 
+The full attribute set, observed live on both of this account's cameras:
+`coturnAddressesTuplets`, `errorEnum`, `iceServers`, `isMjpeg`,
+`janusGatewayUrl`, `janusToken`, `proxyStreamTimeoutTime`, `proxyUrl`,
+`spsAndPpsRequired`, `urlEncoded`, `visualVerificationRecord`. The four the
+bridge parses:
+
 - `proxyUrl` — the RTP relay URI the Janus mountpoint pulls from.
 - `janusGatewayUrl` — the Janus WebSocket gateway to connect to.
 - `janusToken` — bearer token attached to every Janus message.
 - `iceServers` — a **JSON string** (parse it) of STUN/TURN servers.
 
-This path yields **video only** (downstream). For this account's doorbell it reports
-`supportsAudio=false` / `audioUpStreamUrl=null` — there is no talkdown here. Upstream
-audio comes from the mobile MWS API instead (Part 2).
+**There is no `supportsAudio` and no `audioUpStreamUrl` attribute in this
+response at all** — neither key is present for either camera. Any reasoning
+that treats a `supportsAudio=false` here as evidence about audio is reasoning
+about a field this endpoint does not return. Upstream (talk) audio comes from
+the mobile MWS API instead (Part 2).
+
+What this path yields is a matter of what the *client* asks for. The mountpoint
+the bridge creates requests video only, so the offer comes back video only —
+but when the create body also asks for audio, the gateway offers
+`audio(port=9,opus)` alongside the video for **both** cameras. Downstream audio
+therefore exists on this path; see the enhancement backlog (E53) for the
+observed behaviour and its one serious caveat.
 
 The Janus side (`janus_client.py`) speaks the streaming plugin over a
 `janus-protocol` WebSocket. Sequence: `create` session → `attach`
