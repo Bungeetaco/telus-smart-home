@@ -97,6 +97,35 @@
                     "telus_error": "Ошибка TELUS/Alarm.com"
                 }
             },
+            "talkdown_status": {
+                "name": "Состояние голосового оповещения",
+                "state": {
+                    "idle": "Ожидание",
+                    "ok": "ОК",
+                    "stopped": "Остановлено досрочно",
+                    "rejected": "Отклонено (оповещение уже идёт)",
+                    "failed": "Сбой"
+                }
+            },
+            "talkdown_failures": {
+                "name": "Сбои голосового оповещения"
+            },
+            "camera_signal_strength": {
+                "name": "Уровень сигнала"
+            },
+            "camera_battery": {
+                "name": "Батарея"
+            },
+            "camera_device_status": {
+                "name": "Состояние камеры"
+            },
+            "camera_solar_panel": {
+                "name": "Солнечная панель",
+                "state": {
+                    "connected": "Подключена",
+                    "not_connected": "Не подключена"
+                }
+            },
             "camera_stream_state": {
                 "name": "Состояние потока",
                 "state": {
@@ -113,6 +142,68 @@
         "binary_sensor": {
             "camera_bridge": {
                 "name": "Мост камер"
+            }
+        },
+        "number": {
+            "camera_call_volume": {
+                "name": "Громкость динамика"
+            },
+            "camera_status_led_brightness": {
+                "name": "Яркость индикатора состояния"
+            }
+        },
+        "switch": {
+            "camera_privacy_mode": {
+                "name": "Режим конфиденциальности"
+            },
+            "camera_indoor_chime": {
+                "name": "Внутренний звонок"
+            },
+            "camera_outdoor_tone": {
+                "name": "Наружный сигнал"
+            },
+            "camera_status_led": {
+                "name": "Индикатор состояния"
+            },
+            "camera_telus_app_motion_notifications": {
+                "name": "Уведомления о движении в приложении TELUS"
+            },
+            "camera_telus_app_button_press_notifications": {
+                "name": "Уведомления о нажатии кнопки в приложении TELUS"
+            },
+            "camera_telus_app_smart_chime_notifications": {
+                "name": "Уведомления Smart Chime в приложении TELUS"
+            },
+            "arming_device_disarming": {
+                "name": "Снятие с охраны по прибытии"
+            },
+            "panel_bluetooth_pairing": {
+                "name": "Сопряжение панели по Bluetooth"
+            }
+        },
+        "select": {
+            "camera_chime_type": {
+                "name": "Тип проводного звонка"
+            },
+            "camera_telus_app_notification_format": {
+                "name": "Формат уведомлений в приложении TELUS"
+            },
+            "camera_live_resolution": {
+                "name": "Разрешение прямой трансляции"
+            },
+            "arming_device_enrolled_partition": {
+                "name": "Снимаемый с охраны раздел"
+            },
+            "panel_bluetooth_timeout": {
+                "name": "Окно снятия с охраны по Bluetooth"
+            }
+        },
+        "button": {
+            "camera_siren_start": {
+                "name": "Включить сирену"
+            },
+            "camera_siren_stop": {
+                "name": "Выключить сирену"
             }
         },
         "event": {

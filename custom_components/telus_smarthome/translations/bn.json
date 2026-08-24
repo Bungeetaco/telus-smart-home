@@ -97,6 +97,35 @@
                     "telus_error": "TELUS/Alarm.com ত্রুটি"
                 }
             },
+            "talkdown_status": {
+                "name": "টকডাউনের অবস্থা",
+                "state": {
+                    "idle": "নিষ্ক্রিয়",
+                    "ok": "ঠিক আছে",
+                    "stopped": "আগেই বন্ধ হয়েছে",
+                    "rejected": "প্রত্যাখ্যাত (ইতিমধ্যে কথা চলছে)",
+                    "failed": "ব্যর্থ"
+                }
+            },
+            "talkdown_failures": {
+                "name": "টকডাউন ব্যর্থতা"
+            },
+            "camera_signal_strength": {
+                "name": "সিগন্যালের শক্তি"
+            },
+            "camera_battery": {
+                "name": "ব্যাটারি"
+            },
+            "camera_device_status": {
+                "name": "ক্যামেরার অবস্থা"
+            },
+            "camera_solar_panel": {
+                "name": "সোলার প্যানেল",
+                "state": {
+                    "connected": "সংযুক্ত",
+                    "not_connected": "সংযুক্ত নয়"
+                }
+            },
             "camera_stream_state": {
                 "name": "স্ট্রিমের অবস্থা",
                 "state": {
@@ -113,6 +142,68 @@
         "binary_sensor": {
             "camera_bridge": {
                 "name": "ক্যামেরা ব্রিজ"
+            }
+        },
+        "number": {
+            "camera_call_volume": {
+                "name": "স্পিকারের ভলিউম"
+            },
+            "camera_status_led_brightness": {
+                "name": "স্ট্যাটাস LED-এর উজ্জ্বলতা"
+            }
+        },
+        "switch": {
+            "camera_privacy_mode": {
+                "name": "গোপনীয়তা মোড"
+            },
+            "camera_indoor_chime": {
+                "name": "ইনডোর চাইম"
+            },
+            "camera_outdoor_tone": {
+                "name": "আউটডোর টোন"
+            },
+            "camera_status_led": {
+                "name": "স্ট্যাটাস LED"
+            },
+            "camera_telus_app_motion_notifications": {
+                "name": "TELUS অ্যাপ মোশন বিজ্ঞপ্তি"
+            },
+            "camera_telus_app_button_press_notifications": {
+                "name": "TELUS অ্যাপ বোতাম চাপার বিজ্ঞপ্তি"
+            },
+            "camera_telus_app_smart_chime_notifications": {
+                "name": "TELUS অ্যাপ স্মার্ট চাইম বিজ্ঞপ্তি"
+            },
+            "arming_device_disarming": {
+                "name": "আগমনে অ্যালার্ম ডিসআর্ম"
+            },
+            "panel_bluetooth_pairing": {
+                "name": "প্যানেল Bluetooth পেয়ারিং"
+            }
+        },
+        "select": {
+            "camera_chime_type": {
+                "name": "তারযুক্ত চাইমের ধরন"
+            },
+            "camera_telus_app_notification_format": {
+                "name": "TELUS অ্যাপ বিজ্ঞপ্তির ফরম্যাট"
+            },
+            "camera_live_resolution": {
+                "name": "লাইভ ভিডিও রেজোলিউশন"
+            },
+            "arming_device_enrolled_partition": {
+                "name": "যে পার্টিশন ডিসআর্ম করে"
+            },
+            "panel_bluetooth_timeout": {
+                "name": "Bluetooth ডিসআর্ম সময়সীমা"
+            }
+        },
+        "button": {
+            "camera_siren_start": {
+                "name": "সাইরেন চালু করুন"
+            },
+            "camera_siren_stop": {
+                "name": "সাইরেন বন্ধ করুন"
             }
         },
         "event": {
