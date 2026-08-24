@@ -75,9 +75,21 @@ Pinned here:
                           always shipped; with it on, a REJECTED audio create
                           falls back to that same video-only body instead of
                           failing the session, so a diagnostic can never feed
-                          the consecutive-failure escape hatch. A track this
-                          bridge does not consume is DRAINED, because aiortc
-                          decodes it regardless and queues it unbounded.
+                          the consecutive-failure escape hatch. The knob is
+                          PER-CAMERA -- one camera on this account tolerated the
+                          audio m-line and one did not -- so one setting must
+                          produce different wire behaviour for different cameras
+                          in the same run, and an unnamed camera's body stays
+                          byte-identical. A track this bridge does not consume is
+                          DRAINED, because aiortc decodes it regardless and
+                          queues it unbounded.
+ 12. first-frame timing -- the first-frame wait reports how long it ACTUALLY
+                          took: on success alongside the streaming line, and on
+                          failure the elapsed wait, the timeout it was measured
+                          against, and whether webrtcup had been seen. "Waited
+                          the full timeout and got nothing", "aborted at once"
+                          and "ICE never came up" all used to print the same
+                          five words.
  11. dropped frames    -- each session's drop counter is folded into a
                           per-camera lifetime total in the status dict when the
                           session ends (healthy rotation and failure path
@@ -90,6 +102,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import time
 
@@ -214,7 +227,7 @@ class Plan:
 
     def __init__(self, frames=(), tail="stall", connect_error=None,
                  connect_delay=0.0, close_error=None, close_hang=False,
-                 on_frame=None, dropped_frames=0):
+                 on_frame=None, dropped_frames=0, webrtcup_seen=True):
         self.frames = list(frames)
         self.tail = tail
         self.connect_error = connect_error
@@ -223,6 +236,13 @@ class Plan:
         self.close_hang = close_hang
         self.on_frame = on_frame
         self.dropped_frames = dropped_frames
+        # Defaults True because the REAL connect_and_watch does not return until
+        # the gateway's webrtcup event has arrived -- so by the time the loop
+        # waits for a first frame, ICE is normally already up. That is exactly
+        # what makes the flag diagnostic: "webrtcup seen, no frames" is a camera
+        # that negotiated and then sent nothing, a different fault from ICE never
+        # coming up at all.
+        self.webrtcup_seen = webrtcup_seen
 
 
 class FakeSession:
@@ -235,6 +255,7 @@ class FakeSession:
         self.frame_index = 0
         self._pending = list(self.plan.frames)
         self.dropped_frames = self.plan.dropped_frames   # the real one is a property
+        self.webrtcup_seen = self.plan.webrtcup_seen     # ...as is this one
         CTX.sessions.append(self)
 
     async def connect_and_watch(self):
@@ -393,6 +414,36 @@ async def stop(ctx):
         await ctx.task
 
 
+@contextlib.contextmanager
+def capture_logs(logger_name="bridge.camera_session", level=logging.INFO):
+    """Collect formatted log messages from one logger.
+
+    This file silences logging globally (several tests deliberately drive
+    `log.exception` paths), so a test that asserts on a LOG LINE has to lift
+    that for its own duration and put it back afterwards -- including for a test
+    that fails part-way through.
+    """
+    records = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger(logger_name)
+    handler = Collect()
+    was_disabled = logging.root.manager.disable
+    saved_level = logger.level
+    logging.disable(logging.NOTSET)
+    logger.setLevel(level)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(saved_level)
+        logging.disable(was_disabled)
+
+
 def steady(count, interval, width=1280, height=720):
     return [(interval, width, height)] * count
 
@@ -518,6 +569,112 @@ async def test_dropped_frames_accumulate_across_sessions_into_the_status():
         f"7 (rotated) + 5 (failed) should accumulate to 12 in the status, got "
         f"{state.get('dropped_frames')!r} -- the per-session counter is being lost "
         "with each session instead of folded into the lifetime total")
+
+
+# --------------------------------------------------------------------------
+# 1b. First-frame timing, on both the success and the failure side
+# --------------------------------------------------------------------------
+
+async def test_a_first_frame_timeout_reports_how_long_it_actually_waited():
+    """"no frames received before timeout" on its own names a symptom, not a
+    fault, and three different faults produce it.
+
+    Live, one camera failed this way every ~23s while its sibling on the same
+    account streamed fine. The bare message could not say whether the loop had
+    waited out the full FIRST_FRAME_TIMEOUT_S with nothing arriving (a camera
+    that negotiated and then sent no RTP -- slowness) or aborted almost
+    immediately (the frame iterator ending because the session was already
+    dead), and it could not say whether ICE had come up at all. Those are
+    opposite diagnoses. The elapsed wait, the timeout it was measured against,
+    and the webrtcup state all have to be in the message itself, because the
+    surrounding log lines are the same in every case.
+    """
+    # Waited it out: connect succeeds, webrtcup is up, no frame ever arrives.
+    with scenario([Plan(frames=(), tail="stall", webrtcup_seen=True)],
+                  FIRST_FRAME_TIMEOUT_S=0.4,
+                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+        start(ctx)
+        await run_until(ctx, lambda x: x.state.get("last_error"), timeout=8.0,
+                        why="the first-frame timeout")
+        waited_out = ctx.state.get("last_error") or ""
+        await stop(ctx)
+
+    assert "no frames received before timeout" in waited_out, waited_out
+    match = re.search(r"waited ([0-9.]+)s of ([0-9.]+)s", waited_out)
+    assert match, (
+        f"the message does not carry the ACTUAL elapsed wait against the timeout "
+        f"it was measured with -- 'waited the whole timeout' and 'aborted early' "
+        f"are indistinguishable: {waited_out}")
+    assert match.group(2) == "0.4", (
+        f"the reported timeout is not the one actually in force: {waited_out}")
+    assert 0.35 <= float(match.group(1)) <= 0.9, (
+        f"a wait that ran the full 0.4s timeout is reported as {match.group(1)}s: "
+        f"{waited_out}")
+    assert "webrtcup seen" in waited_out, (
+        f"the message cannot tell 'ICE never came up' from 'ICE came up and no "
+        f"media flowed': {waited_out}")
+
+    # Aborted early: the frame stream ends at once (StopAsyncIteration), so the
+    # loop breaks out long before the timeout -- and ICE never came up either.
+    # The timeout is an INT here (as it is in production, FIRST_FRAME_TIMEOUT_S=20)
+    # so the reported form stays "5.0s" rather than "5s" -- one shape to grep for,
+    # whatever the constant happens to be.
+    with scenario([Plan(frames=(), tail="end", webrtcup_seen=False)],
+                  FIRST_FRAME_TIMEOUT_S=5,
+                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+        start(ctx)
+        await run_until(ctx, lambda x: x.state.get("last_error"), timeout=8.0,
+                        why="the early first-frame abort")
+        aborted = ctx.state.get("last_error") or ""
+        await stop(ctx)
+
+    match = re.search(r"waited ([0-9.]+)s of ([0-9.]+)s", aborted)
+    assert match, aborted
+    assert match.group(2) == "5.0", aborted
+    assert float(match.group(1)) < 0.5, (
+        f"an abort that took no time at all is reported as if it had waited out "
+        f"the 5.0s timeout: {aborted}")
+    assert "webrtcup NOT seen" in aborted, (
+        f"webrtcup state is not reported, or is reported as seen when it was not: "
+        f"{aborted}")
+
+
+async def test_the_streaming_line_reports_how_long_the_first_frame_took():
+    """The healthy-side counterpart: how close this camera runs to the cliff.
+
+    A first frame at 2s and a first frame at 18s against a 20s
+    FIRST_FRAME_TIMEOUT_S are the same "streaming" line and the same green
+    status, but the second is one blip from the reconnect loop above. It rides
+    on the existing streaming line rather than a line of its own -- a second
+    per-rotation INFO line saying half of what that one says is log volume for
+    nothing.
+    """
+    with capture_logs() as lines:
+        # The first frame is deliberately slow, so a timing measured from the
+        # wrong instant (e.g. from the frame batch rather than from when the
+        # wait began) cannot accidentally match.
+        with scenario([Plan(frames=[(0.5, 1280, 720)] + steady(5, 0.02),
+                            tail=("repeat", 0.02, 1280, 720))],
+                      FIRST_FRAME_TIMEOUT_S=4.0, SESSION_MAX_LIFETIME_S=5.0) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                            timeout=8.0, why="a streaming session")
+            await stop(ctx)
+
+    streaming = [line for line in lines if ": streaming " in line]
+    assert streaming, f"no streaming line was logged at all: {lines}"
+    assert len(streaming) == 1, (
+        f"the first-frame timing was added as an extra line instead of extending "
+        f"the streaming line: {streaming}")
+    line = streaming[0]
+    assert "1280x720" in line, f"the streaming line lost its size/fps: {line!r}"
+    match = re.search(r"first frame after ([0-9.]+)s", line)
+    assert match, (
+        f"the streaming line does not report the first-frame latency alongside the "
+        f"size/fps it already reported: {line!r}")
+    assert 0.4 <= float(match.group(1)) <= 1.2, (
+        f"the first-frame latency reads {match.group(1)}s for a frame that took "
+        f"0.5s -- it is not measured from when the wait began: {line!r}")
 
 
 # --------------------------------------------------------------------------
@@ -1265,11 +1422,15 @@ def janus_rig(gateway):
         jc.RTCPeerConnection, jc.websockets = saved_pc, saved_ws
 
 
-async def _watch_once(gateway):
-    """Run the REAL connect_and_watch against `gateway`; returns the session."""
+async def _watch_once(gateway, camera_id="cam"):
+    """Run the REAL connect_and_watch against `gateway`; returns the session.
+
+    `camera_id` is a parameter because JANUS_REQUEST_AUDIO is per-camera: the
+    interesting case is two DIFFERENT ids in one run against one setting.
+    """
     with janus_rig(gateway) as jc:
         session = jc.JanusCameraSession(
-            {"id": "cam", "mac_address": "AA:BB:CC:DD:EE:FF", "model": "ADC-V",
+            {"id": camera_id, "mac_address": "AA:BB:CC:DD:EE:FF", "model": "ADC-V",
              "firmware": "1"},
             {"proxy_url": "rtsp://relay.invalid/stream", "janus_gateway_url": "wss://gw.invalid",
              "janus_token": "TOKEN", "ice_servers": []})
@@ -1284,48 +1445,70 @@ VIDEO_ONLY_KEYS = {
 }
 
 
-async def test_the_audio_experiment_is_off_by_default_and_changes_nothing():
-    """With JANUS_REQUEST_AUDIO false the mountpoint-create body must be exactly
-    what this bridge has always sent -- same keys, same order, byte-identical
-    JSON. This is the whole basis for calling the experiment reversible."""
+VIDEO_ONLY_BODY = {
+    "request": "create", "is_private": True, "type": "rtp",
+    "media_uri": "rtsp://relay.invalid/stream",
+    "add_sps_pps": False, "is_virtual": False, "streaming_type": "Live",
+    "timeout_seconds": 180, "max_timeout_seconds": 900,
+    "video": True, "videoport": 0, "videopt": 126,
+    "videortpmap": "H264/90000",
+    "videofmtp": "profile-level-id=42e01f;packetization-mode=1",
+    "name": "AA:BB:CC:DD:EE:FF_Live", "model": "ADC-V", "firmware": "1",
+}
+
+
+@contextlib.contextmanager
+def audio_knob(value):
+    """Set JANUS_REQUEST_AUDIO to a raw setting STRING, as the env var carries it.
+
+    A string, not a bool, because the knob is no longer a bool: it names the
+    cameras it applies to. Assigning a parsed value here would test a shape the
+    process never actually sees.
+    """
     saved = c.JANUS_REQUEST_AUDIO
-    c.JANUS_REQUEST_AUDIO = False
+    c.JANUS_REQUEST_AUDIO = value
     try:
-        gateway = ScriptedGateway()
-        session = await _watch_once(gateway)
-        await session.close()
+        yield
     finally:
         c.JANUS_REQUEST_AUDIO = saved
 
-    assert len(gateway.creates) == 1, gateway.creates
-    body = gateway.creates[0]
-    assert not any(k.startswith("audio") for k in body), body
-    # Byte-identical, key order included -- this is the wire, not a dict compare.
-    assert json.dumps(body) == json.dumps({
-        "request": "create", "is_private": True, "type": "rtp",
-        "media_uri": "rtsp://relay.invalid/stream",
-        "add_sps_pps": False, "is_virtual": False, "streaming_type": "Live",
-        "timeout_seconds": 180, "max_timeout_seconds": 900,
-        "video": True, "videoport": 0, "videopt": 126,
-        "videortpmap": "H264/90000",
-        "videofmtp": "profile-level-id=42e01f;packetization-mode=1",
-        "name": "AA:BB:CC:DD:EE:FF_Live", "model": "ADC-V", "firmware": "1",
-    }), f"the video-only create body changed on the wire: {json.dumps(body)}"
-    assert set(body) == VIDEO_ONLY_KEYS, sorted(set(body) ^ VIDEO_ONLY_KEYS)
+
+async def test_the_audio_experiment_is_off_by_default_and_changes_nothing():
+    """With JANUS_REQUEST_AUDIO at its default the mountpoint-create body must be
+    exactly what this bridge has always sent -- same keys, same order,
+    byte-identical JSON. This is the whole basis for calling the experiment
+    reversible, and it has to survive the knob growing per-camera value forms:
+    every off spelling, and an unset value, still produce that one body.
+    """
+    for off in ("false", "0", "no", "off", "", "  ", "FALSE"):
+        with audio_knob(off):
+            gateway = ScriptedGateway()
+            session = await _watch_once(gateway)
+            await session.close()
+
+        assert len(gateway.creates) == 1, (off, gateway.creates)
+        body = gateway.creates[0]
+        assert not any(k.startswith("audio") for k in body), (off, body)
+        # Byte-identical, key order included -- this is the wire, not a dict compare.
+        assert json.dumps(body) == json.dumps(VIDEO_ONLY_BODY), (
+            f"JANUS_REQUEST_AUDIO={off!r} changed the video-only create body on the "
+            f"wire: {json.dumps(body)}")
+        assert set(body) == VIDEO_ONLY_KEYS, sorted(set(body) ^ VIDEO_ONLY_KEYS)
 
 
 async def test_the_audio_experiment_asks_for_opus_alongside_the_video():
-    """With the knob on, the audio keys mirror the video ones and nothing else
-    moves: same single create, video keys untouched, a dynamic payload type that
-    cannot collide with the video 126."""
-    saved = c.JANUS_REQUEST_AUDIO
-    c.JANUS_REQUEST_AUDIO = True
-    try:
-        gateway = ScriptedGateway()
-        session = await _watch_once(gateway)
-        await session.close()
-    finally:
-        c.JANUS_REQUEST_AUDIO = saved
+    """With the knob on for every camera, the audio keys mirror the video ones
+    and nothing else moves: same single create, video keys untouched, a dynamic
+    payload type that cannot collide with the video 126. Every "on" spelling
+    means the same thing, `all` included."""
+    for on in ("true", "1", "yes", "on", "all", "  true  "):
+        with audio_knob(on):
+            gateway = ScriptedGateway()
+            session = await _watch_once(gateway)
+            await session.close()
+        assert len(gateway.creates) == 1, (on, "an accepted audio create must not be retried")
+        assert gateway.creates[0].get("audio") is True, (
+            f"JANUS_REQUEST_AUDIO={on!r} did not request audio")
 
     assert len(gateway.creates) == 1, "an accepted audio create must not be retried"
     body = gateway.creates[0]
@@ -1357,9 +1540,7 @@ async def test_a_rejected_audio_create_falls_back_instead_of_failing_the_session
                    "error": "Can't add 'rtp' stream from rtsp://relay.invalid/stream"}}},
         {"janus": "error", "error": {"code": 458, "reason": "No such handle"}},
     ]
-    saved = c.JANUS_REQUEST_AUDIO
-    c.JANUS_REQUEST_AUDIO = True
-    try:
+    with audio_knob("all"):
         for rejection in rejections:
             gateway = ScriptedGateway(reject_audio_with=rejection)
             # No raise: connect_and_watch completing is the assertion.
@@ -1382,8 +1563,63 @@ async def test_a_rejected_audio_create_falls_back_instead_of_failing_the_session
             requests = [m["body"]["request"] for m in gateway.sent
                         if m.get("janus") == "message"]
             assert requests == ["create", "create", "watch", "start"], requests
-    finally:
-        c.JANUS_REQUEST_AUDIO = saved
+
+
+async def test_the_audio_knob_names_the_cameras_it_applies_to():
+    """The knob is PER-CAMERA, and one setting must produce different wire
+    behaviour for different cameras in the same process.
+
+    This exists because a single global flag has no safe setting here. Asked for
+    audio, the gateway offers an audio m-line FIRST to both cameras on this
+    account; the doorbell keeps streaming through it and the slower indoor camera
+    stops producing a first frame and reconnects in a loop. A global on/off means
+    choosing between abandoning the experiment and breaking a working camera, so
+    the knob names ids and everything not named behaves exactly as if the knob
+    were off -- byte-identical body included.
+    """
+    with audio_knob(" doorbell-2048 , indoor-2049x "):
+        named_gateway = ScriptedGateway()
+        session = await _watch_once(named_gateway, camera_id="doorbell-2048")
+        await session.close()
+
+        # The SAME setting, in the same run, for a camera it does not name.
+        other_gateway = ScriptedGateway()
+        session = await _watch_once(other_gateway, camera_id="indoor-2049")
+        await session.close()
+
+        # Read while the setting is in force -- the helper reads the live config
+        # attribute, exactly as janus_client does.
+        # Whitespace around ids is tolerated; matching is exact, so an id that
+        # merely PREFIXES a listed one is not a match ("indoor-2049" vs
+        # "indoor-2049x").
+        modes = (c.janus_request_audio_mode("doorbell-2048"),
+                 c.janus_request_audio_mode("indoor-2049"))
+        decisions = (c.janus_request_audio_for("doorbell-2048"),
+                     c.janus_request_audio_for("indoor-2049"))
+
+    assert modes == ("listed", "unlisted"), modes
+    assert decisions == (True, False), decisions
+
+    named_body = named_gateway.creates[0]
+    assert named_body.get("audio") is True, (
+        f"a camera the knob names did not get audio: {named_body}")
+    assert named_body["audiortpmap"] == "opus/48000/2", named_body
+
+    assert len(other_gateway.creates) == 1, (
+        "a camera the knob does not name took the audio fallback path -- an extra "
+        f"create round trip per session for an experiment it is not running: "
+        f"{other_gateway.creates}")
+    other_body = other_gateway.creates[0]
+    assert not any(k.startswith("audio") for k in other_body), (
+        f"a camera the knob does not name was sent audio keys: {other_body}")
+    # Not merely audio-free: byte-identical to the always-shipped body, so an
+    # unnamed camera is bit-for-bit unaffected by another camera's experiment.
+    assert json.dumps(other_body) == json.dumps(VIDEO_ONLY_BODY), (
+        f"an unnamed camera's create body changed on the wire: {json.dumps(other_body)}")
+    # "all" may only ever be the whole value -- never one entry of a list, or a
+    # camera literally called "all" would silently turn the knob on globally.
+    with audio_knob("all,doorbell-2048"):
+        assert c.janus_request_audio_for("some-other-camera") is False
 
 
 async def test_an_offered_track_we_do_not_consume_is_drained_not_ignored():
@@ -1498,6 +1734,8 @@ TESTS = [
     test_rotation_deadline_survives_total_frame_silence,
     test_silence_before_the_deadline_is_a_failure,
     test_dropped_frames_accumulate_across_sessions_into_the_status,
+    test_a_first_frame_timeout_reports_how_long_it_actually_waited,
+    test_the_streaming_line_reports_how_long_the_first_frame_took,
     test_frame_hold_bridges_the_reconnect_gap,
     test_frame_hold_is_bounded_by_time_since_a_real_frame,
     test_a_failed_hold_task_does_not_fail_the_next_session,
@@ -1519,6 +1757,7 @@ TESTS = [
     test_the_audio_experiment_is_off_by_default_and_changes_nothing,
     test_the_audio_experiment_asks_for_opus_alongside_the_video,
     test_a_rejected_audio_create_falls_back_instead_of_failing_the_session,
+    test_the_audio_knob_names_the_cameras_it_applies_to,
     test_an_offered_track_we_do_not_consume_is_drained_not_ignored,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,

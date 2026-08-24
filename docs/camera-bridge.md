@@ -491,9 +491,20 @@ secrets: signed snapshot URLs, media-URL query strings (which can hold signed
 tokens), RTSP/PUT credentials and session tokens are all redacted before
 logging.
 
-Two INFO diagnostics ride along, one line each per session start (so about one
+A few INFO diagnostics ride along, one line each per session start (so about one
 per rotation, per camera):
 
+- **The first-frame latency**, carried on the existing streaming line —
+  `streaming 1440x1440@15fps (first frame after 1.6s)`, measured from the moment
+  the loop starts waiting for a first frame. It shares a line with the size/fps
+  it belongs to rather than taking one of its own. This is the margin against
+  `FIRST_FRAME_TIMEOUT_S` (20s): a camera whose first frame lands at 1.6s and one
+  whose first frame lands at 15s look identical in every other line, but only the
+  second is one blip from the reconnect loop below.
+- **Which `JANUS_REQUEST_AUDIO` mode applied to this camera** —
+  `JANUS_REQUEST_AUDIO mode 'listed' -> mountpoint create WITH audio`, with the
+  mode being `off`, `all`, `listed` or `unlisted`. The knob is per-camera, so the
+  env var alone no longer says which cameras it reached.
 - **The Janus offer's media summary** — the media kinds, ports and codec names
   the gateway offered, e.g. `janus offer media: video(port=9,H264)`. It is a
   *derived summary by construction, and must stay one*: a raw SDP carries
@@ -510,8 +521,8 @@ per rotation, per camera):
 
 ### Downstream (listen) audio
 
-The bridge publishes **video only**, and the Janus mountpoint it creates asks
-for video only. A camera that offers an audio track anyway has that track
+The bridge publishes **video only**, and by default the Janus mountpoint it
+creates asks for video only. A camera that offers an audio track anyway has that track
 **drained and discarded** rather than merely ignored: aiortc auto-accepts every
 media section the remote offers and decodes it on its own thread into an
 unbounded queue, so a track nobody reads would grow for the whole life of each
@@ -520,10 +531,33 @@ decoder thread itself is released when the session closes. (Stopping the track
 instead would be worse than doing nothing: it stops the queue being readable
 without stopping it being filled.)
 
-Whether the upstream *would* serve downstream audio is an open question, and
 `JANUS_REQUEST_AUDIO` (see [configuration.md](configuration.md)) is the
-experiment that answers it from the offer summary above. This is separate from
-talkdown, which plays audio *out* of a doorbell and works today.
+experiment that asks for a downstream audio track anyway, and reads the answer
+off the offer summary above. It is a **per-camera** knob, and that is the part
+worth knowing before turning it on: asking is not free for every camera.
+
+What is established: asked for audio, this gateway *does* offer one — the offer
+comes back as `audio(port=9,opus) video(port=9,H264,rtx)`, with the audio
+m-line **first**, for both cameras on this account. What happened next differed
+per camera: the doorbell went on delivering video at its usual rate, while the
+slower of the two (6 fps natively, and slow on unrelated paths — its
+diagnostics-signal read takes ~25 s against the doorbell's ~1.6 s) stopped
+producing a first frame at all and cycled through
+`no frames received before timeout` roughly every 23 s until the request was
+turned off again.
+
+What is **not** established is that the audio m-line *caused* that. The same
+camera is slow everywhere, the failure is a timeout rather than a rejection, and
+the session teardown line that accompanies it (`ice connection state: closed`)
+is logged at the same instant as the failure — it is the consequence, not the
+cause. That ambiguity is why the knob names cameras instead of being global: the
+experiment can run on the camera that tolerates it without putting the other
+one's video at risk, and the first-frame timing on both the success and failure
+lines (above) is what would separate "slower than the timeout" from "not
+streaming at all" the next time it is tried.
+
+This is all separate from talkdown, which plays audio *out* of a doorbell and
+works today.
 
 ### Recreating the container
 

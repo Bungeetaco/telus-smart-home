@@ -154,7 +154,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # here; that's exactly the "camera registered but not streaming" case.
                 first_frames = []
                 frame_iter = session.frames()
-                deadline = time.monotonic() + c.FIRST_FRAME_TIMEOUT_S
+                first_frame_wait_began = time.monotonic()
+                deadline = first_frame_wait_began + c.FIRST_FRAME_TIMEOUT_S
+                # Sampled BEFORE the wait, not after: this is the state the wait
+                # started from. See the failure message below for why it matters.
+                webrtcup_before_wait = getattr(session, "webrtcup_seen", None)
                 while len(first_frames) < 10 and time.monotonic() < deadline:
                     remaining = max(0.1, deadline - time.monotonic())
                     try:
@@ -163,7 +167,26 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         break
                     first_frames.append((time.monotonic(), frame))
                 if not first_frames:
-                    raise RuntimeError("no frames received before timeout")
+                    # Purely descriptive -- the control flow, the timeout and the
+                    # raise are unchanged. The bare "no frames received before
+                    # timeout" this replaced could not distinguish the two
+                    # failures that actually look like this in the log:
+                    #   * the full FIRST_FRAME_TIMEOUT_S elapsed with nothing
+                    #     arriving (a camera that negotiated and then sent no
+                    #     RTP -- what a genuinely slow camera looks like), versus
+                    #     a much shorter abort (the frame iterator raising
+                    #     StopAsyncIteration because the session was already
+                    #     dead, which exits this loop immediately);
+                    #   * ICE never coming up at all versus ICE coming up and no
+                    #     media flowing -- opposite diagnoses that shared one
+                    #     message. webrtcup_seen answers that directly.
+                    waited = time.monotonic() - first_frame_wait_began
+                    webrtcup = ("unknown" if webrtcup_before_wait is None
+                                else "seen" if webrtcup_before_wait else "NOT seen")
+                    raise RuntimeError(
+                        f"no frames received before timeout "
+                        f"(waited {waited:.1f}s of {float(c.FIRST_FRAME_TIMEOUT_S):.1f}s; "
+                        f"webrtcup {webrtcup} before the wait)")
 
                 w, h = first_frames[0][1].width, first_frames[0][1].height
                 # On a rotation, buffered frames can arrive in a near-instant burst,
@@ -261,7 +284,17 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # sink.fps (not the local fps var) so this always reflects what's
                 # actually driving the encoder's -r/-g, not a pre-clamp/burst-noisy
                 # measurement -- see FfmpegSink.start()'s own comment.
-                log.info("%s: streaming %dx%d@%dfps", camera["id"], w, h, sink.fps)
+                #
+                # The first-frame latency rides on THIS line rather than a line of
+                # its own: it is measured on every session start, and a second
+                # per-rotation INFO line saying half of what this one says is log
+                # volume for nothing. It is the healthy-side counterpart of the
+                # failure message above -- a camera that takes 12s to produce a
+                # first frame against a 20s FIRST_FRAME_TIMEOUT_S is one blip away
+                # from the failure loop, and nothing said so before.
+                log.info("%s: streaming %dx%d@%dfps (first frame after %.1fs)",
+                         camera["id"], w, h, sink.fps,
+                         first_frames[0][0] - first_frame_wait_began)
                 _update_status(state="streaming", consecutive_failures=0, fps=sink.fps,
                                hardware_encode=sink.hardware_encode, last_error=None,
                                last_frame_at=time.time())
