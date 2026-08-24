@@ -33,6 +33,16 @@ and evidence.
   actual battery camera.
 - **E41** (two questions) — whether panel-wide pairing off makes the per-device
   toggle inert, and the uncaptured `bluetoothDisarmingSettings` write shape.
+- **E53** (follow-up) — downstream audio is offered, but negotiating it broke
+  one camera; the knob is global and would need to be per-camera before any
+  supervised retry.
+- **E54** — consuming downstream audio (the publish path is video-only by
+  construction, and rotation gaps have no audio analogue).
+- **E55** — the device-direct listen path's format is unrecorded; one
+  read-only capture would settle whether it is viable at all.
+- **E56** — the doorbell button press is not a first-class event, which blocks
+  every ring-triggered automation.
+- **E57** (watch-only) — `pyalarmdotcomajax` maintenance is paused upstream.
 
 ## High value
 _Implemented since live testing:_ **E-COND audio conditioning (with per-request
@@ -1176,14 +1186,26 @@ when it ships.
   the same session. An on-demand listen session, built as talkdown's sibling,
   is the shape that avoids both.
 
-- **E56 (open) The doorbell button press is not a first-class event.** A press
-  lands in the generic activity feed and is classified `other`; there is no
-  `doorbell`-device-class event entity. Every ring-triggered automation — an
-  intercom notification, a quick reply, an away-mode greeting — has to pattern
-  match the feed instead of triggering on a press. Closing this is small and
-  unblocks all of them.
+- **E56 (open, blocked on a capture) The doorbell button press is not a
+  first-class event.** A press lands in the generic activity feed and there is
+  no `doorbell`-device-class event entity, so every ring-triggered automation
+  has to pattern-match free text instead of triggering on a press.
 
-## Upstream library
+  **What blocks it is evidence, not effort.** The press's own wire shape is
+  unrecorded: no press appears anywhere in Home Assistant's retained recorder
+  history, none in the last 100 entries of either the history or video-event
+  feed, and the upstream library has no doorbell event vocabulary at all. The
+  reference documentation asserts the history feed carries doorbell presses,
+  but that claim is not backed by a captured example here.
+
+  Two facts shape the fix once a press IS captured. This account's event
+  descriptions arrive in **French** ("Déclenché par caméra (Une personne)",
+  "Mouvement détecté"), so a press will be French too and the classifier —
+  which already matches both languages for person/vehicle/animal — needs the
+  French press wording, not just an English guess. And each event carries a
+  `device_description` field (e.g. `Doorbell`), which is how a press can be
+  attributed to the right camera. Capture one real press, pin its
+  `event_type_name` and description, then the entity itself is small.
 
 - **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
   library the integration is built on carries a notice that its maintainer has
