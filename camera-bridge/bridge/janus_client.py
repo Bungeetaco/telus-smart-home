@@ -258,7 +258,18 @@ class JanusCameraSession:
             "model": self.camera["model"],
             "firmware": self.camera["firmware"],
         }
-        if c.JANUS_REQUEST_AUDIO:
+        # ONE per-camera decision, consulted by both the body below and the
+        # fallback check after the create. Reading the knob twice would let the
+        # two disagree for a camera the knob does not name -- a video-only
+        # create followed by the audio fallback's extra round trip.
+        audio_mode = c.janus_request_audio_mode(self.camera["id"])
+        want_audio = c.janus_request_audio_for(self.camera["id"])
+        # One line per session start (same cadence as the offer summary below),
+        # because the knob is now per-camera: which cameras it actually applied
+        # to is no longer readable off the env var alone.
+        log.info("%s: JANUS_REQUEST_AUDIO mode %r -> mountpoint create %s audio",
+                 self.camera["id"], audio_mode, "WITH" if want_audio else "without")
+        if want_audio:
             # EXPERIMENT (off by default -- see config.JANUS_REQUEST_AUDIO). The
             # audio keys mirror the video ones exactly in shape: an enable flag, a
             # port of 0 (let Janus pick), a dynamic payload type and an rtpmap.
@@ -280,7 +291,7 @@ class JanusCameraSession:
             audio_body = video_only_body
 
         created = await self._create_mountpoint(audio_body)
-        if c.JANUS_REQUEST_AUDIO:
+        if want_audio:
             # FAIL-SAFE. A rejected experiment must cost nothing: it may not raise,
             # so it never counts a consecutive failure, never reaches
             # camera_session.py's MAX_CONSECUTIVE_SESSION_FAILURES escape hatch and
@@ -495,6 +506,19 @@ class JanusCameraSession:
         except Exception as e:
             log.debug("%s: %s track drain ended after %d frame(s): %r",
                       self.camera["id"], kind, drained, e)
+
+    @property
+    def webrtcup_seen(self) -> bool:
+        """Whether the gateway's `webrtcup` event arrived for this session.
+
+        Read-only view of the same event connect_and_watch already waits on, so
+        camera_session.py can say WHICH failure a first-frame timeout was:
+        "ICE never came up" and "ICE came up but no media ever flowed" are
+        completely different diagnoses (a signalling/candidate problem versus a
+        camera that negotiated and then sent no RTP), and a bare "no frames
+        received before timeout" cannot tell them apart.
+        """
+        return self._webrtcup.is_set()
 
     @property
     def dropped_frames(self) -> int:

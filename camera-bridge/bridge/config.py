@@ -234,13 +234,17 @@ FIRST_FRAME_TIMEOUT_S = 20
 JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side; keep well under that
 
 # --- EXPERIMENT: ask the Janus mountpoint for a downstream AUDIO track ------
-# OFF BY DEFAULT. This answers exactly one open question and nothing else: will
-# alarm.com's Janus gateway serve a downstream audio track if the bridge asks
-# for one? With this true, janus_client.py adds the audio counterparts of the
-# video keys ("audio"/"audioport"/"audiopt"/"audiortpmap") to the streaming
-# plugin's mountpoint-create body. The answer then shows up in the offer the
-# gateway sends back, logged per session as "janus offer media: ..." -- an
-# `audio(...)` entry means yes, video only means no.
+# OFF BY DEFAULT. For a camera it applies to, janus_client.py adds the audio
+# counterparts of the video keys ("audio"/"audioport"/"audiopt"/"audiortpmap")
+# to the streaming plugin's mountpoint-create body, and what comes back shows up
+# in the offer the gateway sends, logged per session as "janus offer media: ...".
+#
+# The first question this asked -- will alarm.com's Janus gateway serve a
+# downstream audio track at all -- is ANSWERED: it will, offering
+# `audio(port=9,opus) video(port=9,H264,rtx)` with the audio m-line FIRST. The
+# question that is still open is per-camera and is about the VIDEO: whether a
+# given camera keeps delivering frames while an audio m-line is in the offer
+# (see the per-camera note below).
 #
 # CONSUMING audio is NOT implemented. Nothing decodes, publishes or plays a
 # downstream audio track: ffmpeg_sink.py publishes video only, and an offered
@@ -255,8 +259,69 @@ JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side;
 # rejected experiment therefore never raises, never counts a consecutive
 # session failure, and never reaches camera_session.py's
 # MAX_CONSECUTIVE_SESSION_FAILURES container-restart escape hatch.
-JANUS_REQUEST_AUDIO = os.environ.get("JANUS_REQUEST_AUDIO", "false").strip().lower() in (
-    "1", "true", "yes", "on")
+#
+# PER-CAMERA, not a plain on/off, because the blast radius has to be
+# selectable. Run live against both cameras on this account, the gateway offered
+# audio to each of them; the doorbell went on streaming at its usual rate, while
+# the slower camera (6fps natively, and slow on unrelated paths) stopped
+# producing a first frame at all and reconnected in a loop until the request was
+# turned off. That the audio m-line CAUSED the second one is unproven -- it is a
+# timeout, not a rejection, on a camera that is slow everywhere -- which is
+# exactly why the choice must not be all-or-nothing: a global flag forces
+# abandoning the experiment or breaking a working camera to keep it, so the knob
+# names the cameras it applies to instead. camera_session.py's first-frame
+# timing (both the streaming line and the timeout message) is what separates
+# "slower than FIRST_FRAME_TIMEOUT_S" from "not streaming at all" next time.
+#
+# Accepted forms (see janus_request_audio_for below):
+#   unset / "false" / "0" / "no" / "off"   -- off for every camera (the DEFAULT;
+#                                             the create body stays byte-identical
+#                                             to what this bridge has always sent)
+#   "true" / "1" / "yes" / "on" / "all"    -- on for every camera
+#   "<id>[,<id>...]"                       -- on for exactly those camera ids,
+#                                             matched exactly, whitespace tolerated
+JANUS_REQUEST_AUDIO = os.environ.get("JANUS_REQUEST_AUDIO", "false").strip()
+
+# Whole-value keywords. Deliberately matched against the WHOLE setting, never
+# against one entry of a comma-separated list, so "all" can only ever mean
+# "every camera" and never a camera literally called "all".
+_JANUS_AUDIO_OFF_WORDS = ("", "false", "0", "no", "off")
+_JANUS_AUDIO_ALL_WORDS = ("true", "1", "yes", "on", "all")
+
+
+def janus_request_audio_mode(camera_id) -> str:
+    """Which JANUS_REQUEST_AUDIO mode applies to one camera.
+
+    One of:
+      "off"      -- the knob is off everywhere
+      "all"      -- the knob names every camera
+      "listed"   -- the knob names camera ids and this is one of them
+      "unlisted" -- the knob names camera ids and this is NOT one of them
+
+    Read live off the module attribute (not captured at import) for the same
+    reason TELUS_EMAIL/TELUS_PASSWORD are: config values here are reassignable
+    at runtime, and the tests drive this by reassignment. `str()` also means a
+    plain bool assigned here still resolves correctly.
+    """
+    raw = str(JANUS_REQUEST_AUDIO).strip()
+    if raw.lower() in _JANUS_AUDIO_OFF_WORDS:
+        return "off"
+    if raw.lower() in _JANUS_AUDIO_ALL_WORDS:
+        return "all"
+    named = [token.strip() for token in raw.split(",")]
+    return "listed" if str(camera_id) in named else "unlisted"
+
+
+def janus_request_audio_for(camera_id) -> bool:
+    """Should the mountpoint-create body for this camera ask for audio?
+
+    Single source of truth for BOTH places janus_client.py consults the knob --
+    building the create body, and gating the video-only fallback check. They
+    must not be able to disagree: a camera with audio off that still took the
+    fallback path would spend a second create request per session for an
+    experiment it is not running.
+    """
+    return janus_request_audio_mode(camera_id) in ("all", "listed")
 
 # How often to re-poll TELUS for the camera list after startup, so a camera
 # added to the account later gets picked up (and streaming started
