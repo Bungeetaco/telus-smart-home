@@ -725,15 +725,29 @@ The patch mirrors h264.py exactly: catch `av.FFmpegError`, log, return no frames
 The decoder object survives a rejected `avcodec_send_packet()` and decodes the
 next packet normally.
 
-**What the bad packet is, is not yet known.** libopus does not reject ordinary
-Opus: every TOC code-0 packet — the shape of every normal 20 ms WebRTC Opus
-packet — decodes (0 of 500 rejected in a calibration sweep). The byte sequences
-that *do* reproduce the exact error are Ogg identification headers
-(`OpusHead` / `OpusTags`, whose TOC byte 0x4f is frame-count code 3) and H.264
-NAL bytes, i.e. something that is not an Opus payload arriving on the Opus
-payload type. A stream-start identification header is the leading hypothesis and
-it is **unverified**, which is why the patch logs `len` and the first 16 bytes of
-the offending packet — once per session, since the stream runs at ~50 packets/s.
+**The bad packet is G.711 µ-law audio arriving on the Opus payload type.**
+Captured by the patch's own log line, once per session, consistently:
+
+```
+len=512 head=7efe7ffeff7fffff7eff7effff7ffeff
+len=512 head=7dfefe7e7ffefeff7c7dfefeff7efcfc
+```
+
+512 bytes of values clustered on `0x7c`–`0x7f` and `0xfc`–`0xff` is µ-law near
+silence — in G.711 µ-law, silence encodes to `0x7F`/`0xFF` and small excursions
+sit either side. It is not Opus, and it is not either of the shapes originally
+suspected (`OpusHead`/`OpusTags` identification headers, or H.264 NAL bytes);
+those merely reproduce the same error class. libopus does not reject ordinary
+Opus — every TOC code-0 packet, the shape of every normal 20 ms WebRTC Opus
+packet, decodes (0 of 500 rejected in a calibration sweep) — so only a non-Opus
+payload can produce this.
+
+Why the gateway emits it is **unverified**: the doorbell's own upstream audio is
+µ-law (that is the codec its talkdown PUT path takes), so the most plausible
+reading is that the relay forwards a device-native µ-law frame or two before its
+Opus transcode is running. What is certain is that the packets are rejected
+once per session, at stream start, and that dropping them costs a few
+milliseconds of audio rather than the whole session.
 
 The patch carries an import-time compatibility guard, on the same terms as the
 integration's three `telus_*_patch.py` modules: it refuses to apply if the class

@@ -42,9 +42,8 @@ and evidence.
 - **E60** (open) — `dropped ... consumer falling behind` runs at ~300 frames
   per session (~12%) on the doorbell. Whether the CFR-25 re-rate E58 fixed was
   the cause is unproven; re-measure now that it publishes at its real rate.
-- **E59** (follow-up) — the Opus-decoder patch ships, but that real sound now
-  reaches the stream is unconfirmed; the deploy's `head=` log line identifies
-  the malformed packet.
+- **E59** — DONE and confirmed live; the rejected packet turned out to be G.711
+  µ-law on the Opus payload type. Why the gateway emits it is unverified.
 - **E61** — silent audio is invisible from Home Assistant; the fields that
   expose it live only on `/control/status`.
 - **E55** — the device-direct listen path's format is unrecorded; one
@@ -1297,11 +1296,18 @@ when it ships.
   `dropped_audio_frames` could never have caught this: a stream that decodes
   nothing drops nothing.
 
-  **Still unconfirmed:** that real sound now reaches the stream. The identifying
-  log line carries `len=` and `head=` of the rejected bytes; the leading
-  hypothesis is an `OpusHead`/`OpusTags` identification header at stream start
-  (it reproduces the error exactly), but H.264 NAL bytes reproduce it too and
-  would be a much worse diagnosis. One deploy settles it.
+  **Confirmed live, and the bad packet is identified.** After the fix: zero dead
+  decoder threads, `decoded_audio_frames` climbing (730 within three minutes),
+  and the published track measures `mean_volume -20.1 dB` / `max_volume 0.0 dB`
+  against the -91.0 dB noise floor it sat at before — real sound, not silence.
+
+  The rejected packet is **G.711 µ-law audio on the Opus payload type**:
+  `len=512`, bytes clustered on `0x7c`–`0x7f` and `0xfc`–`0xff`, which is µ-law
+  near-silence. Neither of the suspected shapes (Ogg `OpusHead`/`OpusTags`, H.264
+  NAL bytes) — those merely reproduce the same error class. The doorbell's own
+  upstream audio is µ-law, so the likeliest reading is that the relay forwards a
+  device-native frame before its Opus transcode is running; that remains
+  **unverified**. It costs a few milliseconds of audio per session.
 
 - **E61 (open) Silent audio is invisible from Home Assistant.** The integration
   surfaces only `state` and `dropped_frames` from `/control/status`, so the two
