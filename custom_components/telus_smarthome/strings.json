@@ -232,6 +232,16 @@
             }
           }
         }
+      },
+      "doorbell_press": {
+        "name": "Button Press",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "press": "Pressed"
+            }
+          }
+        }
       }
     }
   },

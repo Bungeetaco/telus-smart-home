@@ -60,12 +60,13 @@ config.JANUS_CONSUME_AUDIO):
   anonymous pipe has neither end of that problem, leaves nothing on disk, and is
   reclaimed by the OS when either side goes away.
 
-  The video input keeps `-use_wallclock_as_timestamps 1`; the AUDIO input must
-  not have it (see the comment at the flag). The audio stream's timeline is
-  therefore its own sample count, which is exactly why the silence fill sizes
-  itself from elapsed real time -- that count is what keeps the audio aligned
-  with the wallclock-stamped video. `-af aresample=async=1` (fill-and-trim only,
-  no stretching) absorbs what is left.
+  With a second input the two streams must share ONE clock, and only the
+  wallclock can be it: the audio stream's timeline is its own sample count (see
+  write_silence_to, which sizes the fill from elapsed real time), so the video
+  timeline has to advance at real time too or the muxer's interleaver holds one
+  of them back forever. That is what `-r` on the video input silently prevented
+  -- see the comment where it is now omitted. `-af aresample=async=1`
+  (fill-and-trim only, no stretching) absorbs what is left.
 
   The encoder is AAC, and that is not a free choice: Home Assistant's HLS stream
   worker accepts only aac/mp3 for audio, and Frigate's `-c copy` recording preset
@@ -265,20 +266,23 @@ class FfmpegSink:
                 # waits for up to 5s of stream time on input 1 before it will
                 # start the output, which is 5s of dark video.
                 "-analyzeduration", "0", "-probesize", "32",
-                # NO -use_wallclock_as_timestamps here, unlike the video input.
-                # Measured against ffmpeg n9: with it set on BOTH inputs, ffmpeg
-                # stops reading input 1 within a couple of seconds and never
-                # resumes -- the audio pipe then backs up at real-time rate
-                # forever (1.4 MB in 8s), which this sink can only read as a
-                # dead publisher. Audio-only, the same input keeps up perfectly;
-                # it is specifically the two-input combination that breaks. With
-                # the flag off, the audio stream's PTS come from the sample count
-                # and the pipe stays drained (backlog 0 over the same run).
+                # NO -use_wallclock_as_timestamps here, unlike the video input,
+                # and this is a design choice rather than a workaround. With it
+                # on, every read off this pipe is stamped with the moment it
+                # happened to be flushed, so the audio timeline would follow
+                # writer jitter -- a burst of frames after a stall would compress
+                # into no time at all, and the samples in it would have nowhere
+                # to go. Off, the PTS come from the sample count, which is what a
+                # sample stream's duration actually is, and write_silence_to's
+                # wallclock-derived fill is then the single thing tying that
+                # count to real time and therefore to the video beside it.
                 #
-                # That makes write_silence_to's wallclock-derived sample count
-                # MORE load-bearing, not less: the sample count is now the only
-                # thing tying this stream to real time, and therefore to the
-                # wallclock-stamped video beside it.
+                # This flag is NOT what makes the two-input pipeline stall; that
+                # was `-r` on the video input (see the long comment there).
+                # Measured on the deployed 7.1.5 with `-r` removed, the pipeline
+                # stays drained with the flag on BOTH inputs as well -- so the
+                # asymmetry is deliberate, not load-bearing. It has not been run
+                # live in the both-on form and there is no reason to.
                 "-i", f"pipe:{audio_read_fd}",
             ]
             audio_out = [
@@ -297,9 +301,55 @@ class FfmpegSink:
                 "-af", "aresample=async=1",
             ]
 
+        # `-r <fps>` before `-i` sets the RAWVIDEO DEMUXER's frame rate, and doing
+        # so silently overrides -use_wallclock_as_timestamps: the video timeline
+        # then advances by exactly 1/fps per frame WRITTEN, not by elapsed real
+        # time. Video-only that is invisible (nothing else shares the timeline),
+        # which is why it shipped for so long -- but with a second input it is
+        # fatal, because the audio timeline IS real time (write_silence_to sizes
+        # the fill from the wallclock). Any shortfall between the fps ffmpeg was
+        # declared and the rate frames actually arrive at then makes audio outrun
+        # video permanently, the muxer's interleaver stops accepting audio, and
+        # the pipe backs up until _write_audio_bytes calls the sink dead --
+        # "ffmpeg has stopped reading the audio pipe", restarting the encoder
+        # (and kicking every RTSP reader) every few seconds.
+        #
+        # Measured INSIDE the deployed container (ffmpeg 7.1.5-0+deb13u1, Debian
+        # 13, h264_vaapi), feeding both pipes at real-time pacing with the input
+        # declared -r 25 while frames were written at 15fps -- i.e. exactly the
+        # fps-misdetection this file's own fps clamp and camera_session.py's
+        # plausibility check already guard against:
+        #   * as shipped:      audio backlog crossed 512 kB in ~10s, every run,
+        #                      to -f null, to an mpegts file and to a live RTSP
+        #                      publish. 11s of wallclock produced 6.2s of video
+        #                      (ratio 15/25), proving the timeline, not the
+        #                      encoder or the muxer, was the problem.
+        #   * without `-r`:    backlog stayed at 0 for a 100s RTSP publish;
+        #                      22s of wallclock produced 21.96s of video.
+        # Bisected against the alternatives on that same build, ALL of which
+        # still stalled at ~10s: -thread_queue_size (4096, either or both
+        # inputs), dropping -analyzeduration/-probesize, -use_wallclock_as_
+        # timestamps on both inputs or neither, -fps_mode passthrough/vfr,
+        # -max_interleave_delta 0, dropping -af aresample, and swapping the input
+        # ORDER. None of them is the fix; removing `-r` is, and it is the only
+        # one that is.
+        #
+        # NOT a 7.x quirk: the same reproduction and the same fix were confirmed
+        # on ffmpeg n9.0.1 (libx264). The earlier "works offline, fails live"
+        # split was the test feed happening to run at exactly the declared rate.
+        #
+        # Frame COUNT is unchanged -- ffmpeg still encodes one output frame per
+        # frame written (211 output frames for 210 written, measured), so -g's
+        # keyframe-every-fps-frames behaviour and the encode load are the same as
+        # before; only the timestamps on them changed.
+        #
+        # Kept for the video-only argv, which must stay byte-identical to the
+        # long-proven one (see test_audio_consumption_is_off_by_default...), and
+        # where the flag is harmless because nothing shares its timeline.
+        video_rate = [] if audio_format is not None else ["-r", str(fps)]
         common_in = [
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}",
-            "-r", str(fps), "-use_wallclock_as_timestamps", "1",
+            *video_rate, "-use_wallclock_as_timestamps", "1",
             "-i", "pipe:0",
             *audio_in,
         ]

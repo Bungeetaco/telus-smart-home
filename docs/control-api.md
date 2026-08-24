@@ -1914,6 +1914,27 @@ none). Because the embedded `download_url` expires within minutes, pass
 `video_event_id` to `/control/clip` to re-mint a fresh URL at the moment the
 user clicks (e.g. from a phone notification).
 
+`event_type_name` is the upstream server-side enum naming what the entry *is*,
+and is **the field to classify an entry on**. Values captured live include
+`DoorbellButtonPress` (a doorbell button press), `VideoCameraTriggered`,
+`AccessControlLocked` and `AccessControlUnlocked`; the full set is not published
+by the upstream API, so treat an unrecognised value as "some other activity"
+rather than assuming the list above is exhaustive.
+
+`description` is **not** a substitute for it. That field is free text rendered in
+the account's own language, and this project's reference account has produced
+both French (`Déclenché par caméra (Une personne)`, `Mouvement détecté`) and
+English (`Button Push`, `Locked (Manually locked)`) descriptions — the language
+is a server-side account property, not a request parameter. A consumer that
+matches description text therefore breaks silently the day the account's locale
+changes: the route keeps answering 200 with well-formed activity, and the only
+symptom is a match that stops matching. `event_type_name` does not translate.
+
+`device_id` is the alarm.com device id (`<unit>-<did>`) — the same id
+`/control/cameras` reports for a camera, so a camera-related entry can be
+attributed by comparing the two directly. `device_description` is a
+user-editable label and is for display only.
+
 **Errors:** `401 bad_secret`, `502 telus_error`.
 
 **Example**

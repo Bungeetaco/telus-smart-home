@@ -81,6 +81,7 @@ Conventions every suite follows:
 | `test_partitions.py` | Selective sensor bypass — above all the refusals, each of which is a case where writing anyway would leave a zone silently unprotected. |
 | `test_mws_json_actions.py` | The JSON-envelope MWS actions (camera siren, privacy mode) and the dual XML/JSON ack dispatcher. |
 | `test_parsers.py` | The pure parsers that turn Alarm.com's XML into the values the bridge acts on. |
+| `test_history_events.py` | The Activity-feed parse: that `eventTypeName`/`globalDeviceId` survive the rename into `event_type_name`/`device_id`, which is the entire basis on which Home Assistant turns a feed entry into a doorbell-press event; that the same press parses identically whether its description arrives in French or English (so matching the enum is locale-proof and matching the text would not be); and that clip enrichment fills a correlated entry, leaves an uncorrelated one explicitly null, and costs one batched call per page. |
 | `test_talkdown_streaming.py` | Talkdown's streaming encode, schedule-based pacing, in-place recovery, certificate pinning and endpoint selection. |
 | `test_talkdown_renegotiation.py` | Talkdown session renegotiation, against a fake doorbell that really checks Digest auth. |
 | `test_metrics.py` | The talkdown metrics counters. |

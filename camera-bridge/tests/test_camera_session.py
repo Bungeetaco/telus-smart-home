@@ -1894,6 +1894,15 @@ async def test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour
             for token in ("-map", "-c:a", "-af", "-b:a", "-analyzeduration"):
                 assert token not in args, (backend, token, args)
             assert [a for a in args if a.startswith("pipe:")] == ["pipe:0"], args
+            # The other half of the asymmetry pinned in
+            # test_every_encoder_variant_gets_the_audio_input_and_encoder: `-r`
+            # stays on the video-only input. It makes the video timeline advance
+            # per frame written rather than per second elapsed, which is fatal
+            # once a second input shares that timeline and unobservable when
+            # nothing does -- so removing it here would be an untested change to
+            # the pipeline both cameras have always published with.
+            video_in = args[:args.index("-i")]
+            assert _subsequence_at(video_in, ["-r", "15"]) > 0, (backend, args)
     # ...and the software variant in full, byte for byte, because "no audio
     # tokens" would also be true of an argv that had quietly changed some other way.
     (software_args, _), = await _captured_ffmpeg_args("software", None)
@@ -2115,7 +2124,9 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
     It also pins ffmpeg's positional option grammar: the audio input options must
     sit contiguously in front of their own `-i`, and the maps/encoder after the
     last input. An option that drifts past its `-i` silently belongs to something
-    else.
+    else -- and the absence of `-r` from the video input, which is the one thing
+    that makes a two-input publish survive at all (see the assertion for the
+    measurements).
     """
     audio_format = ("s16", 48000, 2)
     seen = {}
@@ -2127,17 +2138,32 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
                 f"{backend}: the audio pipe's read end was not handed to ffmpeg: "
                 f"{pass_fds}")
             fd = pass_fds[0]
-            # No -use_wallclock_as_timestamps on this input, deliberately: with
-            # it on both inputs, ffmpeg stops reading input 1 entirely a couple
-            # of seconds in and the audio pipe backs up at real-time rate
-            # forever. Pinned here because the flag reads like an obvious
-            # symmetry with the video input above it.
+            # No -use_wallclock_as_timestamps on this input: the audio timeline
+            # is its sample count, not the moment a write happened to be
+            # flushed. Pinned because the flag reads like an obvious symmetry
+            # with the video input above it.
             audio_in = ["-f", "s16le", "-ar", "48000", "-ac", "2",
                         "-analyzeduration", "0", "-probesize", "32",
                         "-i", f"pipe:{fd}"]
             assert args.count("-use_wallclock_as_timestamps") == 1, (
                 f"{backend}: the audio input was given -use_wallclock_as_timestamps "
-                f"as well as the video input -- ffmpeg then stops draining it: {args}")
+                f"as well as the video input: {args}")
+            # THE invariant this whole feature stands on: with a second input,
+            # `-r` must NOT be on the video input. It sets the rawvideo demuxer's
+            # frame rate, which overrides -use_wallclock_as_timestamps and makes
+            # the video timeline advance per frame WRITTEN instead of per second
+            # elapsed. The audio timeline is real time (write_silence_to fills
+            # from the wallclock), so any shortfall against the declared fps --
+            # a dropped frame, a burst-contaminated fps measurement -- makes
+            # audio outrun video until ffmpeg stops draining the audio pipe
+            # altogether. Measured on the deployed ffmpeg 7.1.5 and on n9.0.1:
+            # declared 25fps + frames written at 15fps stalls in ~10s with `-r`
+            # and never stalls without it. It reads like a harmless declaration
+            # of the source rate, and the video-only argv still carries it.
+            assert "-r" not in args[:args.index("-i")], (
+                f"{backend}: `-r` is back on the video input of an audio-enabled "
+                f"argv -- the video timeline then ignores the wallclock and "
+                f"ffmpeg stops reading the audio pipe within seconds: {args}")
             audio_out = ["-map", "0:v:0", "-map", "1:a:0",
                          "-c:a", "aac", "-ac", "1", "-ar", "48000", "-b:a", "64k",
                          "-af", "aresample=async=1"]

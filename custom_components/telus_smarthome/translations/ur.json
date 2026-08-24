@@ -232,6 +232,16 @@
                         }
                     }
                 }
+            },
+            "doorbell_press": {
+                "name": "بٹن دبانا",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "press": "دبایا گیا"
+                        }
+                    }
+                }
             }
         }
     },

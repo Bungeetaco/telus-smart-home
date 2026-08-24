@@ -392,6 +392,21 @@ Two log lines worth grepping: `ffmpeg has stopped reading the audio pipe`
 encoder is relaunched with the real one — expected at most once, on the first
 session that ever carries audio).
 
+**If `ffmpeg has stopped reading the audio pipe` repeats every few seconds**, the
+two inputs' timelines have come apart: the audio timeline is real time, so if the
+video timeline advances more slowly than the wall clock, audio outruns video, the
+muxer's interleaver stops accepting audio packets, and the pipe backs up until
+the sink rebuilds the publisher — kicking every RTSP reader each time, while the
+video itself keeps flowing. The known cause is `-r <fps>` on ffmpeg's raw video
+input, which overrides `-use_wallclock_as_timestamps` and makes that timeline
+advance per frame *written* rather than per second *elapsed*; the audio-enabled
+command line omits it for exactly this reason (see
+[camera-bridge.md](camera-bridge.md)). Confirm with
+`docker exec telus-cam-bridge sh -c 'tr "\0" " " < /proc/<pid>/cmdline'` for the
+ffmpeg process: there must be **no `-r` before `-i pipe:0`** on a publisher that
+has a second `-i pipe:<n>`. Any *other* cause of a video timeline running behind
+real time would produce the same symptom.
+
 ---
 
 ## Hardware encode falls back to software (or fails to start)

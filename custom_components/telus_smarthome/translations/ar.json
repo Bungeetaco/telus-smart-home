@@ -232,6 +232,16 @@
                         }
                     }
                 }
+            },
+            "doorbell_press": {
+                "name": "ضغط الزر",
+                "state_attributes": {
+                    "event_type": {
+                        "state": {
+                            "press": "تم الضغط"
+                        }
+                    }
+                }
             }
         }
     },

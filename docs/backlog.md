@@ -36,9 +36,13 @@ and evidence.
 - **E53** (follow-up) — downstream audio is offered, but negotiating it broke
   one camera; the knob is global and would need to be per-camera before any
   supervised retry.
-- **E54** (follow-up) — audio consumption is built but has never met MediaMTX
-  or a real camera; the frame-silence watchdog is also video-only, so audio can
-  die while a camera still reports `streaming`.
+- **E54** (follow-up) — audio consumption works and MediaMTX accepts it, but no
+  real camera has been through it end to end, and the frame-silence watchdog is
+  video-only, so audio can die while a camera still reports `streaming`.
+- **E58** — the video-only argv still carries `-r`, with the same latent
+  slow-timeline defect E54 fixed on the audio path.
+- **E59** — aiortc's audio decoder dies once per session on the doorbell, so
+  decoded audio arrives in gaps.
 - **E55** — the device-direct listen path's format is unrecorded; one
   read-only capture would settle whether it is viable at all.
 - **E56** — the doorbell button press is not a first-class event, which blocks
@@ -1194,28 +1198,56 @@ when it ships.
   container ships a different build, so `ffmpeg has stopped reading the audio
   pipe` is the line to grep if audio ever backs up.
 
-  **It does not work in the container yet, and the reason is the ffmpeg
-  version.** Enabled on the doorbell against the live deployment, the encoder
-  entered a restart loop within seconds: `ffmpeg has stopped reading the audio
-  pipe (~550-680 kB queued); restarting the encoder`, repeating every few
-  seconds. Video kept flowing and no session failed, but each restart kicks
-  every reader, so it was rolled back immediately and both cameras recovered
-  with zero warnings.
+  **It works, and the cause of the first failed deploy was not what it looked
+  like.** Enabling it on the doorbell first produced an encoder restart loop
+  (`ffmpeg has stopped reading the audio pipe`, ~550-680 kB queued, every few
+  seconds), which was initially attributed to the container's ffmpeg 7.1.5
+  differing from the 9.0.1 used offline. That attribution was wrong. The stall
+  reproduces **identically on both builds**; the offline run had merely fed
+  frames at exactly the declared rate and so never triggered it.
 
-  The offline validation that cleared this change ran against **ffmpeg
-  n9.0.1**; the container ships **7.1.5**. The two-input raw-pipe behaviour
-  differs between them — the timestamp-flag fix that resolves it on 9.0.1 is
-  not sufficient on 7.1.5. Any further work must be validated **inside the
-  container** (`docker exec`), against the build that actually runs, rather
-  than against whatever ffmpeg the development host happens to have. That is
-  the real lesson here and it generalises beyond audio.
+  The real cause: **`-r <fps>` before `-i` sets the rawvideo demuxer's frame
+  rate and in doing so silently overrides `-use_wallclock_as_timestamps`.** The
+  video timeline then advances 1/fps per frame *written* rather than per second
+  *elapsed*. With video alone that is invisible. With a second input it is
+  fatal, because the audio timeline really is wallclock (the silence fill sizes
+  itself from it): any shortfall between the declared fps and the rate frames
+  actually arrive at makes audio outrun video, the muxer's interleaver stops
+  accepting audio packets, and ffmpeg stops draining the pipe. Proof is in the
+  durations — 11 s of wallclock produced 6.24 s of video, exactly the 15/25
+  ratio of written-to-declared fps.
 
-  Confirmed working on the live deployment even so: the decoded format is
-  exactly the assumed `48000Hz/2ch/s16`, the per-camera gating held (the indoor
-  camera stayed video-only throughout), and the new status fields reported
-  correctly. Still unverified: the RTSP ANNOUNCE carrying a second AAC m-line
-  against MediaMTX (it never got far enough to matter), and A/V skew on a live
-  camera.
+  The fix is one token: the video input drops `-r` when audio is enabled.
+  Everything else was ruled out by measurement inside the container —
+  `-fps_mode` (both settings), `-max_interleave_delta 0`, `-thread_queue_size`
+  up to 4096 on either or both inputs, dropping `-analyzeduration`/`-probesize`,
+  reversing input order, and dropping `aresample` all still stall; the output
+  muxer is irrelevant (null, mpegts and live RTSP behave the same). Frame
+  *count* is unchanged, so keyframe cadence and encode cost are untouched.
+
+  **MediaMTX accepts the second AAC m-line** — confirmed by publishing to a
+  throwaway path and reading it back: `h264 960x960` + `aac 48000Hz mono`, no
+  ANNOUNCE error, 100 s with zero pipe backlog, and stable under an extreme
+  5-vs-25 fps mismatch and a deliberate 5% audio skew. Not yet exercised: Home
+  Assistant's HLS worker or Frigate actually consuming the two-stream path.
+
+- **E58 (open) The video-only path still carries `-r`, and has the same latent
+  slow-timeline defect.** E54's fix removes `-r` only on the audio-enabled
+  argv, to keep the audio-off command byte-identical. But the mechanism is not
+  audio-specific: whenever a camera delivers fewer frames than its declared
+  fps, that stream publishes less media than wall time, so an HLS consumer
+  falls progressively behind live. It is the same one-token change, and it
+  needs its own live validation before shipping — the byte-identical guarantee
+  is the only reason it was not done at the same time.
+
+- **E59 (open) aiortc's audio decoder dies on the doorbell every session.**
+  Visible in the live logs even with consumption OFF (the drain path still
+  decodes): `av.error.InvalidDataError ... avcodec_send_packet()`, once per
+  session. Video is unaffected, but it means decoded audio arrives in gaps
+  rather than continuously, so the silence fill will do considerably more work
+  than expected once consumption is enabled. Whether this is a malformed first
+  packet, a codec-parameter mismatch, or something about how the gateway starts
+  the Opus stream is **unknown** — nothing has been captured yet.
 
 - **E55 (open) Device-direct listen audio is not an RTSP pull.** The `<cli>`
   element's `re`/`dre`/`lre`/`pre` attributes look like RTSP URLs, but the

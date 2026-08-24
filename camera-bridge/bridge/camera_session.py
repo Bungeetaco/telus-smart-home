@@ -185,7 +185,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     async def _hold_frames():
         # Repeat the most recent real frame at the camera's fps while the Janus
         # session is being rotated/reconnected, so the RTSP publish never goes
-        # silent (use_wallclock_as_timestamps keeps PTS advancing). Bounded by
+        # silent -- the repeated frames keep the encoder's output moving, and on
+        # an audio-enabled publisher they also keep its timeline moving at real
+        # time, since that is the argv where -use_wallclock_as_timestamps is
+        # actually in effect (see ffmpeg_sink.py's comment on the video input's
+        # omitted `-r`). Bounded by
         # time-since-last-real-frame, not per-invocation, so a genuinely
         # offline camera (e.g. the 2026-07-17 doorbell outage) stops
         # masquerading as live after FRAME_HOLD_MAX_S and fails honestly.
