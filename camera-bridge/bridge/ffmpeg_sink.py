@@ -188,6 +188,26 @@ _AUDIO_PRIME_MS = 100
 # reading a pipe running a minute ahead -- which is what _AUDIO_PIPE_MAX_BUFFER
 # and this ceiling together bound.
 _AUDIO_SILENCE_MAX_BURST_S = 0.1
+# How many CONSECUTIVE decoded audio frames may fail write_audio's byte-count
+# check before the audio input is given up on. One mismatched frame is a
+# glitch (a partially-decoded frame) and is skipped -- its span is filled with
+# silence so the sample-counted timeline, and with it the muxer lead the video
+# pipe depends on, keeps tracking the wall clock. A RUN of them is a broken
+# decoder: every frame it will ever produce is unusable, so the input is
+# dropped (video-only, visibly -- see _drop_audio) rather than skipped forever
+# while /control/status counts "decoded" frames that never carry sound. At the
+# stream's 20ms frames this is ~1s of decoder output. NOT a rebuild in either
+# case: the frames' FORMAT matched what ffmpeg was launched with, so a rebuilt
+# command line would be byte-identical and the failure would simply recur --
+# and recur as a session-failure loop the consecutive-failure escape hatch
+# never sees, because every such session still delivers its first video batch.
+_AUDIO_MALFORMED_LIMIT = 50
+# What one sample of silence looks like, per raw sample format. Digital
+# silence is the format's ZERO: for the unsigned 8-bit formats that is the
+# 0x80 midpoint -- all-zero bytes there are a full-scale negative DC offset,
+# not silence. Every other format here is signed or float, where zero bytes
+# are genuinely zero.
+_PCM_SILENCE_BYTE = {"u8": 0x80, "u8p": 0x80}
 # How long a single frame may sit unread in the video pipe before the publisher
 # is treated as gone (see write_frame). stdin.drain() returns once the transport
 # has handed the frame to ffmpeg, so it completing is direct evidence that ffmpeg
@@ -298,10 +318,14 @@ class FfmpegSink:
         self._audio_bytes_per_sample: int = 0   # across ALL channels
         self._audio_samples_written: int = 0
         self._audio_started_at: float | None = None
-        # Set by _drop_audio when a live audio input had to be abandoned
-        # mid-session. Distinct from "this sink never had audio": the caller has
-        # to be able to tell "video-only by configuration" from "video-only
-        # because the audio pipe wedged", and /control/status has to say so.
+        self._audio_silence_byte: int = 0       # per-format; see _PCM_SILENCE_BYTE
+        self._audio_malformed_run: int = 0      # see _AUDIO_MALFORMED_LIMIT
+        # Set when an audio input this sink was supposed to have is gone -- a
+        # live one abandoned mid-session (_drop_audio), or one whose pipe never
+        # opened at start(). Distinct from "this sink never had audio": the
+        # caller has to be able to tell "video-only by configuration" from
+        # "video-only because the audio input failed", and /control/status has
+        # to say so.
         self.audio_dropped: bool = False
         self.audio_dropped_reason: str | None = None
         # --- publisher liveness ---
@@ -576,25 +600,29 @@ class FfmpegSink:
             _fmt_name, audio_rate, audio_channels = audio_format
             self.audio_format = tuple(audio_format)
             self._audio_bytes_per_sample = sample_bytes * audio_channels
+            self._audio_silence_byte = _PCM_SILENCE_BYTE.get(str(_fmt_name), 0)
             try:
                 await self._open_audio_writer(audio_write_fd)
             except Exception:
                 # ffmpeg is already up and publishing video at this point, and
                 # video is worth far more than audio: degrade to video-only
                 # rather than raising and taking a working publisher down with
-                # it. ffmpeg simply never sees anything on input 1.
+                # it. ffmpeg simply never sees anything on input 1. The same
+                # latch a mid-session drop sets, so /control/status can say WHY
+                # this publisher carries no audio.
                 log.exception("%s: could not open the audio pipe; publishing "
                               "video only from this encoder", self.camera_id)
                 self.audio_format = None
                 self._audio_transport = None
+                self.audio_dropped = True
+                self.audio_dropped_reason = "the audio pipe could not be opened"
                 with contextlib.suppress(OSError):
                     os.close(audio_write_fd)
             else:
                 # Prime before anything else can write: see _AUDIO_PRIME_MS.
                 self._audio_started_at = time.monotonic()
                 primed = int(audio_rate * _AUDIO_PRIME_MS / 1000)
-                self._write_audio_bytes(bytes(primed * self._audio_bytes_per_sample),
-                                        primed)
+                self._write_audio_bytes(self._silence_bytes(primed), primed)
 
         # Mask the RTSP credentials: this URL now carries the MediaMTX password, and
         # container logs are persisted by Docker's json-file driver (and routinely
@@ -744,6 +772,10 @@ class FfmpegSink:
                 transport.close()
         self._audio_pipe_file = None
 
+    def _silence_bytes(self, samples: int) -> bytes:
+        """`samples` samples of digital silence in this sink's launched format."""
+        return bytes([self._audio_silence_byte]) * (samples * self._audio_bytes_per_sample)
+
     def _write_audio_bytes(self, data: bytes, samples: int) -> bool:
         """Push raw PCM at the pipe.
 
@@ -771,11 +803,14 @@ class FfmpegSink:
     async def write_audio(self, frame) -> bool:
         """Feed one decoded av.AudioFrame to ffmpeg's audio input.
 
-        Returns False when this frame did not reach ffmpeg. Two different
-        situations produce that, and the caller tells them apart by reading
-        `audio_dropped`: a frame whose PCM shape no longer matches what ffmpeg
-        was launched with needs a REBUILD (below), while a pipe that has gone bad
-        has already been dropped and leaves the video publish untouched.
+        Returns False when the audio input is beyond this sink's help. Two
+        different situations produce that, and the caller tells them apart by
+        reading `audio_dropped`: a frame whose PCM FORMAT no longer matches what
+        ffmpeg was launched with needs a REBUILD (below), while an input that
+        has been given up on -- a wedged pipe, or a run of malformed frames
+        past _AUDIO_MALFORMED_LIMIT -- has already been dropped and leaves the
+        video publish untouched. A one-off malformed frame is neither: it is
+        skipped, its span filled with silence, and the call reports True.
 
         The format check is the exact audio analogue of write_frame's frame-size
         check, and exists for the identical reason: ffmpeg was told the input's
@@ -801,11 +836,28 @@ class FfmpegSink:
             # Same hazard from the other direction: the format matched but the
             # frame did not carry the number of bytes that format implies (a
             # planar frame that did not interleave, a partially-decoded frame).
-            log.warning("%s: decoded audio frame is %d bytes, expected %d for "
-                        "%d samples of %s; restarting the encoder",
-                        self.camera_id, len(data), expected, frame.samples,
-                        self.audio_format)
-            return False
+            # NOT a rebuild -- the relaunched command line would be identical,
+            # so a rebuild is a session-failure loop, not a repair. The frame
+            # is dropped and its span filled from the wallclock, which keeps
+            # the audio's lead over the video intact; a persistent run of
+            # these is a broken decoder and latches video-only instead (see
+            # _AUDIO_MALFORMED_LIMIT).
+            self._audio_malformed_run += 1
+            if self._audio_malformed_run >= _AUDIO_MALFORMED_LIMIT:
+                self._drop_audio(
+                    f"{self._audio_malformed_run} consecutive decoded audio "
+                    f"frames did not match their declared shape (last: "
+                    f"{len(data)} bytes for {frame.samples} samples of "
+                    f"{self.audio_format})")
+                return False
+            if self._audio_malformed_run == 1:
+                log.warning("%s: decoded audio frame is %d bytes, expected %d "
+                            "for %d samples of %s; dropping it and filling with "
+                            "silence (only the first such frame is logged)",
+                            self.camera_id, len(data), expected, frame.samples,
+                            self.audio_format)
+            return await self.write_silence_to()
+        self._audio_malformed_run = 0
         return self._write_audio_bytes(data, int(frame.samples))
 
     async def write_silence_to(self, now: float | None = None) -> bool:
@@ -838,8 +890,7 @@ class FfmpegSink:
         if deficit <= 0:
             return True     # real audio is already at or ahead of the wallclock
         deficit = min(deficit, int(rate * _AUDIO_SILENCE_MAX_BURST_S))
-        return self._write_audio_bytes(bytes(deficit * self._audio_bytes_per_sample),
-                                       deficit)
+        return self._write_audio_bytes(self._silence_bytes(deficit), deficit)
 
     async def stop(self):
         if self.proc and self.proc.returncode is None:

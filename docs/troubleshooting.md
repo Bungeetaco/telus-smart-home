@@ -497,14 +497,22 @@ never counts toward the container-restart escape hatch.
 
 - **It repeats.** A rate change needs two consecutive settled measurements to
   agree, and there is a 300 s floor (`RATE_REBUILD_MIN_INTERVAL_S`) between two
-  rate-driven rebuilds, so this line should be rare. Seeing it every few minutes
-  means a camera whose delivered rate genuinely swings across the hysteresis
-  band — check `dropped_frames` and the network path to the camera before
-  suspecting the bridge.
-- **It is preceded by `holding off`.** The line
-  `the frame rate has moved again ... holding off until 300s have passed` means
-  the storm bound suppressed a rebuild. One is unremarkable; a run of them means
-  the source really is flapping.
+  rate-driven rebuilds, so this line should be rare. A delivered rate that
+  genuinely swings across the hysteresis band with no setting change — a real
+  thing: the 30 fps camera on this account halves its delivered rate under
+  marginal light and comes back, dwelling minutes at each end — is recognised
+  by the **flap guard** and produces at most two of these lines per episode
+  (the swing down, then the resolution up), followed by
+  `the delivered rate is flapping between ...` once, at warning level. From
+  then on the publisher is held at the flap's **higher** rate — expect
+  `More than 1000 frames duplicated` from ffmpeg during the low dwells, which
+  is the deliberate, content-safe trade (see below) — and confirmed swings
+  back down are refused quietly. If rate-change lines keep repeating *without*
+  the flapping warning, check `dropped_frames` and the network path to the
+  camera before suspecting the bridge.
+- **`the confirmed change to Nfps waits for the rebuild floor`** means the
+  storm bound is pacing a confirmed change; it applies on the first agreeing
+  measurement after the floor. Routine, logged once per pending change.
 - **The new rate looks wrong.** Compare it against the camera's resolution
   setting in Home Assistant. The bridge measures what actually arrives, so a
   measured rate well below the configured one is a delivery problem (upstream
@@ -525,7 +533,7 @@ padded frame is encode work and bitrate spent on a frame that carries nothing.
 
 | Cause | How to tell | Fix |
 | --- | --- | --- |
-| The declared rate is too high for what this camera delivers | the publish line shows a specific rate (`...@29fps`) and the duplication starts within a few minutes | nothing — the adaptive re-measurement corrects it; see the section above. If it *never* corrects, the gap is inside the hysteresis band (under 20% low), which is deliberate |
+| The declared rate is too high for what this camera delivers | the publish line shows a specific rate (`...@29fps`) and the duplication starts within a few minutes | nothing — the adaptive re-measurement corrects it; see the section above. If it *never* corrects, either the gap is inside the hysteresis band (under 20% low) or the **flap guard** is deliberately holding the publisher at the flap's higher rate (the log said `the delivered rate is flapping between ...` when it engaged); both are the intended, content-safe behaviour |
 | No rate was declared at all | `-framerate` missing from the publisher's argv, output lands at exactly 25 fps | a regression — `-framerate <fps>` must be on the raw video input; see [camera-bridge.md](camera-bridge.md) |
 
 **Check** which one it is from the publisher's own command line:

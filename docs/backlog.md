@@ -1881,3 +1881,53 @@ survived. Restored here with their current status rather than as they were.
   message rather than the number repeated as a magic value. Not a defect in the
   code, and not a reason to distrust E64's behaviour, which is separately
   proven. It is a gap in what the suite would notice.
+
+  The audio-pacing constants are **not** in this gap: `AUDIO_SILENCE_TOPUP_S`
+  and `_AUDIO_SILENCE_MAX_BURST_S` are value-pinned against the 100 ms muxer
+  lead (raising the top-up to the lead fails three tests), and
+  `AUDIO_PUMP_MAX_BURST_S` is value-pinned against the audio queue's span.
+
+- **E73 (DONE) A delivered rate that flaps with no setting change is resolved
+  once, to the higher rate, and held.** The first live night of E64's adaptive
+  rate surfaced the case its confirmation gate cannot handle: the 30 fps
+  camera's *delivered* rate halves under marginal light and comes back, dwelling
+  minutes at each end. Both dwells outlast two settled batches, so both ends
+  confirmed, and the log showed the result — a rate rebuild 29 → 15, another
+  15 → 28 six minutes later, then a further confirmed 28 → 15 held back only by
+  the 300 s floor, re-confirming and re-logging every ~12 s. Left alone that is
+  a reader-kicking publisher rebuild each way per 300 s window for as long as
+  the light stays marginal, plus enough warning volume to age real warnings out
+  of the container's capped log window.
+
+  The guard (`camera_session.RateWatcher`): a confirmed return to the very rate
+  the last rate rebuild moved away from, within `RATE_FLAP_WINDOW_S` (30 min)
+  of it, is flapping — a real second setting change back inside half an hour is
+  indistinguishable, and the ambiguity is resolved in the direction that costs
+  nothing irrecoverable. The flap is resolved **to the higher rate** (held high
+  the output pads with duplicates; held low it drops real frames — the same
+  measured asymmetry behind the hysteresis band) and held there: confirmed
+  changes down to the flap's low rate are refused while settled batches keep
+  sighting the high one, and for `RATE_FLAP_HOLD_S` (1 h) past the last
+  sighting. A real setting change to the low rate stops the sightings, outlives
+  the hold, and applies late rather than never. A confirmed change to a rate
+  that is *neither* end of the known flap passes through the ordinary gates
+  untouched.
+
+  Also fixed alongside, from the same night's log: the storm bound used to
+  **discard** a confirmed change it was merely delaying (the candidate was
+  cleared before the interval check), so the same evidence was re-derived and
+  re-logged as `the frame rate has moved again` — at warning level — every
+  second batch for the whole window. The candidate is now kept through the
+  hold (the first agreeing batch past the floor acts on it), the hold is
+  logged once per pending change at info level, and refusals of a known flap
+  are info once, then debug.
+
+  Costs and limits, stated: the first swing of a flap episode still pays two
+  rebuilds (down, then the resolution back up) — nothing can know the first
+  swing will reverse; while held high through a low dwell, ffmpeg logs
+  `More than 1000 frames duplicated` (E70's counter would make this a number);
+  and a real setting change to a known flap's low rate is delayed up to
+  `RATE_FLAP_HOLD_S` plus the dwell pattern. Pinned by two tests proven to
+  fail against the pre-guard code (the resolution + refusal path, and the
+  expiry path that separates a real change from a flap); the live confirmation
+  rides on the same soak E71 is waiting on.

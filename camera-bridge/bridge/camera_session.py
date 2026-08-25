@@ -171,14 +171,28 @@ class RateWatcher:
       * A HYSTERESIS BAND (_rate_moved), so ordinary measurement jitter never
         starts a rebuild loop.
       * CONFIRMATION: two consecutive settled batches must agree with each other
-        before anything is acted on. This is what makes a FLAPPING source
-        CONVERGE rather than oscillate -- a rate that alternates between two
-        values never produces two agreeing batches in a row, so it is never
-        confirmed and never rebuilds, which is the right answer for a source
-        that cannot make up its mind.
+        before anything is acted on. This converges a FAST-flapping source --
+        one that alternates quicker than two settled batches (~12s) never
+        produces two agreeing batches in a row, so it is never confirmed. It
+        does NOT converge a slow one, and a slow one exists: the 30fps camera
+        on this account halves its delivered rate under marginal light and
+        comes back, dwelling minutes at each rate, so both ends of the swing
+        confirm. That case belongs to the flap guard below.
+      * A FLAP GUARD: a confirmed change straight back to the rate the last
+        rate rebuild moved away from, within config.RATE_FLAP_WINDOW_S of it,
+        is the flapping signature. It is resolved ONCE, to the HIGHER of the
+        two rates -- declaring high pads the output with duplicates, declaring
+        low drops real frames (ffmpeg_sink's measured table) -- and then held:
+        confirmed changes down to the flap's low rate are refused for as long
+        as settled batches keep sighting the high one, and for
+        config.RATE_FLAP_HOLD_S past the last such sighting. A real setting
+        change to the low rate stops the sightings, outlives the hold, and is
+        applied late rather than never.
       * A MINIMUM INTERVAL (config.RATE_REBUILD_MIN_INTERVAL_S) between
         rate-driven rebuilds, so even a source that defeats all of the above
-        cannot cost more than one glitch per window.
+        cannot cost more than one glitch per window. A change it delays stays
+        confirmed (the candidate is kept), so the first agreeing batch after
+        the floor acts on it.
 
     It never decides anything by itself: it returns a confirmed rate and the
     caller applies it through the same sink-rebuild path a frame-size change
@@ -196,6 +210,17 @@ class RateWatcher:
         # about the camera, not about one session.
         self.candidate: int | None = None
         self.last_rebuild_at: float | None = None
+        # The rate the last rate-driven rebuild moved AWAY from. A confirmed
+        # change straight back to it is the flapping signature (see _observe),
+        # not a second setting change.
+        self.prev_declared: int | None = None
+        # Flap memory: the two rates a flapping source swings between, and how
+        # long the memory lives. All camera facts, so all survive rotations.
+        self.flap_low: int | None = None
+        self.flap_high: int | None = None
+        self.flap_until: float | None = None
+        self._holdoff_logged = False
+        self._flap_refused_logged = False
 
     def session_started(self, now: float):
         """A new Janus session is streaming. Restart the settle window and throw
@@ -205,10 +230,13 @@ class RateWatcher:
         self._prev_at = None
         self._settle_until = now + c.RATE_RESAMPLE_SETTLE_S
 
-    def rebuilt(self, now: float):
+    def rebuilt(self, now: float, from_fps=None):
         """The caller rebuilt the publisher for a rate change; start the
-        minimum-interval clock."""
+        minimum-interval clock, and remember the rate the change moved away
+        from -- a confirmed return TO it is how flapping is recognised."""
         self.last_rebuild_at = now
+        if from_fps:
+            self.prev_declared = int(from_fps)
 
     def note_frame(self, now: float, declared):
         """Record one live frame's arrival. Returns a newly CONFIRMED rate for
@@ -233,28 +261,91 @@ class RateWatcher:
         # reading: 40 and 55 are both published at 30, and "the rate moved" has
         # to mean "the command line would change".
         wanted = ffmpeg_sink.clamp_fps(measured)
+        # Flap-memory upkeep, before anything else: while the memory lives, any
+        # settled batch back at the flap's high rate is evidence the source
+        # still visits it, and pushes the expiry out. A source that has
+        # genuinely settled at the low rate stops producing these, the memory
+        # expires RATE_FLAP_HOLD_S later, and the ordinary mechanism takes the
+        # change from there -- late, but taken.
+        flap_active = self.flap_until is not None and now < self.flap_until
+        if flap_active and self.flap_high is not None \
+                and not _rate_moved(self.flap_high, wanted):
+            self.flap_until = now + c.RATE_FLAP_HOLD_S
         if not _rate_moved(declared, wanted):
             self.candidate = None
             return None
         if self.candidate is None or _rate_moved(self.candidate, wanted):
             # First sighting, or a sighting that disagrees with the pending one.
             # Either way this batch becomes the thing the NEXT batch has to
-            # agree with -- a flapping source lands here forever.
+            # agree with -- a FAST-flapping source lands here forever.
             self.candidate = wanted
+            self._holdoff_logged = False
             log.info("%s: measured %dfps against the declared %dfps -- waiting for a "
                      "second measurement to agree before rebuilding the publisher",
                      self.camera_id, wanted, declared)
             return None
-        self.candidate = None
+        # Two consecutive settled batches agree: the change is CONFIRMED. From
+        # here down the question is whether acting on it is wise, not whether
+        # the evidence is real.
+        if flap_active and self.flap_low is not None and wanted < declared \
+                and not _rate_moved(self.flap_low, wanted):
+            # The low half of a known flap. Refusing it is the point of the
+            # memory: held at the high rate the output pads with duplicates
+            # (the cheap error), where following the source down is a
+            # reader-kicking rebuild now and another when it comes back up.
+            self.candidate = None
+            log_fn = log.debug if self._flap_refused_logged else log.info
+            self._flap_refused_logged = True
+            log_fn("%s: still flapping (between ~%dfps and ~%dfps) -- refusing the "
+                   "confirmed change to %dfps and keeping the publisher at %dfps",
+                   self.camera_id, self.flap_low, self.flap_high, wanted, declared)
+            return None
+        if not flap_active and self.prev_declared is not None \
+                and self.last_rebuild_at is not None \
+                and now - self.last_rebuild_at < c.RATE_FLAP_WINDOW_S \
+                and not _rate_moved(self.prev_declared, wanted):
+            # A confirmed return to the very rate the last rebuild moved away
+            # from, this soon after it: the source's DELIVERED rate is flapping
+            # with no setting change (live: the 30fps camera halves its rate
+            # under marginal light and comes back, dwelling minutes at each
+            # end -- long enough that both ends confirm). Resolve it once, to
+            # the HIGHER rate, and hold there.
+            low, high = sorted((int(self.prev_declared), int(declared)))
+            self.flap_low, self.flap_high = low, high
+            self.flap_until = now + c.RATE_FLAP_HOLD_S
+            self._flap_refused_logged = False
+            if wanted <= declared:
+                self.candidate = None
+                log.warning(
+                    "%s: the delivered rate is flapping between ~%dfps and ~%dfps "
+                    "(a confirmed return %.0fs after the rebuild that left it) -- "
+                    "keeping the publisher at %dfps, which pads with duplicates "
+                    "where the lower rate would drop real frames",
+                    self.camera_id, low, high, now - self.last_rebuild_at, declared)
+                return None
+            log.warning(
+                "%s: the delivered rate is flapping between ~%dfps and ~%dfps "
+                "(a confirmed return %.0fs after the rebuild that left it) -- "
+                "resolving to the higher %dfps and holding there, which pads "
+                "with duplicates where the lower rate would drop real frames",
+                self.camera_id, low, high, now - self.last_rebuild_at, wanted)
+            # Falls through: the upward resolution is still one rebuild, and
+            # still subject to the minimum interval like any other.
         if self.last_rebuild_at is not None and \
                 now - self.last_rebuild_at < c.RATE_REBUILD_MIN_INTERVAL_S:
-            log.warning("%s: the frame rate has moved again (%dfps against the declared "
-                        "%dfps) only %.0fs after the last rate rebuild -- holding off "
-                        "until %ds have passed rather than glitching the stream again",
-                        self.camera_id, wanted, declared, now - self.last_rebuild_at,
-                        c.RATE_REBUILD_MIN_INTERVAL_S)
+            # The evidence stays confirmed -- the candidate is KEPT, so the
+            # first agreeing batch after the floor acts on it. Only the clock
+            # is short, and a paced delay is routine, not warning-level news;
+            # said once per candidate, not once per batch.
+            if not self._holdoff_logged:
+                self._holdoff_logged = True
+                log.info("%s: the confirmed change to %dfps waits for the rebuild "
+                         "floor (%.0fs of %ds since the last rate rebuild)",
+                         self.camera_id, wanted, now - self.last_rebuild_at,
+                         c.RATE_REBUILD_MIN_INTERVAL_S)
             return None
-        return measured
+        self.candidate = None
+        return wanted
 
 
 async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
@@ -455,8 +546,8 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # this loop can move it -- audio that lags the video is exactly
                 # what stalls the video pipe -- but it must not hold the loop (or
                 # the shared executor) for the whole drain while it does.
-                rate = (sink.audio_format or (None, 48000))[1] or 48000
-                unyielded_s += float(frame.samples) / float(rate)
+                sample_rate = (sink.audio_format or (None, 48000))[1] or 48000
+                unyielded_s += float(frame.samples) / float(sample_rate)
                 if unyielded_s >= c.AUDIO_PUMP_MAX_BURST_S:
                     unyielded_s = 0.0
                     await asyncio.sleep(0)
@@ -756,6 +847,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 rate_changed = (
                     rate_rebuild_needed and sink is not None
                     and _rate_moved(sink.fps, ffmpeg_sink.clamp_fps(fps)))
+                rate_rebuild_from = None
                 if rate_rebuild_needed and not rate_changed and sink is not None:
                     # Only worth saying when there IS a publisher to have kept. With
                     # no sink at all one is about to be built at the new rate anyway,
@@ -806,6 +898,9 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                             "-framerate and -g describe the stream again. Readers will "
                             "see one reconnect; this is not a fault.",
                             camera["id"], sink.fps, ffmpeg_sink.clamp_fps(fps))
+                        # Remembered so RateWatcher can recognise a confirmed
+                        # return to this rate as flapping, not a second change.
+                        rate_rebuild_from = sink.fps
                     await sink.stop()
                     sink = None
                 if sink is None:
@@ -818,7 +913,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # Start the minimum-interval clock only once a rebuild has
                         # actually happened, so a rebuild that never took place
                         # cannot suppress a later, genuine one.
-                        rate.rebuilt(time.monotonic())
+                        rate.rebuilt(time.monotonic(), rate_rebuild_from)
                     # What this ffmpeg was LAUNCHED with -- the command line is
                     # what the rebuild check above is really about, and start()
                     # can legitimately come up video-only anyway (an unsupported
@@ -827,11 +922,14 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # see a mismatch and rebuild the publisher forever, which is
                     # the one thing this loop exists to avoid.
                     sink_audio_fmt = desired_audio_fmt
-                    # A fresh publisher: whatever the last one ended up doing,
-                    # this one is alive and (if it was given an audio input at
-                    # all) carrying audio. The status describes what IS.
-                    _update_status(publisher_alive=True, audio_dropped=False,
-                                   audio_dropped_reason=None)
+                    # A fresh publisher: the status describes what IS, read off
+                    # the sink itself -- normally alive and (if it was given an
+                    # audio input at all) carrying audio, but start() can come
+                    # up with the audio already dropped (a pipe that would not
+                    # open), and that must be as visible as a mid-session drop.
+                    _update_status(publisher_alive=True,
+                                   audio_dropped=sink.audio_dropped,
+                                   audio_dropped_reason=sink.audio_dropped_reason)
                     # NOTE: /control/status's audio_format is deliberately NOT
                     # written here. What the sink was launched with is a guess
                     # (AUDIO_DEFAULT_FORMAT) until a frame has actually been

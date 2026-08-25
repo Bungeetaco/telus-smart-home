@@ -280,6 +280,33 @@ RATE_CHANGE_TOLERANCE_UP = 0.35
 # the band AND the two-measurements-must-agree confirmation cannot cost more
 # than one glitch per window. 300s is a little under two session rotations.
 RATE_REBUILD_MIN_INTERVAL_S = 300
+# --- the flap guard: a DELIVERED rate that moves with no setting change -------
+# The two-batches-must-agree confirmation converges on a source that alternates
+# faster than two settled batches (~12s), and on nothing slower. Observed live
+# on this account: the 30fps camera HALVES its delivered rate under marginal
+# light and comes back, dwelling minutes at each rate -- long enough for two
+# settled batches to agree at both ends, so every dwell confirmed a "change"
+# and the mechanism rebuilt the publisher each way at the minimum-interval
+# floor, kicking every RTSP reader off the path every few minutes for as long
+# as the light stayed marginal.
+#
+# The flapping SIGNATURE is a confirmed return to the very rate the last rate
+# rebuild moved away from, this soon after it. A real second setting change to
+# the old value inside half an hour is indistinguishable from that -- and
+# resolving the ambiguity toward "flapping" is the safe direction, because the
+# resolution below only ever holds the publisher at the HIGHER rate, which pads
+# the output with duplicates (the cheap error, measured in ffmpeg_sink's table)
+# rather than dropping real frames.
+RATE_FLAP_WINDOW_S = 30 * 60
+# How long the flap memory lives past the last settled sighting of the flap's
+# HIGH rate. While the source keeps visiting the high rate the memory keeps
+# renewing, and confirmed changes down to the flap's low rate are refused: the
+# publisher stays at the high rate, one resolution instead of a rebuild per
+# dwell. A REAL setting change to the low rate stops the high sightings, the
+# memory expires after this long of them, and the change is applied -- late,
+# and deliberately so: an hour of duplicate padding is cheaper than a night of
+# reader-kicking rebuilds, and nothing is lost in the meantime.
+RATE_FLAP_HOLD_S = 60 * 60
 JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side; keep well under that
 
 # --- EXPERIMENT: ask the Janus mountpoint for a downstream AUDIO track ------

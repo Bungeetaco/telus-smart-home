@@ -318,9 +318,11 @@ class FakeSink:
         self._audio_bytes_per_sample = 0
         self._audio_samples_written = 0
         self._audio_started_at = None
+        self._audio_silence_byte = 0
         CTX.sinks.append(self)
 
     write_silence_to = fs.FfmpegSink.write_silence_to
+    _silence_bytes = fs.FfmpegSink._silence_bytes
 
     @property
     def audio_enabled(self):
@@ -342,6 +344,9 @@ class FakeSink:
 
     async def start(self, width, height, fps=15, audio_format=None):
         self.start_calls.append((width, height, fps, audio_format))
+        # Runs BEFORE any state is adopted, so a raising hook models a start()
+        # that failed (both encoders dying in the grace period) and leaves the
+        # sink poisoned exactly as the real one would be.
         if CTX.sink_start_hook is not None:
             CTX.sink_start_hook(self, width, height, fps)
         self.proc = FakeProc()
@@ -360,6 +365,11 @@ class FakeSink:
             self._audio_started_at = time.monotonic()
             primed = int(self.audio_format[1] * fs._AUDIO_PRIME_MS / 1000)
             self._write_audio_bytes(bytes(primed * self._audio_bytes_per_sample), primed)
+        # AFTER the audio setup, so a hook can model a sink that came up with
+        # its audio already dropped (the real start() does that when the audio
+        # pipe will not open) without start() overwriting what the hook set.
+        if CTX.sink_started_hook is not None:
+            CTX.sink_started_hook(self, width, height, fps)
 
     def _write_audio_bytes(self, data, samples):
         if self.proc is None or self.proc.returncode is not None:
@@ -575,6 +585,7 @@ class Ctx:
         self.gvs_calls = []          # monotonic time of each get_video_source
         self.gvs_hook = None         # async (index) -> None, may raise
         self.sink_start_hook = None  # (sink, w, h, fps) -> None, may raise
+        self.sink_started_hook = None  # (sink, w, h, fps) -> None, after audio setup
         self.write_frame_hook = None # async (sink) -> None; slows the frame hold
         self.os = FakeOs()
         self.guard = FakeGuard()
@@ -1215,12 +1226,14 @@ async def test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree(
          batch's own +/-50% tolerance cannot protect against it on the FIRST
          session of a process, when there is nothing to compare against yet;
       2. CONFIRMATION -- one settled batch is never enough on its own;
-      3. FLAPPING CONVERGES -- a source alternating between two rates never
-         produces two agreeing batches, so it never rebuilds anything. The
-         alternative is a publisher that rebuilds forever, which is worse than
-         either rate;
+      3. FAST FLAPPING CONVERGES -- a source alternating between two rates
+         quicker than two settled batches never produces two agreeing batches,
+         so it never rebuilds anything. (A source that DWELLS at each rate for
+         minutes defeats this gate and belongs to the flap guard -- see
+         test_a_confirmed_reversal_is_flapping_and_resolves_to_the_higher_rate);
       4. the MINIMUM INTERVAL -- even genuine, agreeing evidence cannot cost a
-         second glitch inside the window.
+         second glitch inside the window, and evidence it delays stays
+         confirmed rather than being re-derived from scratch.
     """
     with rate_knobs(RATE_RESAMPLE_SETTLE_S=10.0, RATE_RESAMPLE_FRAMES=10,
                     RATE_REBUILD_MIN_INTERVAL_S=300):
@@ -1297,31 +1310,37 @@ async def test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree(
             "whichever rate the last batch happened to see")
 
         # 4. The storm bound. A rebuild has just happened; the same agreeing
-        #    evidence must wait.
+        #    evidence must wait -- and waiting is routine pacing, not
+        #    warning-level news, because during a sustained hold a
+        #    warning per batch is enough volume to age real warnings out of
+        #    the container's capped log window.
         watcher = cs.RateWatcher("cam")
         watcher.rebuilt(now)
         watcher.session_started(now)
         now += c.RATE_RESAMPLE_SETTLE_S
         held = []
-        for _ in range(3):
-            got, now = feed_batch(watcher, 1 / 6, now, declared=15)
-            held.append(got)
+        with capture_logs(level=logging.WARNING) as warned:
+            for _ in range(3):
+                got, now = feed_batch(watcher, 1 / 6, now, declared=15)
+                held.append(got)
         assert set(held) == {None}, (
             f"a second rate rebuild landed {now - watcher.last_rebuild_at:.0f}s after "
             f"the first, against a {c.RATE_REBUILD_MIN_INTERVAL_S}s floor: {held}")
+        assert not warned, (
+            f"a paced hold produced warning-level log output: {warned}")
 
-        # ...and once the window has passed, the same evidence is acted on. The
+        # ...and once the window has passed, the same evidence is acted on --
+        # by the FIRST agreeing batch, because the confirmed candidate was
+        # kept through the hold rather than thrown away and re-derived. The
         # bound delays a correction; it never cancels one.
         now += c.RATE_REBUILD_MIN_INTERVAL_S
         watcher.session_started(now)
         now += c.RATE_RESAMPLE_SETTLE_S
-        after = []
-        for _ in range(2):
-            got, now = feed_batch(watcher, 1 / 6, now, declared=15)
-            after.append(got)
-        assert 6 in after, (
-            f"the minimum interval cancelled the correction instead of delaying it: "
-            f"{after}")
+        got, now = feed_batch(watcher, 1 / 6, now, declared=15)
+        assert got == 6, (
+            f"the confirmed evidence was thrown away by the hold ({got!r}) -- a "
+            "change the storm bound merely delays must apply on the first "
+            "agreeing batch after the floor, not need re-confirming from scratch")
 
         # A rate above what ffmpeg can be given is not a change once it is
         # clamped: 40 and 55 are both published at 30, so a publisher already
@@ -1333,6 +1352,131 @@ async def test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree(
             got, now = feed_batch(watcher, interval, now, declared=30)
             assert got is None, f"{1 / interval:.0f}fps rebuilt a publisher already at 30"
         assert watcher.candidate is None, watcher.candidate
+
+
+async def test_a_confirmed_reversal_is_flapping_and_resolves_to_the_higher_rate():
+    """A DELIVERED rate that swings with no setting change must not become a
+    rebuild loop -- and confirmation alone cannot stop it becoming one.
+
+    The live case this pins: the 30fps camera on this account halves its
+    delivered rate under marginal light and comes back, dwelling MINUTES at
+    each end. Both dwells are long enough for two settled batches to agree, so
+    every swing confirmed a "change" and the publisher was rebuilt each way at
+    the minimum-interval floor -- a reader-kicking glitch every few minutes for
+    as long as the light stayed marginal, plus a warning every ~12s.
+
+    The flapping signature is a confirmed return to the very rate the last
+    rate rebuild moved away from, soon after it. The resolution is settled by
+    the same measurements as the hysteresis band's asymmetry: held HIGH the
+    output pads with duplicates (nothing lost), held low it drops real frames.
+    So the flap is resolved ONCE, to the higher rate, and then held there for
+    as long as settled batches keep sighting that higher rate.
+    """
+    with rate_knobs(RATE_RESAMPLE_SETTLE_S=10.0, RATE_RESAMPLE_FRAMES=10,
+                    RATE_REBUILD_MIN_INTERVAL_S=0,
+                    RATE_FLAP_WINDOW_S=1800.0, RATE_FLAP_HOLD_S=3600.0):
+        # The first swing of the night looks exactly like a setting change and
+        # is followed: declared 29, confirmed 15, rebuilt down. Nothing can
+        # know better yet.
+        watcher = cs.RateWatcher("cam")
+        now = 1000.0
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        _, now = feed_batch(watcher, 1 / 15, now, declared=29)
+        got, now = feed_batch(watcher, 1 / 15, now, declared=29)
+        assert got == 15, f"the first downward swing was not confirmed: {got}"
+        watcher.rebuilt(now, 29)
+
+        # Minutes later the delivered rate comes back up and confirms: the
+        # signature. It must be recognised, resolved UP (the content-safe
+        # direction), and said out loud once.
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S + 120
+        with capture_logs(level=logging.WARNING) as warned:
+            _, now = feed_batch(watcher, 1 / 28, now, declared=15)
+            got, now = feed_batch(watcher, 1 / 28, now, declared=15)
+        assert got == 28, (
+            f"the confirmed return to ~29fps was not applied ({got!r}) -- the "
+            "flap must be resolved to the HIGHER rate, which pads with "
+            "duplicates where staying low drops real frames")
+        assert any("flapping" in ln for ln in warned), (
+            f"the flap was resolved without saying so: {warned}")
+        watcher.rebuilt(now, 15)
+
+        # From here the swings continue -- and cost NOTHING. Every confirmed
+        # return to the low rate is refused while batches keep sighting the
+        # high one, and none of it is warning-level noise.
+        refused = []
+        with capture_logs(level=logging.WARNING) as warned:
+            for _ in range(4):
+                _, now = feed_batch(watcher, 1 / 15, now, declared=28)   # low dwell
+                got, now = feed_batch(watcher, 1 / 15, now, declared=28)
+                refused.append(got)
+                _, now = feed_batch(watcher, 1 / 28, now, declared=28)   # high dwell
+        assert set(refused) == {None}, (
+            f"a night of flapping still rebuilds the publisher: {refused} -- "
+            "each entry is a reconnect every RTSP reader pays for")
+        assert not warned, (
+            f"refusing a known flap produced warning-level output on every "
+            f"swing: {warned}")
+
+        # A change to a rate that is NEITHER end of the known flap is a real
+        # setting change and goes through the ordinary gates untouched.
+        _, now = feed_batch(watcher, 1 / 7, now, declared=28)
+        got, now = feed_batch(watcher, 1 / 7, now, declared=28)
+        assert got == 7, (
+            f"the flap hold swallowed a genuine setting change to 7fps: {got!r}")
+
+
+async def test_flap_memory_expires_once_the_high_rate_stops_appearing():
+    """The flap hold must delay a REAL change to the flap's low rate, never
+    cancel it.
+
+    What tells the two apart is the high rate's disappearance: a flapping
+    source keeps coming back to it (each settled sighting renews the memory),
+    while a source whose SETTING really changed to the low rate never visits
+    the high rate again. Once the memory has gone RATE_FLAP_HOLD_S without a
+    sighting, it expires, and the sustained low measurement is confirmed and
+    applied by the ordinary mechanism -- an hour of duplicate padding, then
+    the right command line, with no content lost in between.
+    """
+    with rate_knobs(RATE_RESAMPLE_SETTLE_S=10.0, RATE_RESAMPLE_FRAMES=10,
+                    RATE_REBUILD_MIN_INTERVAL_S=0,
+                    RATE_FLAP_WINDOW_S=1800.0, RATE_FLAP_HOLD_S=3600.0):
+        # Reach the resolved-and-held state: flapping between 15 and 28,
+        # publisher held at 28.
+        watcher = cs.RateWatcher("cam")
+        now = 1000.0
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        _, now = feed_batch(watcher, 1 / 15, now, declared=29)
+        got, now = feed_batch(watcher, 1 / 15, now, declared=29)
+        assert got == 15
+        watcher.rebuilt(now, 29)
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S + 120
+        _, now = feed_batch(watcher, 1 / 28, now, declared=15)
+        got, now = feed_batch(watcher, 1 / 28, now, declared=15)
+        assert got == 28
+        watcher.rebuilt(now, 15)
+
+        # The setting really changes to 15 now. The first confirmations land
+        # inside the memory and are refused -- the deliberate delay.
+        _, now = feed_batch(watcher, 1 / 15, now, declared=28)
+        got, now = feed_batch(watcher, 1 / 15, now, declared=28)
+        assert got is None, (
+            f"a low confirmation inside the flap hold was applied: {got}")
+
+        # Refusals alone must not renew the memory -- only sightings of the
+        # HIGH rate do, and there are none any more. Past the hold, the same
+        # sustained evidence is applied.
+        now += c.RATE_FLAP_HOLD_S
+        _, now = feed_batch(watcher, 1 / 15, now, declared=28)
+        got, now = feed_batch(watcher, 1 / 15, now, declared=28)
+        assert got == 15, (
+            f"the flap hold cancelled a real setting change instead of "
+            f"delaying it: {got!r} -- the high rate stopped appearing, so the "
+            "memory should have expired")
 
 
 async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_session():
@@ -1357,6 +1501,14 @@ async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_
         it mean something else;
       * the log says what happened, so a rebuild that a reader sees as one
         reconnect is not mistaken for a fault.
+
+    The frames are driven by real asyncio.sleep, so the measured rate is a
+    real-time measurement: nominally 25fps, in practice 25 minus whatever the
+    scheduler's sleep overshoot cost (observed as low as 24 on a loaded
+    machine). What is pinned is therefore the MECHANISM -- one confirmed rate,
+    far from the old 10, applied consistently to the publisher, the status,
+    the next session's queue and the log -- not the exact integer the clock
+    happened to produce.
     """
     # First batch at 10fps, everything after it at 25fps: a +150% move, well past
     # the upward band, sustained rather than a burst.
@@ -1376,9 +1528,11 @@ async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_
 
     assert sinks[0].fps == 10, (
         f"the first publisher was not declared at the measured 10fps: {sinks[0].fps}")
-    assert sinks[1].fps == 25, (
-        f"the rebuilt publisher was declared at {sinks[1].fps}fps for a camera now "
-        "delivering 25 -- the rate was re-measured but not applied")
+    new_rate = sinks[1].fps
+    assert new_rate is not None and 20 <= new_rate <= 25, (
+        f"the rebuilt publisher was declared at {new_rate}fps for a camera now "
+        "delivering ~25 -- the rate was re-measured but not applied (sleep "
+        "overshoot only ever biases the measurement LOW, never below 20)")
     assert len(sinks) == 2, (
         f"{len(sinks)} publishers for one rate change -- every rebuild past the "
         "first is a reconnect every RTSP reader pays for")
@@ -1388,23 +1542,26 @@ async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_
     assert state.get("state") == "streaming", f"the rate change failed the session: {state}"
     assert state.get("consecutive_failures") == 0, (
         f"a rate change counted toward the container-restart escape hatch: {state}")
-    assert state.get("fps") == 25, f"/control/status still reports the old rate: {state}"
+    assert state.get("fps") == new_rate, (
+        f"/control/status does not report the rebuilt rate ({new_rate}): {state}")
     assert len(sessions) == 2, (
         f"{len(sessions)} sessions -- the rate change should have been applied at the "
         "first rotation, not by failing and reconnecting")
 
     # The queue follows the rate, because it is sized in milliseconds.
     assert sessions[0].fps is None, sessions[0].fps
-    assert sessions[1].fps == 25, (
-        f"the next session was built with a stale rate ({sessions[1].fps}) -- its "
-        "decoded-frame queue is sized in TIME, so it now means something else")
-    assert sessions[1].queue_maxsize == jc.video_queue_maxsize(25), sessions[1].queue_maxsize
+    assert sessions[1].fps == new_rate, (
+        f"the next session was built with a stale rate ({sessions[1].fps} against "
+        f"the confirmed {new_rate}) -- its decoded-frame queue is sized in TIME, "
+        "so it now means something else")
+    assert sessions[1].queue_maxsize == jc.video_queue_maxsize(new_rate), \
+        sessions[1].queue_maxsize
 
     said = [ln for ln in lines if "frame rate changed" in ln]
     assert said, (
         f"the publisher was rebuilt for a rate change and the log does not say so, "
         f"so the reconnect every reader sees looks like a fault: {lines}")
-    assert "10" in said[0] and "25" in said[0], said[0]
+    assert "10" in said[0] and str(new_rate) in said[0], said[0]
 
 
 async def test_the_frame_hold_repeats_at_the_rate_ffmpeg_was_declared_with():
@@ -2632,6 +2789,15 @@ async def test_the_silence_fill_tracks_the_wallclock_and_never_bursts():
         "between top-ups, which is what makes ffmpeg stop reading the video pipe")
     assert fs._AUDIO_SILENCE_MAX_BURST_S <= fs._AUDIO_PRIME_MS / 1000.0, (
         "a single top-up may hand over more audio than the pipe's whole lead")
+    # The pump's yield window, bounded relative to the queue it drains. Audio
+    # arrives in 20ms frames, so the queue holds ~AUDIO_QUEUE_MAXSIZE * 0.02s;
+    # a burst window past that means a full backlog is drained in one unbroken
+    # pass -- an executor burst in front of the video path at exactly the
+    # moment it is already behind, which is the fault the yield exists for.
+    assert 0 < c.AUDIO_PUMP_MAX_BURST_S <= c.AUDIO_QUEUE_MAXSIZE * 0.020 / 2, (
+        f"AUDIO_PUMP_MAX_BURST_S={c.AUDIO_PUMP_MAX_BURST_S}s against a "
+        f"~{c.AUDIO_QUEUE_MAXSIZE * 0.020:.1f}s queue -- a full backlog would "
+        "be drained without yielding even once")
 
 
 async def test_the_rotation_gap_is_filled_with_wallclock_derived_silence():
@@ -3088,6 +3254,182 @@ async def test_an_audio_format_change_forces_a_publisher_rebuild():
     assert state.get("audio_format") == "16000Hz/1ch/s16", state
 
 
+async def test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio():
+    """A frame whose bytes disagree with its own declared shape must not fail
+    the session -- a rebuild cannot fix it, so forcing one is a loop.
+
+    The frame's FORMAT matches what ffmpeg was launched with, so the relaunched
+    command line would be byte-identical and the same refusal would recur --
+    session after session, each one delivering its first video batch (which
+    resets the consecutive-failure count), so the loop never even reaches the
+    container-restart escape hatch. Instead: the frame is dropped and its span
+    filled with silence from the wallclock, which keeps the audio's lead over
+    the video intact (the lead is what keeps ffmpeg reading the VIDEO pipe).
+    A RUN of them is a broken decoder, not a glitch, and latches the same
+    visible video-only degradation a wedged pipe takes.
+    """
+    written = []
+    real = fs.FfmpegSink("cam")
+    real.proc = types.SimpleNamespace(returncode=None, stdin=object())
+    real._audio_transport = types.SimpleNamespace(
+        is_closing=lambda: False, get_write_buffer_size=lambda: 0,
+        write=lambda data: written.append(data), close=lambda: None)
+    real._audio_protocol = types.SimpleNamespace(lost=False)
+    real.audio_format = ("s16", 16000, 1)
+    real._audio_bytes_per_sample = 2
+    real._audio_started_at = time.monotonic()
+    real._audio_samples_written = 0
+
+    def frame(nbytes, samples=320):
+        f = FakeAudioFrame(("s16", 16000, 1), samples)
+        f.to_ndarray = lambda: types.SimpleNamespace(
+            tobytes=lambda: b"\x55" * nbytes)
+        return f
+
+    # A well-formed frame reaches the pipe.
+    assert await real.write_audio(frame(640)) is True
+    assert any(b"\x55" in w for w in written), "a good frame never reached the pipe"
+
+    # A malformed one does NOT fail the sink, does not reach the pipe, and the
+    # video half is untouched.
+    written.clear()
+    assert await real.write_audio(frame(100)) is True, (
+        "one malformed frame failed the audio input -- the session fails, the "
+        "publisher rebuilds with an identical command line, and the same frame "
+        "shape fails it again: an unbounded rotation loop")
+    assert not any(b"\x55" in w for w in written), (
+        "the malformed bytes were written into the pipe -- every later sample "
+        "is now decoded from the wrong offset")
+    assert real.audio_dropped is False
+
+    # A good frame in between resets the run: 49 bad + good + 49 bad is a
+    # glitchy decoder, not a dead one. (One malformed frame is already on the
+    # run from above.)
+    for _ in range(fs._AUDIO_MALFORMED_LIMIT - 2):
+        assert await real.write_audio(frame(100)) is True
+    assert real.audio_dropped is False, (
+        f"{fs._AUDIO_MALFORMED_LIMIT - 1} consecutive malformed frames already "
+        "dropped the audio -- the limit is off by one")
+    assert await real.write_audio(frame(640)) is True
+    for _ in range(fs._AUDIO_MALFORMED_LIMIT - 1):
+        assert await real.write_audio(frame(100)) is True
+    assert real.audio_dropped is False, (
+        "a good frame did not reset the malformed run -- an occasionally-glitchy "
+        "decoder would accumulate to video-only over hours")
+
+    # A full consecutive run IS a broken decoder: latch video-only, visibly.
+    assert await real.write_audio(frame(640)) is True
+    for _ in range(fs._AUDIO_MALFORMED_LIMIT - 1):
+        await real.write_audio(frame(100))
+    assert await real.write_audio(frame(100)) is False
+    assert real.audio_dropped is True and "shape" in (real.audio_dropped_reason or ""), (
+        f"a persistent run of malformed frames did not drop the audio input: "
+        f"dropped={real.audio_dropped} reason={real.audio_dropped_reason!r}")
+    assert real.publisher_alive is True, (
+        "malformed AUDIO frames took the VIDEO publisher down")
+
+
+async def test_silence_is_the_formats_zero_not_zero_bytes():
+    """For the unsigned 8-bit sample formats, digital silence is the 0x80
+    midpoint; all-zero bytes there are a full-scale negative DC offset that
+    would publish as a loud click at every fill boundary. Every other format
+    this sink accepts is signed or float, where zero bytes are genuinely zero.
+
+    Pinned through the real start() (with the launch and the pipe stubbed out)
+    because the byte is chosen there, from the launched format, and both the
+    prime and every later fill must use it.
+    """
+    for fmt, silence in ((("u8", 8000, 1), 0x80), (("s16", 16000, 1), 0x00)):
+        written = []
+
+        async def fake_try_start(self, args, pass_fds=()):
+            return True
+
+        async def fake_open(self, write_fd):
+            os.close(write_fd)
+            self._audio_transport = types.SimpleNamespace(
+                is_closing=lambda: False, get_write_buffer_size=lambda: 0,
+                write=lambda data: written.append(data), close=lambda: None)
+            self._audio_protocol = types.SimpleNamespace(lost=False)
+
+        saved = (fs.FfmpegSink._try_start, fs.FfmpegSink._open_audio_writer)
+        fs.FfmpegSink._try_start = fake_try_start
+        fs.FfmpegSink._open_audio_writer = fake_open
+        try:
+            sink = fs.FfmpegSink("cam")
+            await sink.start(64, 64, 15, audio_format=fmt)
+            assert written, f"{fmt}: the pipe was never primed"
+            # The prime, and a later wallclock fill, both in the format's zero.
+            sink._audio_started_at -= 0.05
+            assert await sink.write_silence_to() is True
+            for chunk in written:
+                assert set(chunk) == {silence}, (
+                    f"{fmt}: silence was written as "
+                    f"{sorted(set(chunk))} rather than {silence:#x} -- for u8 "
+                    "that is a full-scale DC offset, not silence")
+        finally:
+            fs.FfmpegSink._try_start, fs.FfmpegSink._open_audio_writer = saved
+
+
+async def test_a_publisher_born_without_its_audio_pipe_says_so():
+    """start() degrading to video-only because the audio pipe would not open
+    must be as visible as a mid-session drop.
+
+    The sink half: the same audio_dropped latch _drop_audio sets, so
+    `audio_enabled` is false and nothing will write. The loop half: the status
+    is read off the fresh sink, so /control/status carries the reason -- before
+    this, the degradation left audio_consumed true, decoded_audio_frames
+    climbing, and nothing anywhere saying why the published stream had no
+    sound.
+    """
+    async def fake_try_start(self, args, pass_fds=()):
+        # The real _try_start adopts the process on success; publisher_alive
+        # reads it, so the stub has to as well.
+        self.proc = types.SimpleNamespace(returncode=None, stdin=object())
+        return True
+
+    async def fake_open_raises(self, write_fd):
+        raise OSError("no pipe for you")
+
+    saved = (fs.FfmpegSink._try_start, fs.FfmpegSink._open_audio_writer)
+    fs.FfmpegSink._try_start = fake_try_start
+    fs.FfmpegSink._open_audio_writer = fake_open_raises
+    try:
+        sink = fs.FfmpegSink("cam")
+        await sink.start(64, 64, 15, audio_format=("s16", 48000, 2))
+    finally:
+        fs.FfmpegSink._try_start, fs.FfmpegSink._open_audio_writer = saved
+    assert sink.audio_enabled is False and sink.audio_format is None
+    assert sink.audio_dropped is True and sink.audio_dropped_reason, (
+        "a publisher born video-only over a failed pipe is indistinguishable "
+        "from one that is video-only by configuration")
+    assert sink.publisher_alive is True, (
+        "a failed AUDIO pipe failed the whole publisher")
+
+    # The loop half, against the scenario fakes: a sink that comes up with
+    # audio already dropped lands in /control/status at the build, without
+    # waiting for a writer to notice (no writer ever runs -- audio_enabled is
+    # false, so the pump is never started and the hold skips the fill).
+    def born_without_audio(sink_, width, height, fps):
+        sink_._audio_transport = None
+        sink_.audio_dropped = True
+        sink_.audio_dropped_reason = "the audio pipe could not be opened"
+
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02)],
+                      SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+            ctx.sink_started_hook = born_without_audio
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("audio_dropped") is True,
+                            timeout=10.0, why="the at-start degradation to be reported")
+            state = dict(ctx.state)
+            await stop(ctx)
+    assert state.get("audio_dropped_reason") == "the audio pipe could not be opened", state
+    assert state.get("state") == "streaming", (
+        f"a failed audio pipe took the camera off the air: {state}")
+
+
 async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
     """A hardware path that publishes audio while the software fallback silently
     does not is the exact class of bug this codebase keeps finding -- and the
@@ -3470,6 +3812,8 @@ TESTS = [
     test_a_real_fps_is_not_overwritten_by_a_burst,
     test_the_rate_hysteresis_band_is_asymmetric_and_clears_observed_jitter,
     test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree,
+    test_a_confirmed_reversal_is_flapping_and_resolves_to_the_higher_rate,
+    test_flap_memory_expires_once_the_high_rate_stops_appearing,
     test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_session,
     test_the_frame_hold_repeats_at_the_rate_ffmpeg_was_declared_with,
     test_a_sink_whose_start_raised_is_never_adopted,
@@ -3499,6 +3843,9 @@ TESTS = [
     test_a_wedged_audio_pipe_degrades_to_video_only,
     test_a_publisher_that_stopped_reading_is_detected_and_rebuilt,
     test_an_audio_format_change_forces_a_publisher_rebuild,
+    test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio,
+    test_silence_is_the_formats_zero_not_zero_bytes,
+    test_a_publisher_born_without_its_audio_pipe_says_so,
     test_every_encoder_variant_gets_the_audio_input_and_encoder,
     test_the_video_input_declares_its_rate_with_framerate_never_r,
     test_consume_without_request_degrades_to_off_and_says_so_once,

@@ -350,11 +350,29 @@ come from the resolution setting.
    11%) and none of them should be corrected: 15 is the real setting, and
    declaring 13 would start dropping the frames that do arrive on time.
 5. **Confirm.** Two consecutive settled batches must agree before anything acts.
-   This is what makes a **flapping source converge rather than oscillate**: a
-   rate alternating between two values never produces two agreeing batches, so it
-   is never confirmed and never rebuilds — which is the right answer for a source
-   that cannot make up its mind.
-6. **Apply, at a rotation.** A confirmed change updates `known_fps` immediately
+   This converges a **fast**-flapping source: a rate alternating quicker than
+   two settled batches (~12 s) never produces two agreeing batches, so it is
+   never confirmed and never rebuilds. It does **not** converge a slow one —
+   that is the flap guard's job, below.
+6. **The flap guard.** A source can swing its *delivered* rate with no setting
+   change at all, dwelling minutes at each end — observed live: the 30 fps
+   camera on this account halves its delivered rate under marginal light and
+   comes back. Both dwells outlast two settled batches, so both ends confirm,
+   and without this gate the publisher rebuilt each way at the minimum-interval
+   floor for as long as the light stayed marginal. The flapping **signature** is
+   a confirmed return to the very rate the last rate rebuild moved away from,
+   within `RATE_FLAP_WINDOW_S` (30 min) of it. It is resolved **once, to the
+   higher of the two rates** — held high the output pads with duplicates
+   (nothing lost, per the table above), held low it would drop real frames —
+   and then held there: confirmed changes back down to the flap's low rate are
+   refused for as long as settled batches keep sighting the high one, and for
+   `RATE_FLAP_HOLD_S` (1 h) past the last such sighting. A *real* setting
+   change to the low rate stops the sightings, outlives the hold, and is
+   applied late rather than never — an hour of duplicate padding is the cost,
+   chosen over a night of reader-kicking rebuilds. The resolution is logged
+   once as a warning (`the delivered rate is flapping between …`); the
+   refusals that follow are routine and are not warning-level noise.
+7. **Apply, at a rotation.** A confirmed change updates `known_fps` immediately
    and sets a flag; the publisher is rebuilt at the **next session rotation**,
    through the same `sink_wh`-style check a frame-size change uses. It is never
    raised from the streaming loop the way an audio-format change is, because
@@ -363,10 +381,11 @@ come from the resolution setting.
    rebuild costs, not a glitch plus a failed session plus a backoff. The flag is
    re-checked against the current reading at that point, so a rate that wandered
    and came home rebuilds nothing.
-7. **Bound.** `RATE_REBUILD_MIN_INTERVAL_S` (300 s, a little under two rotations)
+8. **Bound.** `RATE_REBUILD_MIN_INTERVAL_S` (300 s, a little under two rotations)
    is the floor between two rate-driven rebuilds, so even a source that defeats
    every gate above cannot cost more than one glitch per window. It delays a
-   correction; it never cancels one.
+   correction; it never cancels one — the confirmed evidence is kept through
+   the hold, so the first agreeing batch after the floor acts on it.
 
 **What a rate change does to the queue and the frame hold:**
 
@@ -815,15 +834,23 @@ Five properties of that path are load-bearing:
   the cadence on its own; the top-up only has to cover the quiet, which on a
   doorbell is nearly all of the time.
 - **An audio input that goes bad degrades the sink to video-only.** ffmpeg
-  backing up past `_AUDIO_PIPE_MAX_BUFFER` (512 kB, ~2.7 s of un-read audio), or
-  the pipe closing under the sink, drops the audio input and leaves the video
-  publish untouched (`FfmpegSink._drop_audio`) — the same judgement `start()`
-  already makes for an unsupported sample format. Rebuilding the publisher
-  instead destroys the MediaMTX path, kicks every RTSP reader and puts a
-  discontinuity in front of every HLS viewer, which trades a working video feed
-  for an audio input that has already gone. The degradation is latched for the
-  life of that publisher (ffmpeg cannot reopen an input) and is reported as
-  `audio_dropped` / `audio_dropped_reason` in `/control/status`.
+  backing up past `_AUDIO_PIPE_MAX_BUFFER` (512 kB, ~2.7 s of un-read audio),
+  the pipe closing under the sink, the pipe failing to open at `start()`, or a
+  persistent run of decoded frames whose bytes disagree with their own declared
+  shape (`_AUDIO_MALFORMED_LIMIT`, ~1 s of them) — any of these drops the audio
+  input and leaves the video publish untouched (`FfmpegSink._drop_audio`), the
+  same judgement `start()` already makes for an unsupported sample format.
+  Rebuilding the publisher instead destroys the MediaMTX path, kicks every RTSP
+  reader and puts a discontinuity in front of every HLS viewer, which trades a
+  working video feed for an audio input that has already gone — and for the
+  malformed-frame case a rebuild cannot even help, since the relaunched command
+  line would be byte-identical (the frames' *format* matched; only their size
+  lied). A **one-off** malformed frame is not a drop at all: it is skipped and
+  its span filled with silence from the wall clock, so the audio's lead over the
+  video — the thing that keeps ffmpeg reading the video pipe — is unaffected.
+  The degradation is latched for the life of that publisher (ffmpeg cannot
+  reopen an input) and is reported as `audio_dropped` / `audio_dropped_reason`
+  in `/control/status`.
 
 - **One publisher, two inputs — the audio fd outlives every session.** The
   ffmpeg process deliberately survives the ~165 s rotations (see the rotation
