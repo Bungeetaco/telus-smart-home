@@ -40,6 +40,10 @@ and evidence. Grouped by whether anything can actually be done about them.
   a real resolution change live. A five-minute operator check; the procedure,
   now fully readable from `/control/status`, is in the entry.
 
+- **E75** (open, minor) - the stack watcher is now versioned at
+  `ops/stack-watch.sh` but is untested shell that has already produced three
+  false positives; its cron entry is not captured in the repo.
+
 **Blocked on hardware or a device this account does not have**
 
 - **E13**: validate the webrtc/srtp fallback path; needs an ADC camera that
@@ -1710,6 +1714,22 @@ The frame rate is a device setting, not a constant discovered once; these
 entries are the mechanism that keeps it under review
 (`camera_session.RateWatcher`), its guards, and what is still open about it.
 
+- **E64 confirmed live, 2026-08-25.** The living room camera's delivered rate
+  walked down through the morning, 29 to 10 to 7 to 5 fps, over thirteen rate
+  events. The obvious suspicion was a runaway in this code, since every rebuild
+  creates a gap in frames and a gap biases the next measurement low, which would
+  make the descent self-reinforcing. It is not that: `measured_fps` reads 5
+  against a declared 5 and has held there across a dozen consecutive rotations,
+  so the code tracked a genuine source-side decline. That is exactly the case it
+  was built for. Declared at the morning's 29 against a real 5, the encoder would
+  have been duplicating frames continuously; `duplicated_frame_warnings` sat at 6
+  for that camera against 1 for the doorbell.
+
+  Related, from the same window: the doorbell's residual drop rate with audio
+  consuming is steady at 7 to 10 per minute, about 1.1 percent of frames, over
+  six hours with no degradation. That is roughly a 99 percent reduction from the
+  E60 defect and it is still not zero. See E62.
+
 - **E64 (DONE) The frame rate is adaptive, not latched.** The measured fps was
   latched for the life of a process, and `-framerate` bakes it into the output.
   The same indoor camera locked `known_fps = 7` for one process lifetime and
@@ -1945,3 +1965,50 @@ entries are the mechanism that keeps it under review
   fail against the pre-guard code (the resolution + refusal path, and the
   expiry path that separates a real change from a flap); the live confirmation
   rides on the same soak E71 is waiting on.
+
+- **E74 (DONE) The bridge container's memory is a plateau, not a leak.** The
+  whole-stack watcher reported `bridge-memory-high` fourteen times overnight,
+  crossing its 85 percent threshold from 05:10 onward. Measured rather than
+  assumed:
+
+  | window | reading |
+  |---|---|
+  | 06:10, just after a rebuild | 49.9 percent |
+  | 06:10 to 08:10 | +26 points |
+  | 08:10 to 10:10 | +6.7 points |
+  | 10:10 to 12:40 | flat, oscillating 83 to 90 percent |
+
+  Over a separate 30 minute window spanning about eleven session rotations the
+  Python process held **flat at 119 threads and 485 to 493 MB RSS**, with no
+  trend in either. No OOM kill and no container restart in six hours. So there
+  is no thread accumulation across session rotations, which was the more
+  worrying of the two hypotheses, and no unbounded growth.
+
+  The shape fits glibc arena behaviour: 119 threads on an 8 core host against a
+  default cap of 8 arenas per core, each able to reach 64 MB, reaching a working
+  set and stopping. `MALLOC_ARENA_MAX=2` would reclaim headroom and is worth
+  applying at the next natural rebuild, but it is an optimisation and not a
+  stability fix. Nothing here needs a forced rebuild.
+
+  **The threshold was the defect.** 85 percent sat below this workload's normal
+  operating range, so the watcher was reporting healthy operation as a failure,
+  which is the fastest way to make an operator stop reading an alert. Raised to
+  93 percent with the measurement recorded in the script itself.
+
+- **E75 (open, minor) The stack watcher is versioned but not tested or
+  reviewed.** `ops/stack-watch.sh` is now in the repository rather than existing
+  only on the VM, so it can be reviewed and its history is visible. It is still
+  shell written quickly against a live system, and it has already produced three
+  false positives that had to be fixed by hand: a raw count of unavailable
+  entities (about fifteen are permanently unavailable here by design, since no
+  camera on this account is privacy capable), `event.doorbell_button_press`
+  reading `unknown` when that is an EventEntity's normal resting state before
+  its first event, and the audio sensors reading `unknown` on the first poll of
+  a camera that already has frames, which the entity documents as honest rather
+  than faulty.
+
+  Each was a case of alerting on a state the system defines as normal. Worth a
+  pass that checks the remaining conditions against what the entities and the
+  control API actually promise, and worth deciding whether it should be
+  installed by a documented procedure rather than by hand. The cron entry lives
+  in the maintainer's user crontab and is not captured anywhere in the repo.
