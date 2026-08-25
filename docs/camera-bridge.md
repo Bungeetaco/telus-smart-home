@@ -243,10 +243,13 @@ in **time, not frames**: `janus_client.video_queue_maxsize(fps)` returns
 `round(fps × VIDEO_QUEUE_TARGET_MS / 1000)` clamped to 4–8 frames, so ~500 ms of
 tolerance means the same thing on every camera (a flat 4 frames is 267 ms at
 15 fps and 667 ms at 6 fps — one number meaning two different things). The rate
-comes from the camera's own measurement, which `camera_session` remembers across
-rotations and passes into each new session; the first session of a camera, before
-anything has been measured, takes the same 15 fps assumption the fps fallback
-does. The 8-frame ceiling is memory: a decoded 1440×1440 yuv420p frame is
+comes from the camera's own measurement, which `camera_session` keeps under
+review (see "The frame rate is adaptive, not latched") and passes into each new
+session; the first session of a camera, before anything has been measured, takes
+the same 15 fps assumption the fps fallback does. Because the depth is fixed at
+construction and the session is rebuilt every rotation, a rate that changes
+mid-deployment re-sizes the queue at the next rotation with no resize path and no
+frames stranded. The 8-frame ceiling is memory: a decoded 1440×1440 yuv420p frame is
 3.11 MB, so 8 frames is 24.9 MB per camera against the container's 768 MiB limit
 (~435 MiB in use), and 16 would be 49.8 MB for a queue that is not meant to fill.
 Above ~16 fps that ceiling binds before the time target does, deliberately.
@@ -296,6 +299,95 @@ only "locked in" as this camera's `known_fps` if it is plausible (1–60, and
 within 50% of any prior known value); the 15fps fallback is never promoted to
 `known_fps`, so a camera whose first reading was burst-contaminated can still
 correct itself later.
+
+That first batch **bootstraps** the rate. It does not fix it.
+
+### The frame rate is adaptive, not latched
+
+**The frame rate is a device setting, not a property of the camera.** The
+live-video resolution select ships as a Home Assistant entity, so the rate can
+change from HA, from the TELUS app or from the portal — with no restart and no
+signal to the bridge. The same two cameras on this account have come up at 6, 7,
+15 and 29 fps across restarts.
+
+That matters because the rate is not merely reported anywhere: `-framerate <fps>`
+is the **output's constant frame rate** and the basis for `-g`, so a stale
+declaration re-rates the published stream for as long as the process lives.
+Both directions of error are silent and neither is harmless:
+
+| Declared vs. delivered | What ffmpeg does | Cost |
+| --- | --- | --- |
+| **Too high** | pads to CFR with duplicate frames (361 written → 601 encoded) | wasted encode; observed live as `More than 1000 frames duplicated` within 2.5 min on a camera declared at 29 fps |
+| **Too low** | **drops** real frames (1201 written → 1002 encoded) | 199 frames of content gone, permanently |
+
+So `camera_session.RateWatcher` keeps the rate under review for as long as the
+camera streams, and a material change **rebuilds the publisher exactly the way a
+frame-size change does** — which on this platform is the same event, since both
+come from the resolution setting.
+
+**The lifecycle of a rate:**
+
+1. **Bootstrap.** The first batch of a session sets `known_fps` if the camera has
+   none, guarded by the ±50% tolerance above. This measurement can never move a
+   known rate far, and deliberately so: 15 → 7 is a 53% drop that the tolerance
+   rejects, and loosening it would let burst artifacts back in.
+2. **Settle.** Nothing is re-measured until the session has been delivering
+   frames for `RATE_RESAMPLE_SETTLE_S` (10 s). The buffered frames at a session
+   start are the burst that has produced 544, 215 and (live) 62 fps readings for
+   cameras really running at 15 and 30 — and the dangerous ones are the
+   *plausible* burst readings, "38–49 fps for a real 15 fps camera", which no
+   arithmetic can distinguish from a real setting change.
+3. **Measure.** The median of `RATE_RESAMPLE_FRAMES` (90) inter-frame deltas —
+   3 s at 30 fps, 15 s at 6 fps. The median, again, so no single late or bunched
+   frame moves the result.
+4. **Band.** The reading only counts as a change if it leaves an **asymmetric**
+   hysteresis band: `RATE_CHANGE_TOLERANCE_DOWN` (20%) and
+   `RATE_CHANGE_TOLERANCE_UP` (35%). Asymmetric because declaring too low
+   destroys frames while declaring too high only duplicates them, **and** because
+   burst contamination biases a reading *high* and never low — "the camera sped
+   up" is the claim an artifact makes. Both bands clear the jitter this account
+   actually shows (6↔7 across restarts, 17%; a camera set to 15 delivering ~13.4,
+   11%) and none of them should be corrected: 15 is the real setting, and
+   declaring 13 would start dropping the frames that do arrive on time.
+5. **Confirm.** Two consecutive settled batches must agree before anything acts.
+   This is what makes a **flapping source converge rather than oscillate**: a
+   rate alternating between two values never produces two agreeing batches, so it
+   is never confirmed and never rebuilds — which is the right answer for a source
+   that cannot make up its mind.
+6. **Apply, at a rotation.** A confirmed change updates `known_fps` immediately
+   and sets a flag; the publisher is rebuilt at the **next session rotation**,
+   through the same `sink_wh`-style check a frame-size change uses. It is never
+   raised from the streaming loop the way an audio-format change is, because
+   **a rate change must never take the camera off the air**: the rotation gap is
+   already bridged by the frame hold, so the change costs the one glitch a
+   rebuild costs, not a glitch plus a failed session plus a backoff. The flag is
+   re-checked against the current reading at that point, so a rate that wandered
+   and came home rebuilds nothing.
+7. **Bound.** `RATE_REBUILD_MIN_INTERVAL_S` (300 s, a little under two rotations)
+   is the floor between two rate-driven rebuilds, so even a source that defeats
+   every gate above cannot cost more than one glitch per window. It delays a
+   correction; it never cancels one.
+
+**What a rate change does to the queue and the frame hold:**
+
+- **The decoded-frame queue is not resized; it is rebuilt.** It is per-session and
+  sized in *time* at construction (`video_queue_maxsize(known_fps)`), so the next
+  session after a confirmed change simply gets the right depth and the old queue
+  dies with the session that owned it. **No frames are stranded** — the retiring
+  session's queue is discarded with the session, exactly as at every other
+  rotation. Note that between 16 and 30 fps the depth is pinned at the 8-frame
+  memory ceiling, so a rate change inside that band changes the queue depth by
+  nothing at all; the queue depth is not an input to the rebuild decision, so
+  that costs no needless rebuild.
+- **The frame hold keeps repeating at the rate the *running* ffmpeg was declared
+  with** (`sink.fps`), not the newly measured one. Between a confirmed change and
+  the rotation that applies it those two deliberately differ, and a repeated frame
+  only means "one frame" to an ffmpeg reading `-framerate N`.
+- **The audio top-up cadence is unaffected at any rate.** The hold ticks at
+  `min(1/fps, AUDIO_SILENCE_TOPUP_S)`, and the rate is clamped to 1–30, so the
+  video interval is at most 1/30 = 33 ms and the tick can never exceed the 50 ms
+  top-up — half the 100 ms muxer lead the whole pacing fix depends on. No measured
+  rate can push the audio half of that loop past the lead.
 
 ## ffmpeg encode and RTSP publish
 

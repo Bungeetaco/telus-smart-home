@@ -208,7 +208,11 @@ lifetime consumer-fell-behind drop total since process start, accumulated as
 each video session ends. `last_frame_at` says a frame arrived *from the camera*
 and `last_publish_at` says ffmpeg *took* it -- the gap between them is the
 difference between "streaming" and "streaming to nowhere", which nothing in this
-response could express before.
+response could express before. `fps` is the rate the running ffmpeg was
+*declared* with; the bridge keeps re-measuring what the camera actually delivers
+and rebuilds the publisher when the two diverge materially (the rate is a device
+setting and can change with no restart -- see
+`docs/camera-bridge.md`), so this field can legitimately change between polls.
 
 Credentials are swapped in by reassigning the module attributes
 `config.TELUS_EMAIL` / `config.TELUS_PASSWORD` -- `telus_auth.py`'s

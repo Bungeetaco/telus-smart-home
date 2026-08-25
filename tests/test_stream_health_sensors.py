@@ -92,6 +92,11 @@ STATUS_STREAMING = {
     "decoded_audio_frames": 4800,
     "audio_format": "48000Hz/2ch/s16",
     "dropped_audio_frames": 0,
+    # Present on every v1.21.0+ bridge, so the healthy fixture carries them.
+    # A bridge that predates them omits both; test_audio_says_why_it_stopped
+    # pins that case separately.
+    "audio_dropped": False,
+    "audio_dropped_reason": None,
 }
 
 
@@ -335,6 +340,49 @@ def test_audio_first_poll_is_never_stalled():
     print("  ok  audio: the first poll is no_audio_yet at zero, unknown mid-stream, never stalled")
 
 
+def test_audio_says_why_it_stopped_when_the_bridge_dropped_the_pipe():
+    """`stalled` alone cannot distinguish "the audio pipe wedged and the bridge
+    deliberately dropped it to keep video publishing" from "audio just went
+    quiet". The bridge knows which; the entity has to pass it on.
+
+    Deliberately attributes and not a fifth enum state: `stalled` is what an
+    automation acts on either way, and splitting it would break any automation
+    already keyed on it.
+    """
+    coordinator = make_coordinator()
+    entity = CameraAudioStateSensor(coordinator, CAMERA_ID)
+
+    poll(entity, coordinator, {CAMERA_ID: status(decoded_audio_frames=4800)})
+    attrs = entity.extra_state_attributes
+    assert attrs["audio_dropped"] is False
+    assert attrs["audio_dropped_reason"] is None
+
+    value = poll(entity, coordinator, {CAMERA_ID: status(
+        decoded_audio_frames=4800,
+        audio_dropped=True,
+        audio_dropped_reason="ffmpeg stopped reading the audio pipe",
+    )})
+    assert value == AUDIO_STALLED, "a dropped pipe does stop the counter"
+    attrs = entity.extra_state_attributes
+    assert attrs["audio_dropped"] is True
+    assert attrs["audio_dropped_reason"] == "ffmpeg stopped reading the audio pipe", (
+        "the operator must not have to read the container log for the cause"
+    )
+    # A bridge predating these fields omits them entirely. Absent must read as
+    # absent, never as a fabricated False.
+    older = dict(status(decoded_audio_frames=4800))
+    older.pop("audio_dropped")
+    older.pop("audio_dropped_reason")
+    coordinator2 = make_coordinator()
+    entity2 = CameraAudioStateSensor(coordinator2, CAMERA_ID)
+    poll(entity2, coordinator2, {CAMERA_ID: older})
+    attrs = entity2.extra_state_attributes
+    assert attrs["audio_dropped"] is None, "an older bridge is unknown, not False"
+    assert attrs["audio_dropped_reason"] is None
+
+    print("  ok  audio: a deliberately dropped pipe reports why, not just stalled")
+
+
 def test_audio_flowing_then_stalled():
     """The state this entity exists for: a counter that stops moving while every
     other signal stays green."""
@@ -503,6 +551,7 @@ def main():
         test_audio_not_consuming,
         test_audio_old_bridge_is_unknown_not_fabricated,
         test_audio_first_poll_is_never_stalled,
+        test_audio_says_why_it_stopped_when_the_bridge_dropped_the_pipe,
         test_audio_flowing_then_stalled,
         test_audio_zero_stays_no_audio_yet,
         test_audio_unanswered_poll_is_never_stalled,

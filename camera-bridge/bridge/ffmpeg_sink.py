@@ -202,6 +202,25 @@ def _redact_url(url: str) -> str:
     return _URL_CREDENTIALS_RE.sub("://***:***@", url)
 
 
+def clamp_fps(fps) -> int:
+    """The rate ffmpeg is actually declared with, for any measured value.
+
+    start() has always clamped its argument to 1-30 before putting it on the
+    command line, so `sink.fps` -- what `-framerate` and `-g` were really given
+    -- is not always what the caller passed. camera_session.py has to compare a
+    fresh measurement against THAT number rather than against the raw reading
+    (see its RateWatcher): a camera measured at 40fps and one measured at 55fps
+    are both published at 30, so treating either as "the rate moved" would
+    rebuild the publisher for a command line that cannot change. One definition,
+    used by both.
+    """
+    try:
+        rate = float(fps)
+    except (TypeError, ValueError):
+        rate = 15.0
+    return max(1, min(int(round(rate)), 30))
+
+
 def audio_channel_count(frame) -> int:
     """Channels in a decoded av.AudioFrame, across PyAV layout spellings."""
     channels = getattr(getattr(frame, "layout", None), "channels", None)
@@ -321,7 +340,7 @@ class FfmpegSink:
     async def start(self, width: int, height: int, fps: int = 15,
                     audio_format: tuple | None = None):
         self._wh = (width, height)
-        fps = max(1, min(int(round(fps)), 30))
+        fps = clamp_fps(fps)
         # Exposed so callers can log/reason about the fps actually given to ffmpeg
         # (for -framerate/-g) rather than whatever raw value they originally passed in --
         # confirmed live 2026-07-18 that logging the pre-clamp value elsewhere

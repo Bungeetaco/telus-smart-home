@@ -231,6 +231,55 @@ FRAME_SILENCE_TIMEOUT_S = 15
 MAX_ENCODE_DIMENSION = 960
 WEBRTCUP_TIMEOUT_S = 20
 FIRST_FRAME_TIMEOUT_S = 20
+
+# --- Adaptive frame rate (camera_session.RateWatcher) ------------------------
+# The frame rate is a DEVICE SETTING, not a property of the camera discovered
+# once: the live-video resolution select is a Home Assistant entity, so it can
+# be changed from HA, from the TELUS app or from the portal with no restart and
+# no signal to this bridge. ffmpeg is told the rate once, on the command line
+# (`-framerate`, which is the OUTPUT's constant frame rate, plus `-g` for a ~1s
+# GOP), so a stale value re-rates the published stream for as long as the
+# process lives -- duplicating frames when it is too high (measured live: a
+# camera declared at 29fps logged "More than 1000 frames duplicated" within 2.5
+# minutes) and DROPPING them when it is too low. The four constants below are
+# what stop the correction for that becoming a rebuild loop, because every
+# rebuild tears the publisher down and kicks every RTSP reader off the path.
+#
+# How long a session must have been delivering frames before any of them are
+# measured. The first batch of a session is taken from the first ten frames and
+# is demonstrably unreliable -- a rotation's buffered frames arrive in a burst
+# and have produced 544fps, 215fps and (live, on the doorbell) 62fps readings
+# for cameras really running at 15 and 30. 10s is far past any plausible buffer
+# drain while still leaving ~155s of every 165s session measurable.
+RATE_RESAMPLE_SETTLE_S = 10.0
+# Inter-frame deltas per settled measurement, taken as a median. 90 frames is 3s
+# at 30fps and 15s at 6fps -- long enough that no single late or bunched frame
+# moves the result, short enough for several independent measurements per
+# session even on the slowest camera on this account.
+RATE_RESAMPLE_FRAMES = 90
+# The hysteresis band: how far a settled measurement has to sit from the rate
+# ffmpeg was DECLARED with before it counts as a change rather than as jitter.
+#
+# ASYMMETRIC, deliberately, because the two errors are not equally bad and
+# measurement noise is not symmetric either (the full reasoning, with the
+# in-container numbers, is on camera_session._rate_moved):
+#   * declaring too HIGH pads the output with duplicate frames -- wasteful, but
+#     no content is lost;
+#   * declaring too LOW makes ffmpeg DROP real frames -- 1201 written frames
+#     encoded as 1002 in the sink's own measurements, 199 of them gone;
+#   * burst-contaminated readings are biased HIGH, never low, so "the camera is
+#     faster than we thought" is the claim an artifact makes.
+# Both bands clear the jitter actually observed on this account: the same camera
+# reading 6 and 7 across restarts (a 17% step) and a camera set to 15 delivering
+# ~13.4 (11%) must not trigger anything, while the real setting changes are
+# -53% (15 -> 7), +100% (15 -> 30) and -24% (the live 29 -> ~22).
+RATE_CHANGE_TOLERANCE_DOWN = 0.20
+RATE_CHANGE_TOLERANCE_UP = 0.35
+# Floor on the gap between two rate-driven publisher rebuilds. A rebuild costs a
+# visible glitch, so even a source that defeats the settle window, the median,
+# the band AND the two-measurements-must-agree confirmation cannot cost more
+# than one glitch per window. 300s is a little under two session rotations.
+RATE_REBUILD_MIN_INTERVAL_S = 300
 JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side; keep well under that
 
 # --- EXPERIMENT: ask the Janus mountpoint for a downstream AUDIO track ------
