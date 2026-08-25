@@ -59,11 +59,219 @@ def _audio_format_str(fmt) -> str | None:
     return f"{fmt[1]}Hz/{fmt[2]}ch/{fmt[0]}"
 
 
+# --- the frame rate is a DEVICE SETTING, not a constant discovered once -------
+# Absolute sanity range for ANY fps measurement, first batch or settled. Outside
+# it the reading is an artifact of how frames were delivered, not a rate: a
+# rotation's buffered frames arriving back-to-back have produced 544, 215 and 62
+# fps for cameras whose real rates are 15 and 30.
+_RATE_PLAUSIBLE_MIN = 1
+_RATE_PLAUSIBLE_MAX = 60
+
+
+def _median(values):
+    """Middle value of `values` (mean of the middle two when even), or None.
+
+    One definition for both fps measurements -- the first batch's and the
+    settled re-measurement's -- because they are the same statistic answering
+    the same question, and a second copy is a second thing to get wrong.
+    """
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _fps_from_deltas(deltas):
+    """Frames per second implied by a batch of inter-frame deltas, or None if
+    the batch does not imply a plausible rate.
+
+    The MEDIAN delta, never the span divided by the count: the span form takes
+    its worst-case hit from just the first and last timestamps, so one
+    buffered/burst frame at either end contaminates the whole estimate even when
+    every frame in between arrived at the camera's real pace. The median is only
+    fooled if a MAJORITY of the batch is contaminated.
+    """
+    median_delta = _median(list(deltas))
+    if not median_delta or median_delta <= 0:
+        return None
+    measured = round(1 / median_delta)
+    if not _RATE_PLAUSIBLE_MIN <= measured <= _RATE_PLAUSIBLE_MAX:
+        return None
+    return measured
+
+
+def _rate_moved(declared, wanted) -> bool:
+    """Has the rate moved far enough from what ffmpeg was DECLARED with to be
+    worth rebuilding the publisher for?
+
+    The band is ASYMMETRIC, and which way round is settled by measurement rather
+    than taste. Both errors are silent, but they are not equally bad:
+
+      * Declaring HIGHER than the source delivers pads the output to CFR with
+        duplicated frames -- 15 declared against 9 delivered encoded 361 written
+        frames as 601 (see ffmpeg_sink's table), and live, a camera declared at
+        29fps logged "More than 1000 frames duplicated" within 2.5 minutes.
+        Wasted encode, wrong pacing, but no content is lost.
+      * Declaring LOWER than the source delivers DROPS real frames -- 30fps fed
+        into an effective 25 encoded 1201 written frames as 1002, losing 199 of
+        them. That content is gone.
+
+    So the downward correction (we are declaring too high) is the cheaper one to
+    get wrong in the other direction, and the upward one destroys frames if it
+    fires on noise. Measurement error points the same way: burst-contaminated
+    readings are biased HIGH -- buffered frames arrive back-to-back, never
+    slower than real time -- so "the camera is faster than we thought" is
+    exactly the claim an artifact makes, and deserves more scepticism than "the
+    camera is slower than we thought".
+
+    Both bands sit above the jitter this project has actually observed. The same
+    camera has read 6 and 7 across restarts with nothing changed (a 17% step,
+    inside both bands), and a camera whose setting is 15 delivers ~13.4 (an 11%
+    step) -- which must NOT be corrected to 13, because 15 is the real setting
+    and declaring 13 would start dropping the frames that do arrive on time.
+    Real setting changes on this platform are far larger: 15 -> 7 is -53%,
+    15 -> 30 is +100%, and the live 29 -> ~22 implied by that duplication rate
+    is -24%.
+    """
+    if not declared or declared <= 0 or wanted is None:
+        return False
+    if wanted < declared:
+        return (declared - wanted) > c.RATE_CHANGE_TOLERANCE_DOWN * declared
+    return (wanted - declared) > c.RATE_CHANGE_TOLERANCE_UP * declared
+
+
+class RateWatcher:
+    """Keeps one camera's frame rate under review for as long as it streams, and
+    says when the publisher has to be rebuilt for a change.
+
+    The rate is a DEVICE SETTING -- the live-video resolution select ships as a
+    Home Assistant entity, so the rate can change from HA, from the TELUS app or
+    from the portal, with no restart and no signal to this bridge. Measuring it
+    once and latching it for the life of the process is therefore wrong by
+    construction rather than merely imprecise: `-framerate` is the OUTPUT's
+    constant frame rate and the basis for `-g`, so a stale value duplicates or
+    drops frames for as long as the process lives.
+
+    Every rebuild costs a real glitch -- the publisher is torn down, MediaMTX
+    destroys the path, every RTSP reader is kicked and every HLS viewer gets a
+    discontinuity -- so four separate things stand between a measurement and a
+    rebuild, and each of them is load-bearing:
+
+      * A SETTLE WINDOW (config.RATE_RESAMPLE_SETTLE_S). The first measurement
+        of a session is taken from the first ten frames and is demonstrably
+        unreliable: a rotation's buffered frames arrive in a near-instant burst,
+        which has produced 544, 215 and (live, on the doorbell) 62fps readings
+        for cameras running at 15 and 30. Nothing is measured until the session
+        has been delivering frames for this long, so the burst is behind us.
+      * A BATCH (config.RATE_RESAMPLE_FRAMES) with the median taken over it, so
+        a single late or bunched frame moves nothing.
+      * A HYSTERESIS BAND (_rate_moved), so ordinary measurement jitter never
+        starts a rebuild loop.
+      * CONFIRMATION: two consecutive settled batches must agree with each other
+        before anything is acted on. This is what makes a FLAPPING source
+        CONVERGE rather than oscillate -- a rate that alternates between two
+        values never produces two agreeing batches in a row, so it is never
+        confirmed and never rebuilds, which is the right answer for a source
+        that cannot make up its mind.
+      * A MINIMUM INTERVAL (config.RATE_REBUILD_MIN_INTERVAL_S) between
+        rate-driven rebuilds, so even a source that defeats all of the above
+        cannot cost more than one glitch per window.
+
+    It never decides anything by itself: it returns a confirmed rate and the
+    caller applies it through the same sink-rebuild path a frame-size change
+    already takes, at the next session rotation. Nothing here can fail a live
+    session or take a camera off the air.
+    """
+
+    def __init__(self, camera_id: str):
+        self.camera_id = camera_id
+        self._deltas: list[float] = []
+        self._prev_at: float | None = None
+        self._settle_until: float | None = None
+        # The last settled batch that asked for a change, waiting for a second
+        # batch to agree with it. Deliberately survives a rotation: it is a fact
+        # about the camera, not about one session.
+        self.candidate: int | None = None
+        self.last_rebuild_at: float | None = None
+
+    def session_started(self, now: float):
+        """A new Janus session is streaming. Restart the settle window and throw
+        away any partial batch: the frames on either side of a rotation are the
+        burst this whole mechanism exists to not measure."""
+        self._deltas = []
+        self._prev_at = None
+        self._settle_until = now + c.RATE_RESAMPLE_SETTLE_S
+
+    def rebuilt(self, now: float):
+        """The caller rebuilt the publisher for a rate change; start the
+        minimum-interval clock."""
+        self.last_rebuild_at = now
+
+    def note_frame(self, now: float, declared):
+        """Record one live frame's arrival. Returns a newly CONFIRMED rate for
+        this camera, or None -- which is almost always the answer."""
+        if self._settle_until is None or now < self._settle_until:
+            return None
+        if self._prev_at is not None:
+            self._deltas.append(now - self._prev_at)
+        self._prev_at = now
+        if len(self._deltas) < c.RATE_RESAMPLE_FRAMES:
+            return None
+        deltas, self._deltas = self._deltas, []
+        return self._observe(_fps_from_deltas(deltas), declared, now)
+
+    def _observe(self, measured, declared, now):
+        if measured is None or not declared:
+            # An unmeasurable batch is not evidence of anything, and it must not
+            # be able to CONFIRM the batch before it either.
+            self.candidate = None
+            return None
+        # Compare against what ffmpeg would actually be given, not the raw
+        # reading: 40 and 55 are both published at 30, and "the rate moved" has
+        # to mean "the command line would change".
+        wanted = ffmpeg_sink.clamp_fps(measured)
+        if not _rate_moved(declared, wanted):
+            self.candidate = None
+            return None
+        if self.candidate is None or _rate_moved(self.candidate, wanted):
+            # First sighting, or a sighting that disagrees with the pending one.
+            # Either way this batch becomes the thing the NEXT batch has to
+            # agree with -- a flapping source lands here forever.
+            self.candidate = wanted
+            log.info("%s: measured %dfps against the declared %dfps -- waiting for a "
+                     "second measurement to agree before rebuilding the publisher",
+                     self.camera_id, wanted, declared)
+            return None
+        self.candidate = None
+        if self.last_rebuild_at is not None and \
+                now - self.last_rebuild_at < c.RATE_REBUILD_MIN_INTERVAL_S:
+            log.warning("%s: the frame rate has moved again (%dfps against the declared "
+                        "%dfps) only %.0fs after the last rate rebuild -- holding off "
+                        "until %ds have passed rather than glitching the stream again",
+                        self.camera_id, wanted, declared, now - self.last_rebuild_at,
+                        c.RATE_REBUILD_MIN_INTERVAL_S)
+            return None
+        return measured
+
+
 async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
     consecutive_failures = 0  # reset on any successful frame batch; see the
     # os._exit() escape hatch in the except block below for why this exists.
-    known_fps = None  # learned once, reused across rotations for this camera
+    # This camera's current best answer for its own frame rate: bootstrapped from
+    # the first batch of a session and then kept under review by the RateWatcher
+    # below, because it is a DEVICE SETTING that can change at any time. It is
+    # NOT "learned once and reused forever" -- that was E64.
+    known_fps = None
+    # A confirmed rate change waiting to be applied. It is applied at the next
+    # session rotation, through the same sink-rebuild path a frame-size change
+    # takes, rather than by failing the live session: the rotation gap is already
+    # bridged by the frame hold, so the rebuild costs the glitch it costs and not
+    # a moment of dark stream on top of it.
+    rate_rebuild_needed = False
 
     camera_id = camera["id"]
     # Resolved ONCE for this camera, here, and handed down to every component
@@ -120,6 +328,10 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # total per camera.
     dropped_frames_total = 0
     dropped_audio_frames_total = 0
+    # Re-measures the rate while the stream runs; see RateWatcher for why the
+    # first batch alone cannot be trusted with it and what stands between a
+    # measurement and a rebuild.
+    rate = RateWatcher(camera_id)
     # Lifetime total of decoded audio frames this camera's sessions have handed
     # to the publisher. Unlike the two drop counters it is NOT folded in at
     # session end -- it is incremented by the pump as each frame arrives, so it
@@ -288,7 +500,15 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # nothing can be mid-write when the silence below starts, and the next
         # session's pump is not started until _stop_hold has finished.
         await _stop_audio_pump()
-        interval = 1.0 / max(1, min(int(known_fps or 15), 30))
+        # The rate the RUNNING ffmpeg was DECLARED with, not the most recent
+        # measurement. Those two are deliberately different for a while whenever
+        # a rate change has been confirmed and is waiting for the next rotation
+        # to be applied (see RateWatcher), and during that window the repeated
+        # frames still have to arrive at the pace the current publisher expects
+        # -- it is `-framerate` on the live command line that defines what one
+        # repeated frame means, and nothing else. known_fps is only the
+        # bootstrap for the first hold of a camera, before any sink exists.
+        interval = 1.0 / ffmpeg_sink.clamp_fps(sink.fps or known_fps or 15)
         # The two writers tick at DIFFERENT rates, and they have to. Video is
         # repeated at the camera's own frame interval, because that is the rate
         # ffmpeg was told to expect (-framerate) and writing faster would
@@ -298,6 +518,14 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # config.AUDIO_SILENCE_TOPUP_S). Ticking both at 1/fps is fine at 15fps
         # (67 ms) and quietly wrong at 6fps (167 ms, well past the lead) -- so the
         # loop ticks at whichever is shorter and writes video on its own schedule.
+        #
+        # That min() is what makes the audio cadence SAFE AT ANY RATE, which is
+        # what an adaptive rate needs from it: clamp_fps bounds the interval at
+        # 1/30 = 33 ms and AUDIO_SILENCE_TOPUP_S is 50 ms, so the tick can never
+        # exceed 50 ms -- half of ffmpeg_sink._AUDIO_PRIME_MS (100 ms), the
+        # muxer lead the whole pacing fix depends on -- no matter what rate is
+        # measured. A rate change moves the VIDEO half of this loop and cannot
+        # move the audio half past that ceiling.
         tick = min(interval, c.AUDIO_SILENCE_TOPUP_S) if sink.audio_enabled else interval
         next_video_at = time.monotonic()
         while time.monotonic() - last_live < c.FRAME_HOLD_MAX_S:
@@ -427,14 +655,25 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # looking but still-wrong values like 38-49fps for a real 15fps camera,
                 # seen live 2026-07-18 during a rapid activate/deactivate crash loop).
                 # A bare 1-60 range only catches the extreme cases; once known_fps is
-                # set, require the new measurement to land within 50% of it too, since
-                # a camera's real fps doesn't change between rotations -- a bad
+                # set, require the new measurement to land within 50% of it too -- a bad
                 # burst-artifact reading would otherwise silently overwrite a correct
-                # known_fps and mismatch ffmpeg's declared -r for every rotation after.
-                # ffmpeg_sink.py ties -g to this same fps value (~1s GOP by design), so
-                # a wrong reading still skews the real wall-clock keyframe interval
-                # relative to actual pacing, just less unpredictably than when -g was a
-                # fixed frame count independent of fps.
+                # known_fps and mismatch what ffmpeg was declared with for every rotation
+                # after. ffmpeg_sink.py puts that same value on `-framerate` (the OUTPUT's
+                # constant frame rate) and ties `-g` to it for a ~1s GOP, so a wrong
+                # reading both re-rates the published stream and skews the keyframe
+                # interval.
+                #
+                # That +/-50% tolerance is also why THIS batch cannot be the thing that
+                # notices a real setting change. The rate is a device setting and does
+                # change (E64): 15 -> 7 is a 53% drop and would be rejected here, and
+                # loosening the tolerance would put burst artifacts straight back into
+                # known_fps. So the two measurements have different jobs and different
+                # rules. This one BOOTSTRAPS a rate for a camera that has none, and
+                # refuses anything far from what is already known. The settled
+                # re-measurement in the streaming loop below (RateWatcher) is the one
+                # allowed to move a known rate a long way, and it earns that by measuring
+                # far more frames, well clear of the burst, and by requiring two
+                # independent batches to agree before anything is rebuilt.
                 fps = known_fps or 15
                 if len(first_frames) >= 2:
                     # Median inter-frame delta, not total-span/(count-1) -- the total-span
@@ -449,18 +688,14 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # lifetime -- there was no history yet to compare the bad *first* reading
                     # against. The median of all consecutive deltas only gets fooled if a
                     # MAJORITY of the batch is burst-contaminated, not just one endpoint.
-                    deltas = sorted(
+                    median_delta = _median([
                         first_frames[i][0] - first_frames[i - 1][0]
                         for i in range(1, len(first_frames))
-                    )
-                    mid = len(deltas) // 2
-                    median_delta = (
-                        deltas[mid] if len(deltas) % 2
-                        else (deltas[mid - 1] + deltas[mid]) / 2
-                    )
+                    ])
                     measured = round(1 / median_delta) if median_delta > 0 else None
                     plausible = (
-                        measured is not None and 1 <= measured <= 60
+                        measured is not None
+                        and _RATE_PLAUSIBLE_MIN <= measured <= _RATE_PLAUSIBLE_MAX
                         and (known_fps is None or 0.5 * known_fps <= measured <= 1.5 * known_fps)
                     )
                     if plausible:
@@ -505,6 +740,31 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 desired_audio_fmt = (
                     (known_audio_fmt or c.AUDIO_DEFAULT_FORMAT) if consume_audio else None)
                 audio_rebuild_needed = False
+                # A confirmed frame-rate change is applied HERE, at a rotation
+                # boundary, and nowhere else -- the frame hold is already bridging
+                # this gap, so the rebuild costs one glitch rather than a glitch
+                # plus a failed session plus a backoff. That is also why it is not
+                # raised from the streaming loop the way an audio-format change is:
+                # a rate change must never take the camera off the air.
+                #
+                # Re-checked against the CURRENT reading rather than trusted from
+                # when it was confirmed: this session's own first batch may have
+                # already moved known_fps back inside the band (a rate that
+                # wandered and came home), and rebuilding for a rate that no longer
+                # differs would be a glitch for nothing. Checking here is what makes
+                # the mechanism converge.
+                rate_changed = (
+                    rate_rebuild_needed and sink is not None
+                    and _rate_moved(sink.fps, ffmpeg_sink.clamp_fps(fps)))
+                if rate_rebuild_needed and not rate_changed and sink is not None:
+                    # Only worth saying when there IS a publisher to have kept. With
+                    # no sink at all one is about to be built at the new rate anyway,
+                    # which is not "the change was dropped".
+                    log.info("%s: the confirmed rate change is no longer a change "
+                             "(declared %sfps, now measuring %sfps) -- keeping the "
+                             "publisher", camera["id"], sink.fps,
+                             ffmpeg_sink.clamp_fps(fps))
+                rate_rebuild_needed = False
                 # `sink.proc is None` means a previous start() raised partway through
                 # (both encoders failed to survive the startup grace period -- what an
                 # RTSP ANNOUNCE to a momentarily-down MediaMTX looks like). Such a sink
@@ -531,7 +791,21 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # same reason a changed frame size is: ffmpeg was told the
                         # pipe's shape once, on the command line, and cannot be
                         # told again.
-                        or sink_audio_fmt != desired_audio_fmt):
+                        or sink_audio_fmt != desired_audio_fmt
+                        # ...and a changed FRAME RATE, for the third time the same
+                        # reason: `-framerate` and `-g` were set once, on the command
+                        # line. The rate is a device setting that can change while
+                        # this process runs, so this is the same class of event as a
+                        # frame-size change -- on this platform it literally is one,
+                        # since both come from the live-video resolution setting.
+                        or rate_changed):
+                    if rate_changed:
+                        log.warning(
+                            "%s: frame rate changed (declared %sfps, now measuring "
+                            "%sfps) -- rebuilding the publisher at this rotation so "
+                            "-framerate and -g describe the stream again. Readers will "
+                            "see one reconnect; this is not a fault.",
+                            camera["id"], sink.fps, ffmpeg_sink.clamp_fps(fps))
                     await sink.stop()
                     sink = None
                 if sink is None:
@@ -540,6 +814,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     new_sink = FfmpegSink(camera["id"])
                     await new_sink.start(w, h, fps, audio_format=desired_audio_fmt)
                     sink, sink_wh = new_sink, (w, h)
+                    if rate_changed:
+                        # Start the minimum-interval clock only once a rebuild has
+                        # actually happened, so a rebuild that never took place
+                        # cannot suppress a later, genuine one.
+                        rate.rebuilt(time.monotonic())
                     # What this ffmpeg was LAUNCHED with -- the command line is
                     # what the rebuild check above is really about, and start()
                     # can legitimately come up video-only anyway (an unsupported
@@ -598,6 +877,10 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # checking it only after a frame lands is exactly what let the bridge hang
                 # forever once frames stopped coming entirely.
                 rotate_deadline = time.monotonic() + c.SESSION_MAX_LIFETIME_S
+                # Nothing measured until this session has been delivering frames
+                # for RATE_RESAMPLE_SETTLE_S -- the batch just consumed above is
+                # exactly the unreliable one (see RateWatcher).
+                rate.session_started(time.monotonic())
                 frame_iter = session.frames()
                 while True:
                     if audio_rebuild_needed:
@@ -628,6 +911,16 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     last_frame = frame
                     last_live = time.monotonic()
                     _update_status(last_frame_at=time.time())
+                    # The rate under review, measured from live frames only. A
+                    # confirmed change updates this camera's remembered rate
+                    # immediately -- so the NEXT session's decoded-frame queue is
+                    # sized from it (janus_client.video_queue_maxsize) and a sink
+                    # rebuilt for any other reason already uses it -- and asks for
+                    # the publisher to be rebuilt at the next rotation.
+                    confirmed = rate.note_frame(last_live, sink.fps)
+                    if confirmed is not None:
+                        known_fps = confirmed
+                        rate_rebuild_needed = True
                     if not await sink.write_frame(frame):
                         # last_frame_at (a frame arrived from the camera) has
                         # already moved; last_publish_at (ffmpeg took it) has

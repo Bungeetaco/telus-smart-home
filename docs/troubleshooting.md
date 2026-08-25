@@ -22,6 +22,8 @@ the component READMEs.
 - [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
 - [The status says `streaming` but MediaMTX has no path](#the-status-says-streaming-but-mediamtx-has-no-path)
 - [A live view drifts further behind real time the longer it runs](#a-live-view-drifts-further-behind-real-time-the-longer-it-runs)
+- [`frame rate changed` — the publisher rebuilds and readers reconnect once](#frame-rate-changed--the-publisher-rebuilds-and-readers-reconnect-once)
+- [`More than 1000 frames duplicated` on a healthy-looking camera](#more-than-1000-frames-duplicated-on-a-healthy-looking-camera)
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [A camera's stream carries no audio, or the audio stops](#a-cameras-stream-carries-no-audio-or-the-audio-stops)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
@@ -459,7 +461,87 @@ trades this symptom for another one: the demuxer then falls back to its default
 as `More than 1000 frames duplicated` in the ffmpeg log, plus encode load and
 bitrate well above the camera's real rate) or dropping them for a faster one, and
 `-g <fps>` no longer spans ~1 s. See
-[camera-bridge.md](camera-bridge.md) for the measurements.
+[camera-bridge.md](camera-bridge.md) for the measurements. That duplication
+warning has a second, more common cause — a declared rate that is simply higher
+than the camera delivers — which is
+[its own section below](#more-than-1000-frames-duplicated-on-a-healthy-looking-camera).
+
+---
+
+## `frame rate changed` — the publisher rebuilds and readers reconnect once
+
+**Symptom.** A camera's RTSP readers all reconnect at once, HLS viewers see one
+discontinuity, and the log carries:
+
+```
+<camera-id>: measured 7fps against the declared 15fps -- waiting for a second measurement to agree before rebuilding the publisher
+<camera-id>: frame rate changed (declared 15fps, now measuring 7fps) -- rebuilding the publisher at this rotation so -framerate and -g describe the stream again. Readers will see one reconnect; this is not a fault.
+<camera-id>: ffmpeg publishing 960x540@7fps (source 1280x720) to ... (hw/vaapi, video only)
+```
+
+**This is not a fault.** It is the bridge doing the right thing. The frame rate
+is a *device setting* — the live-video resolution select ships as a Home
+Assistant entity — so it can be changed from HA, the TELUS app or the portal with
+no restart and no signal to the bridge. ffmpeg is told the rate once, on its
+command line (`-framerate`, which is the output's constant frame rate, and `-g`
+for a ~1 s GOP), and cannot be told again, so the only way to honour a changed
+rate is to rebuild the publisher — exactly as for a changed frame size.
+
+**What to expect.** One reconnect, at a session rotation, and no gap in the
+published video beyond the rotation's own brief freeze (the frame hold bridges
+it). `/control/status` reports the new rate in `fps` from the next session on.
+`consecutive_failures` stays at `0` — a rate change never fails a session and
+never counts toward the container-restart escape hatch.
+
+**When it *would* be worth investigating:**
+
+- **It repeats.** A rate change needs two consecutive settled measurements to
+  agree, and there is a 300 s floor (`RATE_REBUILD_MIN_INTERVAL_S`) between two
+  rate-driven rebuilds, so this line should be rare. Seeing it every few minutes
+  means a camera whose delivered rate genuinely swings across the hysteresis
+  band — check `dropped_frames` and the network path to the camera before
+  suspecting the bridge.
+- **It is preceded by `holding off`.** The line
+  `the frame rate has moved again ... holding off until 300s have passed` means
+  the storm bound suppressed a rebuild. One is unremarkable; a run of them means
+  the source really is flapping.
+- **The new rate looks wrong.** Compare it against the camera's resolution
+  setting in Home Assistant. The bridge measures what actually arrives, so a
+  measured rate well below the configured one is a delivery problem (upstream
+  bandwidth, a struggling camera), not a measurement bug.
+
+---
+
+## `More than 1000 frames duplicated` on a healthy-looking camera
+
+**Symptom.** ffmpeg logs `[vf#0:0] More than 1000 frames duplicated` for one
+camera, minutes into a session. The picture is fine and nothing else complains.
+
+**What it means.** ffmpeg is padding the output to keep it CFR, because it is
+being told a frame rate **higher than the source actually delivers**. Every
+padded frame is encode work and bitrate spent on a frame that carries nothing.
+
+**Two different causes, and they need opposite fixes:**
+
+| Cause | How to tell | Fix |
+| --- | --- | --- |
+| The declared rate is too high for what this camera delivers | the publish line shows a specific rate (`...@29fps`) and the duplication starts within a few minutes | nothing — the adaptive re-measurement corrects it; see the section above. If it *never* corrects, the gap is inside the hysteresis band (under 20% low), which is deliberate |
+| No rate was declared at all | `-framerate` missing from the publisher's argv, output lands at exactly 25 fps | a regression — `-framerate <fps>` must be on the raw video input; see [camera-bridge.md](camera-bridge.md) |
+
+**Check** which one it is from the publisher's own command line:
+
+```sh
+docker exec telus-cam-bridge sh -c 'tr "\0" " " < /proc/<pid>/cmdline'
+```
+
+There must be a `-framerate <fps>` before `-i pipe:0`, and no `-r` there at all.
+
+**Note the direction.** Duplication is the *cheaper* of the two rate errors:
+nothing is lost, only wasted. Declaring a rate **lower** than the camera delivers
+makes ffmpeg *drop* real frames instead (measured: 1201 written, 1002 encoded,
+199 gone) and produces no warning at all. That asymmetry is why the bridge
+corrects a too-high declaration at a 20% gap but requires 35% before accepting
+that a camera has sped up.
 
 ---
 

@@ -33,22 +33,24 @@ and evidence. Grouped by whether anything can actually be done about them.
   nowhere" detectable. **Both audio knobs stay `false` until a multi-session run
   on the doorbell confirms it** — re-enable on the doorbell only, and watch the
   four signals listed at the end of E62.
-- **E64** (open) — the frame rate is latched for the life of a process, but it
-  is a *device setting* that can change at any time (the resolution select is
-  already an HA entity). Measured 7 vs 15 on the same camera across restarts;
-  `-framerate` then bakes the wrong one in. Must become adaptive, rebuilding the
-  sink on a material change the way a frame-size change already does.
 - **E65** (open, minor) — the MediaMTX publish password is passed on ffmpeg's
   argv, so it shows in `docker top`. Loopback-scoped, but avoidable.
 - **E66** (open) — the integration now has a test harness (E63), but it covers
   two modules. The config flow, the three services, the settings-backed
   platforms and every setup/teardown path are still verified by reading and
   `py_compile` alone.
-- **E67** (open, minor) — the HA Audio state sensor reads `stalled` without the
-  cause; the bridge now knows it (`audio_dropped_reason`) but the integration
-  does not read it.
 - **E68** (open) — the E60/E62 pacing fix was measured against `-f null -`, so
   the RTSP-muxer side of it is inferred rather than captured.
+- **E72** (open) — the E64 thresholds are pinned as logic but not as values;
+  two of the shipped constants can be set to self-defeating values with every
+  suite still green.
+- **E71** (open) — E64's adaptive frame rate is argued from measurement and
+  pinned by tests, but has never been watched correcting a real resolution
+  change live. Five-minute check; not run because the bridge is mid-soak.
+- **E69 / E70** (open, minor) — `/control/status` reports the declared frame
+  rate but not the measured one, and ffmpeg's `frames duplicated` warning is
+  logged but never counted. Both are observability for the rate, not the rate
+  itself.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -1438,9 +1440,9 @@ when it ships.
   `last_publish_at` and `last_frame_at` on every poll; and
   `decoded_audio_frames` still climbing.
 
-  **Two gaps recorded rather than dropped:** the integration does not surface
-  `audio_dropped_reason`, so the HA **Audio state** sensor reads `stalled`
-  without the cause — an attribute addition in `sensor.py`, tracked as **E67**.
+  **Two gaps recorded rather than dropped:** the HA **Audio state** sensor read
+  `stalled` without the cause, because the integration did not surface
+  `audio_dropped_reason` — closed by **E67**.
   And every container measurement behind these four changes output to
   `-f null -`, never a live RTSP publish into MediaMTX, so the muxer-target side
   of the pacing is **inferred, not captured** — tracked as **E68**.
@@ -1640,39 +1642,93 @@ survived. Restored here with their current status rather than as they were.
   **Not covered — see E66**, which carries the list rather than leaving it
   implied.
 
-- **E64 (open) The measured fps is unstable across restarts, and `-framerate`
-  bakes it in.** The same indoor camera has been observed locking
-  `known_fps = 7` for one process lifetime and `15` for another, with no change
-  to the camera. It currently delivers about **13.4 fps** measured from ffmpeg's
-  stdin throughput, so `-framerate 15` makes ffmpeg duplicate roughly 11% of
-  frames, and `-framerate 7` would have made it drop half of them.
+- **E64 (DONE) The frame rate is adaptive, not latched.** The measured fps was
+  latched for the life of a process, and `-framerate` bakes it into the output.
+  The same indoor camera locked `known_fps = 7` for one process lifetime and
+  `15` for another with no change to the camera; the doorbell has logged
+  `implausible fps measurement 62`; and the live v1.21.0 deployment measured
+  **29 fps** on a camera that then logged `More than 1000 frames duplicated`
+  within 2.5 minutes — the declared rate exceeding what the source delivers,
+  observed rather than reasoned about.
 
-  The measurement is a median of frame deltas taken from the first batch of a
-  session, with a plausibility lock so a burst cannot overwrite a real value —
-  but a burst at the *start*, before anything is locked, sets the value for the
-  whole process. It matters more now than it used to: with `-r` the declared
-  rate only shaped the (broken) timeline, whereas `-framerate` makes it the
-  output's constant frame rate and the basis for `-g`.
+  The rate is a **device setting**, not a property of the camera: the live-video
+  resolution select ships as an HA entity (E34), so it can change from HA, the
+  TELUS app or the portal with no restart and no signal to the bridge. Latching
+  it was therefore wrong by construction, not merely imprecise.
 
-  **The frame rate must be treated as adaptive, not as a constant discovered
-  once.** It is a *device setting* — the live-video resolution select already
-  ships as an HA entity (E34), and changing it changes what the bridge receives.
-  So the rate can legitimately change mid-deployment, from the TELUS app, from
-  Home Assistant, or from the portal, with no restart and no signal to the
-  bridge. Anything that latches a rate for the life of a process is therefore
-  wrong by construction, not merely imprecise: it was already wrong for one
-  process (7 vs 15 on the same camera), and it will be wrong again the first
-  time somebody changes the resolution while the bridge is running.
+  **Shipped:** `camera_session.RateWatcher` re-measures while the stream runs and
+  rebuilds the publisher through the same path a frame-size change takes — on
+  this platform the same event, since both come from the resolution setting.
 
-  `-framerate` makes this sharper than `-r` did. The declared rate is now the
-  output's constant frame rate and the basis for `-g`, so a stale value means
-  ffmpeg duplicates or drops frames for as long as the process lives.
+  **Why each threshold is what it is.** Every rebuild kicks every RTSP reader off
+  the MediaMTX path, so the cost of a false positive is real and five gates stand
+  between a measurement and a rebuild:
 
-  The fix should re-measure after the stream settles and **rebuild the sink when
-  the rate has moved materially**, exactly as it already does on a frame-size
-  change — that mechanism exists and is the precedent to follow (`sink_wh`).
-  Treat a resolution/rate change as the same class of event as a size change,
-  because on this platform it literally is one.
+  | Gate | Value | Evidence |
+  |---|---|---|
+  | Settle window | `RATE_RESAMPLE_SETTLE_S = 10 s` | The session-start burst has produced 544, 215 and 62 fps readings. The dangerous ones are the *plausible* burst readings — "38–49 fps for a real 15 fps camera" — which no arithmetic can tell from a real change. Leaves ~155 s of every 165 s session measurable. |
+  | Batch | `RATE_RESAMPLE_FRAMES = 90`, median | 3 s at 30 fps, 15 s at 6 fps; no single late or bunched frame moves a median of 90. |
+  | Hysteresis (down) | `RATE_CHANGE_TOLERANCE_DOWN = 0.20` | Must clear observed jitter (6↔7 across restarts = 17%) while catching the live 29 → ~22 (−24%) implied by that duplication rate. |
+  | Hysteresis (up) | `RATE_CHANGE_TOLERANCE_UP = 0.35` | Wider, deliberately — see below. Still catches +100% (15 → 30) and +150% (6 → 15). |
+  | Confirmation | 2 consecutive settled batches must agree | One batch acting alone is exactly the defect being fixed. Also what makes a flapping source **converge**: alternating rates never produce two agreeing batches, so nothing is ever confirmed. |
+  | Storm bound | `RATE_REBUILD_MIN_INTERVAL_S = 300 s` | Just under two rotations. Delays a correction, never cancels one. |
+
+  **The band is asymmetric, and the direction is settled by measurement, not
+  taste.** From `ffmpeg_sink`'s own in-container table: declaring **above** what
+  the source delivers pads to CFR with duplicates (361 written → 601 encoded) —
+  wasteful, nothing lost; declaring **below** it makes ffmpeg **drop** real
+  frames (1201 written → 1002 encoded, **199 gone**) — content destroyed. And
+  measurement error is asymmetric the same way, because buffered frames arrive
+  back-to-back and never slower than real time, so a contaminated batch always
+  reads *fast*. Both arguments point one way: be readier to lower a declared rate
+  than to raise it. A camera *set* to 15 that delivers ~13.4 (−11%) is
+  deliberately left alone — 15 is the real setting, and declaring 13 would start
+  dropping the frames that do arrive on time.
+
+  **A rate change never takes the camera off the air.** The rebuild is applied at
+  the next session rotation, not by raising from the streaming loop the way an
+  audio-format change does: the rotation gap is already bridged by the frame
+  hold, so the change costs one rebuild glitch rather than a glitch plus a failed
+  session plus a backoff. It never counts toward
+  `MAX_CONSECUTIVE_SESSION_FAILURES`. The pending change is also re-checked
+  against the current reading at that point, so a rate that wandered and came
+  home rebuilds nothing.
+
+  **Interactions with the two things E60/E62 shipped:**
+
+  - **The time-sized queue is not resized — it is rebuilt.** It is per-session and
+    sized at construction from `known_fps`, so the next session after a confirmed
+    change simply gets the right depth; the retiring session's queue dies with the
+    session, so **no frames are stranded**. Note that 16–30 fps all clamp to the
+    8-frame memory ceiling (confirmed live: both cameras log `queue maxsize=8` at
+    15 and 29 fps), so a change inside that band alters the depth by nothing —
+    and since queue depth is not an input to the rebuild decision, that costs no
+    needless rebuild either.
+  - **The frame hold's tick is unchanged and cannot be moved past the muxer
+    lead.** The hold now repeats at the rate the *running* ffmpeg was declared
+    with (`sink.fps`) rather than the latest measurement, because between a
+    confirmed change and the rotation that applies it those differ, and a repeated
+    frame only means "one frame" to an ffmpeg reading `-framerate N`. The audio
+    half is safe at *any* rate by construction: the tick is
+    `min(1/fps, AUDIO_SILENCE_TOPUP_S)` and fps is clamped to 1–30, so the tick
+    can never exceed 50 ms — half of `_AUDIO_PRIME_MS`. E60's cadence invariant
+    holds for every rate the watcher can produce.
+
+  **Tests** (`test_camera_session.py`, four new): the hysteresis band's asymmetry
+  and its behaviour on every rate pair this account has actually produced; the
+  settle window, confirmation, flapping convergence and storm bound against a
+  synthetic clock; the end-to-end rebuild, at a rotation, with the session never
+  failed and the next queue re-sized; and the frame hold following the declared
+  rate while a change is pending. Each was proven to fail against a targeted
+  breakage of exactly the invariant it pins.
+
+  **One test was worthless as first written and was strengthened**, which is
+  worth recording because the trap is reusable: the settle-window test used a
+  1000 fps burst, which the 1–60 plausibility range rejects wherever it is
+  measured — so deleting the settle window entirely left the test green. Rewritten
+  with a *plausible* 40 fps burst (the failure the logs actually show), it fails
+  as it should. A burst test that is too extreme tests the sanity range, not the
+  settle window.
 
 - **E65 (open, minor) The MediaMTX publish password is visible in process
   arguments.** The RTSP publish URL, credentials included, is passed on
@@ -1718,7 +1774,7 @@ survived. Restored here with their current status rather than as they were.
   the way `bridge-import-smoke` does for the bridge. Not done, and not obviously
   worth it yet.
 
-- **E67 (open, minor) The Audio state sensor cannot say *why* audio stopped.**
+- **E67 (DONE) The Audio state sensor says why audio stopped.**
   The bridge now distinguishes "the audio pipe wedged and was deliberately
   dropped so video could keep publishing" from "audio simply stopped arriving",
   via `audio_dropped` and `audio_dropped_reason` in `/control/status` (E62). The
@@ -1726,12 +1782,13 @@ survived. Restored here with their current status rather than as they were.
   cases — correct, because the pump does stop feeding audio once the pipe is
   dropped, but it leaves the operator to go read container logs for the cause.
 
-  Surfacing both as attributes on the existing sensor is a small change in
-  `sensor.py` and needs no new poller. Deliberately *not* a fifth enum state:
-  `stalled` is what an automation should act on either way, and splitting it
-  would break any automation already keyed on it. Whether a dropped pipe also
-  deserves its own binary sensor is a separate question — probably not, since it
-  should be rare and is visible in the attribute.
+  Both now ride as attributes on the existing sensor, needing no new poller.
+  Deliberately *not* a fifth enum state: `stalled` is what an automation should
+  act on either way, and splitting it would break any automation already keyed
+  on it. Absent on an older bridge reads as `null`, never as a fabricated
+  `false` — pinned by a test, along with the dropped-pipe case itself. Whether a
+  dropped pipe also deserves its own binary sensor is a separate question —
+  probably not, since it should be rare and is visible in the attribute.
 
 - **E68 (open) The pacing fix was measured against `-f null -`, never a live
   RTSP publish.** Every container measurement behind E60/E62 — the cadence
@@ -1748,3 +1805,79 @@ survived. Restored here with their current status rather than as they were.
   `-f rtsp` into a scratch MediaMTX path would settle it; the obstacle is that
   publishing to a real path means either racing the live publisher or standing
   up a second MediaMTX, so it was not done under the live deployment.
+
+- **E69 (open, minor) `/control/status` reports the DECLARED frame rate, never
+  the measured one.** `fps` in the status dict is written from `sink.fps` at each
+  session start — what ffmpeg was launched with. Since E64 the bridge continuously
+  measures a second, independent number (what the camera is actually delivering),
+  and the gap between the two is exactly the diagnostic an operator wants: it is
+  what says "this publisher is padding 20% of its output" before ffmpeg says
+  `More than 1000 frames duplicated`, and it is what distinguishes a camera whose
+  *setting* changed from one that is simply failing to deliver its configured
+  rate.
+
+  Deliberately not added with E64, to keep that change to the correctness bug: a
+  new response field is a contract other code is written against
+  (`docs/control-api.md`), and the HA integration would want a matching sensor or
+  attribute to make it visible, which is a second change in a second repo area.
+  The measurement already exists in `RateWatcher`; surfacing it is plumbing —
+  a `measured_fps` (and arguably `rate_pending`) alongside the existing `fps`.
+
+- **E70 (open, minor) The `More than 1000 frames duplicated` warning is logged,
+  never counted.** ffmpeg emits it on stderr and `FfmpegSink._log_stderr`
+  forwards it verbatim, so a rate mismatch is visible only by reading container
+  logs. It is a genuine second signal for the same condition E64's re-measurement
+  detects, and one that comes from the encoder itself rather than from this
+  bridge's own arithmetic.
+
+  It was considered as a settle-time trigger for E64 and rejected, for reasons
+  worth keeping: it is **one-directional** (it only ever fires when the declared
+  rate is too HIGH, never when it is too low — and too low is the direction that
+  destroys frames), it is **not quantitative** (it says a mismatch exists, not
+  what the rate should be, so it cannot drive a correction on its own), and it
+  is **coarse** (a fixed 1000-frame threshold, so its timing depends on the rate
+  rather than on the size of the error). What it would be good for is
+  *corroboration*: counting these lines per session and exposing the count would
+  let an operator confirm that a rate correction actually removed the padding,
+  and would catch the case where the measurement says the rate is fine and ffmpeg
+  disagrees. Parsing encoder stderr for control decisions is a step worth taking
+  deliberately, not in passing.
+
+- **E71 (open) E64's thresholds are argued from measurement, but the mechanism
+  has not been observed correcting a real setting change end to end.** The
+  hysteresis values, the asymmetry and the settle window are each grounded in
+  numbers that exist — the in-container `-framerate` table, the 6/7/15/29 spread
+  across restarts, the live 29 fps camera duplicating 1000+ frames — and the
+  logic is pinned by tests that were each proven to fail. What has **not**
+  happened is the obvious live confirmation: change the live-video resolution
+  from the Home Assistant select on a running bridge, and watch the log go
+  `measured Nfps against the declared Mfps` → `frame rate changed` → a new
+  publish line at the new rate, with `consecutive_failures` still `0`.
+
+  That is a five-minute check against the real deployment and it is the only
+  thing that would confirm the *premise* — that a resolution change actually
+  changes the delivered frame rate on this platform, rather than only the frame
+  size (which the existing `sink_wh` path would already handle on its own). If it
+  turns out the rate does not move with the resolution setting, E64 is still
+  correct for the restart-to-restart instability it was written for, but the
+  headline justification would need rewriting. Not run here: the bridge on the VM
+  is mid-soak for the E60/E62 audio validation and must not be disturbed.
+
+- **E72 (open) The E64 thresholds are pinned as logic but not as values.** The
+  rate-change tests drive the confirmation, hysteresis and storm-bound logic
+  directly, which is the right shape for a unit test. But an independent check
+  found that editing the shipped constants in `config.py` does not fail the
+  suite: `RATE_RESAMPLE_SETTLE_S` set to `0.0` and `RATE_REBUILD_MIN_INTERVAL_S`
+  set to `0` both left all 13 suites green. Only the asymmetric band is
+  value-pinned (forcing `RATE_CHANGE_TOLERANCE_UP` down to `0.20` does fail).
+
+  So a future tuning pass can set a threshold to a value that defeats its own
+  purpose and hear nothing about it. The settle window in particular exists to
+  exclude the session-start burst, and a zero there silently re-admits exactly
+  the 38-49 fps artifact readings E64 was built to reject.
+
+  The fix is a small guard test asserting each shipped constant sits in the
+  range that makes it meaningful, with the reason for the range in the assertion
+  message rather than the number repeated as a magic value. Not a defect in the
+  code, and not a reason to distrust E64's behaviour, which is separately
+  proven. It is a gap in what the suite would notice.

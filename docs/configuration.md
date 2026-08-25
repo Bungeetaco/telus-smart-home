@@ -233,11 +233,14 @@ because the hatch kills the process:
 | `RESTART_GUARD_BACKOFF_INITIAL_S` | `60` | First throttled sleep-before-exit (then 120s, 240s, … capped). The sleep runs in-process, so Docker cannot restart until it finishes — this is the hard floor on restart frequency. |
 | `RESTART_GUARD_BACKOFF_MAX_S` | `15 * 60` (15 min) | Cap on that backoff. Well past the ~101s `Retry-After`, so a sustained failure stops re-hammering the limiter that caused it. |
 
-#### Media pipeline: video queue and audio pacing (module constants)
+#### Media pipeline: frame rate, video queue and audio pacing (module constants)
 
 Not environment variables. These live in `config.py`, `janus_client.py` and
 `ffmpeg_sink.py`, and they are the numbers that decide whether the doorbell keeps
-its frames. **`AUDIO_SILENCE_TOPUP_S` and `_AUDIO_SILENCE_MAX_BURST_S` are paced
+its frames. The `RATE_*` group governs how the bridge notices that a camera's
+**frame rate has changed** — it is a device setting, changeable at any time from
+Home Assistant, the TELUS app or the portal — and how rarely it is willing to
+rebuild the publisher for it. **`AUDIO_SILENCE_TOPUP_S` and `_AUDIO_SILENCE_MAX_BURST_S` are paced
 against `_AUDIO_PRIME_MS`** — the audio input has to stay ahead of the video or
 ffmpeg stops reading the video pipe; see
 [camera-bridge.md](camera-bridge.md#the-audio-path) for the mechanism and the
@@ -246,7 +249,11 @@ measured table.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `VIDEO_QUEUE_TARGET_MS` (`janus_client`) | `500` | Depth of the decoded-video queue, in **time**. The frame count is `round(fps × this / 1000)`, from the camera's own measured rate, so one number means one thing on every camera — a flat 4 frames was 267 ms at 15 fps and 667 ms at 6 fps. Defence in depth only: a deeper queue converts dropped frames into latency, it does not remove a stall. |
-| `VIDEO_QUEUE_MIN_FRAMES` / `VIDEO_QUEUE_MAX_FRAMES` (`janus_client`) | `4` / `8` | Floor and ceiling on that count. The ceiling is memory: a decoded 1440×1440 yuv420p frame is 3.11 MB, so 8 frames is 24.9 MB per camera (container `mem_limit` 768 MiB, ~435 MiB in use) and 16 would be 49.8 MB. Above ~16 fps the ceiling binds before the time target does. |
+| `VIDEO_QUEUE_MIN_FRAMES` / `VIDEO_QUEUE_MAX_FRAMES` (`janus_client`) | `4` / `8` | Floor and ceiling on that count. The ceiling is memory: a decoded 1440×1440 yuv420p frame is 3.11 MB, so 8 frames is 24.9 MB per camera (container `mem_limit` 768 MiB, ~435 MiB in use) and 16 would be 49.8 MB. Above ~16 fps the ceiling binds before the time target does — so any rate change between 16 and 30 fps leaves the depth unchanged at 8. |
+| `RATE_RESAMPLE_SETTLE_S` | `10.0` | How long a session must have been delivering frames before any of them are re-measured. The frame rate is a **device setting** that can change with no restart (see [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched)), so it is re-measured while the stream runs — but never across the buffered burst at a session start, which has produced 544, 215 and 62 fps readings for cameras really running at 15 and 30. Leaves ~155 s of every 165 s session measurable. |
+| `RATE_RESAMPLE_FRAMES` | `90` | Inter-frame deltas per settled measurement, taken as a median: 3 s at 30 fps, 15 s at 6 fps. Long enough that no single late or bunched frame moves the result, short enough for several independent measurements per session even on the slowest camera here. |
+| `RATE_CHANGE_TOLERANCE_DOWN` / `RATE_CHANGE_TOLERANCE_UP` | `0.20` / `0.35` | Hysteresis band around the rate ffmpeg was **declared** with, below which a measurement is jitter rather than a change. **Asymmetric on purpose**: declaring below what the camera delivers makes ffmpeg *drop* real frames (1201 written → 1002 encoded, 199 lost), while declaring above it only pads with duplicates — and burst contamination biases a reading *high*, never low, so "the camera sped up" is the claim an artifact makes and gets the wider band. Both clear the observed jitter (6↔7 across restarts, 17%; a camera set to 15 delivering ~13.4, 11%) without swallowing a real change (−53%, +100%, −24%). |
+| `RATE_REBUILD_MIN_INTERVAL_S` | `300` | Floor between two rate-driven publisher rebuilds — a little under two session rotations. A rebuild kicks every RTSP reader, so even a source that defeats the settle window, the median, the band and the two-measurements-must-agree confirmation cannot cost more than one glitch per window. It delays a correction; it never cancels one. |
 | `AUDIO_DEFAULT_FORMAT` | `("s16", 48000, 2)` | Shape the audio input is sized with while no frame has been decoded yet — a bootstrap only. The first real frame's shape wins, rebuilding the publisher if this guess was wrong. |
 | `AUDIO_QUEUE_MAXSIZE` | `50` | Decoded-audio queue depth (~1 s at 20 ms frames). Drop-oldest with its own counter, like the video queue. |
 | `AUDIO_SILENCE_TOPUP_S` | `0.05` | How long the audio pump waits for a decoded frame before topping the publisher up with silence — and therefore the **cadence of that top-up**. It must stay comfortably under the 100 ms lead the pipe is primed with. It shipped at `0.5`, five times the lead, which stalled 120 of every 900 frames (13%) on the doorbell; `0.1` — exactly the lead — stalled 162. Not a failure timeout: nothing is declared dead. |

@@ -47,6 +47,26 @@ Pinned here:
                           The 15fps *fallback* is never promoted to the camera's
                           remembered fps, and a real reading is never overwritten
                           by a later implausible one.
+  4b. ADAPTIVE rate    -- and the rate is never LATCHED, because it is a device
+                          setting: the resolution select is a Home Assistant
+                          entity, so it changes with no restart and no signal to
+                          the bridge, and `-framerate` then re-rates the whole
+                          published stream (live: a camera declared at 29fps
+                          duplicated 1000+ frames in 2.5 minutes). It is
+                          re-measured while the stream runs and the publisher is
+                          rebuilt through the SAME path a frame-size change
+                          takes. Pinned: the burst at a session start is not
+                          measured at all (a *plausible* burst -- 40fps against
+                          a declared 15 -- because an implausible one proves
+                          nothing), one batch never acts alone, a flapping
+                          source converges instead of oscillating, the
+                          hysteresis band is asymmetric (declaring too low DROPS
+                          frames, declaring too high only duplicates them, and
+                          burst error is biased high), a rebuild happens at a
+                          rotation rather than by failing the session, the next
+                          session's time-sized queue follows the new rate, and
+                          the frame hold keeps repeating at the rate the RUNNING
+                          ffmpeg was declared with while a change is pending.
   5. sink repair       -- a sink whose `start()` raised is never adopted, a sink
                           whose process died is replaced, a frame-size change
                           replaces it, and nothing else does.
@@ -325,7 +345,12 @@ class FakeSink:
         if CTX.sink_start_hook is not None:
             CTX.sink_start_hook(self, width, height, fps)
         self.proc = FakeProc()
-        self.fps, self.wh = fps, (width, height)
+        # CLAMPED, exactly as the real start() does before putting the value on
+        # the command line. `fps` is what the loop asked for; `self.fps` is what
+        # ffmpeg was actually declared with, and the two are not the same for a
+        # measurement above 30 -- which is the number every rate comparison in
+        # the loop has to be made against.
+        self.fps, self.wh = fs.clamp_fps(fps), (width, height)
         if audio_format is not None:
             self.audio_format = tuple(audio_format)
             self._audio_bytes_per_sample = 2 * self.audio_format[2]
@@ -669,6 +694,38 @@ def capture_logs(logger_name="bridge.camera_session", level=logging.INFO):
         logger.removeHandler(handler)
         logger.setLevel(saved_level)
         logging.disable(was_disabled)
+
+
+@contextlib.contextmanager
+def rate_knobs(**overrides):
+    """Shrink the adaptive-rate constants for one test.
+
+    `scenario` installs the loop's fakes; these tests drive RateWatcher directly
+    against a synthetic clock, so they need the knobs without the fakes.
+    """
+    saved = {key: getattr(c, key) for key in overrides}
+    for key, value in overrides.items():
+        setattr(c, key, value)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            setattr(c, key, value)
+
+
+def feed_batch(watcher, interval, now, declared, frames=None):
+    """Deliver one full settled batch to `watcher` at `interval` seconds apart.
+
+    Returns (confirmed_rate_or_None, now). One extra frame beyond
+    RATE_RESAMPLE_FRAMES because N deltas need N+1 arrivals.
+    """
+    confirmed = None
+    for _ in range((frames or c.RATE_RESAMPLE_FRAMES) + 1):
+        now += interval
+        got = watcher.note_frame(now, declared)
+        if got is not None:
+            confirmed = got
+    return confirmed, now
 
 
 def steady(count, interval, width=1280, height=720):
@@ -1084,6 +1141,323 @@ async def test_a_real_fps_is_not_overwritten_by_a_burst():
     assert 4 <= first <= 6, f"first measurement was {first}fps for a 5fps camera"
     assert second == first, (
         f"a burst batch overwrote the remembered {first}fps with {second}fps")
+
+
+async def test_the_rate_hysteresis_band_is_asymmetric_and_clears_observed_jitter():
+    """A measurement only counts as a CHANGE if it leaves the band, and the band
+    is deliberately not symmetric.
+
+    The two ways of being wrong are not equally bad, and both are measured, in
+    ffmpeg_sink's own in-container table:
+
+      * declared HIGHER than the source delivers -> ffmpeg pads the output to CFR
+        with duplicates (361 written frames encoded as 601). Live, a camera
+        declared at 29fps logged "More than 1000 frames duplicated" inside 2.5
+        minutes. Wasteful; nothing is lost.
+      * declared LOWER than the source delivers -> ffmpeg DROPS real frames (1201
+        written encoded as 1002, 199 gone). That content does not come back.
+
+    Measurement error is asymmetric the same way: buffered frames arrive
+    back-to-back, so a contaminated batch reads FASTER than reality and never
+    slower. "The camera sped up" is therefore the claim an artifact makes, and it
+    gets the wider band; "the camera slowed down" is both likelier to be true and
+    costlier to ignore, and gets the narrower one.
+
+    The band must clear the jitter this account actually produces -- the same
+    camera reading 6 then 7 across restarts, and a camera SET to 15 delivering
+    ~13.4 -- without swallowing a real setting change. Correcting that 13.4 to 13
+    would be a bug, not an improvement: 15 is the real setting, and declaring 13
+    starts dropping the frames that do arrive on time.
+    """
+    # Jitter, both directions, from real observations. None of it is a change.
+    assert not cs._rate_moved(6, 7), "6 -> 7 is the restart-to-restart jitter this camera shows"
+    assert not cs._rate_moved(7, 6), "7 -> 6 is the same jitter seen the other way round"
+    assert not cs._rate_moved(15, 13), (
+        "a camera SET to 15 that delivers ~13.4 was corrected to 13 -- declaring "
+        "below the setting drops the frames that DO arrive at 15")
+    assert not cs._rate_moved(15, 17), "a mild over-read of a 15fps camera is not a change"
+    assert not cs._rate_moved(30, 29), "29 vs 30 is a rounding difference, not a setting"
+
+    # Real setting changes, from the rates this account has actually produced.
+    assert cs._rate_moved(15, 7), "15 -> 7 (-53%) is a setting change and must rebuild"
+    assert cs._rate_moved(15, 30), "15 -> 30 (+100%) is a setting change and must rebuild"
+    assert cs._rate_moved(6, 15), "6 -> 15 (+150%) is a setting change and must rebuild"
+    assert cs._rate_moved(29, 22), (
+        "29 -> ~22, the drop implied by the live duplication rate, was treated as "
+        "jitter -- that is the case this whole mechanism exists for")
+
+    # The asymmetry itself, at a step size that lands between the two bands: the
+    # same relative move is a change downward and jitter upward.
+    down = round(20 * (1 - (c.RATE_CHANGE_TOLERANCE_DOWN + c.RATE_CHANGE_TOLERANCE_UP) / 2))
+    up = round(20 * (1 + (c.RATE_CHANGE_TOLERANCE_DOWN + c.RATE_CHANGE_TOLERANCE_UP) / 2))
+    assert cs._rate_moved(20, down) and not cs._rate_moved(20, up), (
+        f"the band is symmetric ({down} and {up} against 20 were treated alike) -- "
+        "a burst-inflated reading is exactly what the upward half must resist, and "
+        "a real slowdown is what the downward half must catch")
+    assert c.RATE_CHANGE_TOLERANCE_UP > c.RATE_CHANGE_TOLERANCE_DOWN, (
+        c.RATE_CHANGE_TOLERANCE_UP, c.RATE_CHANGE_TOLERANCE_DOWN)
+
+    # Nothing declared yet is not "a change": there is no command line to differ
+    # from, and the first sink is built from the first batch either way.
+    assert not cs._rate_moved(None, 30) and not cs._rate_moved(0, 30)
+    assert not cs._rate_moved(15, None)
+
+
+async def test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree():
+    """The measurement that is allowed to move a known rate has to be worth
+    trusting, because acting on it costs every RTSP reader a reconnect.
+
+    Four separate gates, each pinned here against a synthetic clock:
+
+      1. the SETTLE window -- the burst of buffered frames at a session start is
+         not measured at all. That burst has produced 544fps, 215fps and (live)
+         62fps readings for cameras really running at 15 and 30, and the first
+         batch's own +/-50% tolerance cannot protect against it on the FIRST
+         session of a process, when there is nothing to compare against yet;
+      2. CONFIRMATION -- one settled batch is never enough on its own;
+      3. FLAPPING CONVERGES -- a source alternating between two rates never
+         produces two agreeing batches, so it never rebuilds anything. The
+         alternative is a publisher that rebuilds forever, which is worse than
+         either rate;
+      4. the MINIMUM INTERVAL -- even genuine, agreeing evidence cannot cost a
+         second glitch inside the window.
+    """
+    with rate_knobs(RATE_RESAMPLE_SETTLE_S=10.0, RATE_RESAMPLE_FRAMES=10,
+                    RATE_REBUILD_MIN_INTERVAL_S=300):
+        # 1. The burst -- and it has to be a PLAUSIBLE one, because that is the
+        #    dangerous kind. A batch that reads 1000fps is thrown out by the
+        #    1-60 sanity range wherever it is measured, so it proves nothing
+        #    about the settle window. What the log actually shows is buffered
+        #    frames producing "38-49fps for a real 15fps camera": inside the
+        #    sanity range, well outside the hysteresis band, and sustained for
+        #    as long as the buffer takes to drain. Nothing in the arithmetic can
+        #    tell that from a camera that really did change setting; only
+        #    refusing to measure until the burst is over can.
+        watcher = cs.RateWatcher("cam")
+        now = 1000.0
+        watcher.session_started(now)
+        seen = []
+        for _ in range(200):                    # 5s of 40fps, inside a 10s settle
+            now += 0.025
+            seen.append(watcher.note_frame(now, 15))
+        assert set(seen) == {None}, (
+            f"a session-start burst of buffered frames was measured as a rate and "
+            f"confirmed as one: {sorted(s for s in set(seen) if s is not None)}")
+        assert watcher.candidate is None, (
+            f"the burst became a pending rate change ({watcher.candidate}fps against a "
+            "declared 15) -- one more agreeing batch and the publisher would be "
+            "rebuilt at the rate a drained buffer happened to arrive at")
+        # ...and a burst so fast it is not a rate at all is rejected wherever it
+        # is measured, settle window or not.
+        assert cs._fps_from_deltas([0.001] * 10) is None
+        assert cs._fps_from_deltas([]) is None and cs._fps_from_deltas([0.0] * 4) is None
+
+        # 2. Past the settle window, a real and material change: 6fps against a
+        #    publisher declared at 15. One batch only proposes it.
+        now += c.RATE_RESAMPLE_SETTLE_S
+        first, now = feed_batch(watcher, 1 / 6, now, declared=15)
+        assert first is None, (
+            f"a single settled batch rebuilt the publisher ({first}fps) -- one bad "
+            "batch is exactly what the first-batch measurement already proved can "
+            "happen")
+        assert watcher.candidate == 6, (
+            f"a settled 6fps batch against a publisher declared at 15 left the "
+            f"candidate at {watcher.candidate!r} -- the measurement was taken and "
+            "then thrown away, so no amount of agreeing evidence can ever act on it")
+        second, now = feed_batch(watcher, 1 / 6, now, declared=15)
+        assert second == 6, f"two agreeing settled batches did not confirm 6fps: {second}"
+        assert watcher.candidate is None, "the confirmed candidate was not cleared"
+
+        # ...and a batch back inside the band forgets a pending candidate rather
+        # than leaving it to be confirmed by something much later.
+        watcher = cs.RateWatcher("cam")
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        _, now = feed_batch(watcher, 1 / 6, now, declared=15)
+        assert watcher.candidate == 6
+        got, now = feed_batch(watcher, 1 / 15, now, declared=15)
+        assert got is None and watcher.candidate is None, (
+            "a measurement that agrees with the declared rate left the earlier "
+            "candidate pending, so the next stray batch would confirm a rate that "
+            "two measurements ago had already been contradicted")
+
+        # 3. A flapping source: alternating 6fps and 25fps batches against a
+        #    publisher declared at 15. Both are material; neither is ever
+        #    confirmed, because no two consecutive batches agree.
+        watcher = cs.RateWatcher("cam")
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        flapped = []
+        for interval in (1 / 6, 1 / 25) * 4:
+            got, now = feed_batch(watcher, interval, now, declared=15)
+            flapped.append(got)
+        assert set(flapped) == {None}, (
+            f"a source alternating between 6fps and 25fps confirmed {flapped} -- the "
+            "publisher would rebuild on every second batch, forever, and land on "
+            "whichever rate the last batch happened to see")
+
+        # 4. The storm bound. A rebuild has just happened; the same agreeing
+        #    evidence must wait.
+        watcher = cs.RateWatcher("cam")
+        watcher.rebuilt(now)
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        held = []
+        for _ in range(3):
+            got, now = feed_batch(watcher, 1 / 6, now, declared=15)
+            held.append(got)
+        assert set(held) == {None}, (
+            f"a second rate rebuild landed {now - watcher.last_rebuild_at:.0f}s after "
+            f"the first, against a {c.RATE_REBUILD_MIN_INTERVAL_S}s floor: {held}")
+
+        # ...and once the window has passed, the same evidence is acted on. The
+        # bound delays a correction; it never cancels one.
+        now += c.RATE_REBUILD_MIN_INTERVAL_S
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        after = []
+        for _ in range(2):
+            got, now = feed_batch(watcher, 1 / 6, now, declared=15)
+            after.append(got)
+        assert 6 in after, (
+            f"the minimum interval cancelled the correction instead of delaying it: "
+            f"{after}")
+
+        # A rate above what ffmpeg can be given is not a change once it is
+        # clamped: 40 and 55 are both published at 30, so a publisher already
+        # declared at 30 must not be rebuilt for either.
+        watcher = cs.RateWatcher("cam")
+        watcher.session_started(now)
+        now += c.RATE_RESAMPLE_SETTLE_S
+        for interval in (1 / 40, 1 / 55):
+            got, now = feed_batch(watcher, interval, now, declared=30)
+            assert got is None, f"{1 / interval:.0f}fps rebuilt a publisher already at 30"
+        assert watcher.candidate is None, watcher.candidate
+
+
+async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_session():
+    """The whole point of E64, end to end: the rate is a DEVICE SETTING, so when
+    it changes the publisher is rebuilt for it -- through the same path a
+    frame-size change takes, because on this platform it is the same event (both
+    come from the live-video resolution setting).
+
+    Latched, it is wrong by construction. `-framerate` is the OUTPUT's constant
+    frame rate and the basis for `-g`, so a stale declaration duplicates or drops
+    frames for as long as the process lives, and the same cameras have come up at
+    6, 7, 15 and 29fps across restarts with nothing changed.
+
+    Three things are pinned besides the rebuild itself:
+
+      * it happens at a ROTATION BOUNDARY, not by failing the live session. The
+        frame hold already bridges that gap, so the change costs the one glitch a
+        rebuild costs and not a failed session, a backoff and a dark stream on
+        top of it -- "a rate change must never take the camera off the air";
+      * the next session's decoded-frame queue is sized from the NEW rate, since
+        `video_queue_maxsize` is in milliseconds and a stale rate silently makes
+        it mean something else;
+      * the log says what happened, so a rebuild that a reader sees as one
+        reconnect is not mistaken for a fault.
+    """
+    # First batch at 10fps, everything after it at 25fps: a +150% move, well past
+    # the upward band, sustained rather than a burst.
+    with rate_knobs(RATE_RESAMPLE_SETTLE_S=0.05, RATE_RESAMPLE_FRAMES=4,
+                    RATE_REBUILD_MIN_INTERVAL_S=0):
+        with scenario([Plan(frames=steady(10, 0.1), tail=("repeat", 0.04, 1280, 720))],
+                      FIRST_FRAME_TIMEOUT_S=2.0, SESSION_MAX_LIFETIME_S=1.2,
+                      FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+            with capture_logs(level=logging.WARNING) as lines:
+                start(ctx)
+                await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].fps,
+                                timeout=15.0, why="the publisher to be rebuilt for the rate")
+                sinks = list(ctx.sinks)
+                sessions = list(ctx.sessions)
+                state = dict(ctx.state)
+                await stop(ctx)
+
+    assert sinks[0].fps == 10, (
+        f"the first publisher was not declared at the measured 10fps: {sinks[0].fps}")
+    assert sinks[1].fps == 25, (
+        f"the rebuilt publisher was declared at {sinks[1].fps}fps for a camera now "
+        "delivering 25 -- the rate was re-measured but not applied")
+    assert len(sinks) == 2, (
+        f"{len(sinks)} publishers for one rate change -- every rebuild past the "
+        "first is a reconnect every RTSP reader pays for")
+    assert sinks[0].stopped == 1, "the stale-rate publisher was left running"
+
+    # Applied at a rotation, not by failing the session.
+    assert state.get("state") == "streaming", f"the rate change failed the session: {state}"
+    assert state.get("consecutive_failures") == 0, (
+        f"a rate change counted toward the container-restart escape hatch: {state}")
+    assert state.get("fps") == 25, f"/control/status still reports the old rate: {state}"
+    assert len(sessions) == 2, (
+        f"{len(sessions)} sessions -- the rate change should have been applied at the "
+        "first rotation, not by failing and reconnecting")
+
+    # The queue follows the rate, because it is sized in milliseconds.
+    assert sessions[0].fps is None, sessions[0].fps
+    assert sessions[1].fps == 25, (
+        f"the next session was built with a stale rate ({sessions[1].fps}) -- its "
+        "decoded-frame queue is sized in TIME, so it now means something else")
+    assert sessions[1].queue_maxsize == jc.video_queue_maxsize(25), sessions[1].queue_maxsize
+
+    said = [ln for ln in lines if "frame rate changed" in ln]
+    assert said, (
+        f"the publisher was rebuilt for a rate change and the log does not say so, "
+        f"so the reconnect every reader sees looks like a fault: {lines}")
+    assert "10" in said[0] and "25" in said[0], said[0]
+
+
+async def test_the_frame_hold_repeats_at_the_rate_ffmpeg_was_declared_with():
+    """While a confirmed rate change waits for the rotation that applies it, the
+    camera's measured rate and the running publisher's declared rate are
+    deliberately different -- and the frame hold has to follow the DECLARED one.
+
+    A repeated frame means "one frame" to an ffmpeg reading a raw pipe at
+    `-framerate N`. Repeating at a rate the running publisher was not told about
+    misdescribes the stream for the length of the reconnect: writing faster than
+    declared makes the encoder drop the extras, writing slower makes it pad. The
+    rate that is correct here is the one on the live command line, which is
+    exactly the one that has NOT been updated yet.
+
+    The audio half of the same tick is pinned separately by
+    test_the_rotation_gap_is_filled_with_wallclock_derived_silence: because the
+    hold ticks at min(1/fps, AUDIO_SILENCE_TOPUP_S) and clamp_fps bounds the
+    video interval at 1/30, no measured rate whatsoever can push the audio top-up
+    past the muxer lead the pacing fix depends on.
+    """
+    gap = {}
+
+    async def slow_second_attempt(idx):
+        if idx == 1:
+            gap["start"] = time.monotonic()
+            await asyncio.sleep(0.6)
+            gap["end"] = time.monotonic()
+
+    with rate_knobs(RATE_RESAMPLE_SETTLE_S=0.05, RATE_RESAMPLE_FRAMES=4,
+                    RATE_REBUILD_MIN_INTERVAL_S=0):
+        with scenario([Plan(frames=steady(10, 0.1), tail=("repeat", 0.04, 1280, 720))],
+                      FIRST_FRAME_TIMEOUT_S=2.0, SESSION_MAX_LIFETIME_S=1.2,
+                      FRAME_SILENCE_TIMEOUT_S=5.0, FRAME_HOLD_MAX_S=5.0) as ctx:
+            ctx.gvs_hook = slow_second_attempt
+            start(ctx)
+            await run_until(ctx, lambda x: "end" in gap, timeout=15.0,
+                            why="the reconnect gap after the rate change")
+            declared = ctx.sinks[0].fps
+            writes = list(ctx.sinks[0].writes)
+            await stop(ctx)
+
+    assert declared == 10, f"the scenario did not declare 10fps: {declared}"
+    held = [t for t, _ in writes if gap["start"] <= t <= gap["end"]]
+    spanned = gap["end"] - gap["start"]
+    assert len(held) >= 3, (
+        f"only {len(held)} held frames across a {spanned:.2f}s gap -- the publisher "
+        "went silent during the rotation")
+    observed = len(held) / spanned
+    assert observed <= 1.6 * declared, (
+        f"the hold repeated at ~{observed:.0f}fps into a publisher declared at "
+        f"{declared}fps -- it is following the newly measured rate instead of the "
+        "one on the live ffmpeg command line, so every extra frame is one the "
+        "encoder has to throw away")
 
 
 # --------------------------------------------------------------------------
@@ -3094,6 +3468,10 @@ TESTS = [
     test_fps_is_the_median_delta_not_the_span,
     test_the_fps_fallback_is_never_locked_in,
     test_a_real_fps_is_not_overwritten_by_a_burst,
+    test_the_rate_hysteresis_band_is_asymmetric_and_clears_observed_jitter,
+    test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree,
+    test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_session,
+    test_the_frame_hold_repeats_at_the_rate_ffmpeg_was_declared_with,
     test_a_sink_whose_start_raised_is_never_adopted,
     test_a_dead_publisher_is_replaced_at_the_next_rotation,
     test_a_frame_size_change_replaces_the_publisher,

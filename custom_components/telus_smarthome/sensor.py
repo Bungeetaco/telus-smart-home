@@ -854,6 +854,17 @@ class CameraAudioStateSensor(_StreamHealthEntity):
             # (so it starts empty after a Home Assistant restart, not at the
             # bridge's own first frame).
             "last_audio_at": self._last_audio_at,
+            # Why audio stopped, when the bridge stopped it deliberately. The
+            # bridge drops a wedged audio pipe and keeps publishing video rather
+            # than restarting the encoder, which reads here as `stalled` --
+            # correct, because the pump really has stopped feeding audio, but
+            # indistinguishable on its own from audio that merely went quiet.
+            # These two say which it was without a trip to the container log.
+            # Deliberately NOT a fifth enum state: `stalled` is what an
+            # automation should act on either way, and splitting it would break
+            # any automation already keyed on it.
+            "audio_dropped": status.get("audio_dropped"),
+            "audio_dropped_reason": status.get("audio_dropped_reason"),
         }
 
 

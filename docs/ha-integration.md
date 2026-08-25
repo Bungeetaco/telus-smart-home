@@ -1329,9 +1329,21 @@ caught is exactly a counter that quietly stops. Comparing across polls turns
 not lost; they ride along as attributes: `audio_consumed`,
 `decoded_audio_frames`, `decoded_audio_frames_last_poll` (the delta),
 `audio_format` (`null` until a frame has genuinely decoded — a value here is
-proof audio decoded at least once), `dropped_audio_frames`, and `last_audio_at`
+proof audio decoded at least once), `dropped_audio_frames`, `last_audio_at`
 (when this poller last saw the counter move; empty until it does, and reset by a
-Home Assistant restart).
+Home Assistant restart), and `audio_dropped` / `audio_dropped_reason`.
+
+Those last two say **why** audio stopped. The bridge drops a wedged audio pipe
+deliberately and keeps publishing video rather than restarting the encoder, so
+losing audio never costs the picture — but from the counter's point of view that
+is indistinguishable from audio simply going quiet, and both read `stalled`.
+`audio_dropped_reason` carries the bridge's own explanation, so the cause does
+not require a trip to the container log. Both are `null` on a bridge too old to
+report them, which is not the same as `false` and is not rendered as `false`.
+
+Deliberately attributes rather than a fifth enum state: `stalled` is what an
+automation should act on either way, and splitting it would break any automation
+already keyed on it.
 
 **Every camera gets an Audio state entity, consuming or not.** Audio
 consumption is currently disabled on the live deployment, so today every camera
