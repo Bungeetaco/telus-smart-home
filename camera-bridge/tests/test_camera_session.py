@@ -130,7 +130,18 @@ Pinned here:
                           turns sleep jitter into permanent A/V offset. A changed
                           raw PCM shape forces a rebuild exactly as a changed
                           frame size does (writing it would desynchronise the
-                          pipe into noise rather than fail). Every encoder
+                          pipe into noise rather than fail) -- at a ROTATION,
+                          never by failing the session, and a bounded number of
+                          times per camera per process. The publisher is built
+                          VIDEO-ONLY until a real audio frame has been decoded,
+                          because the only alternative is a guessed shape,
+                          which the first real frame then has to correct: doing
+                          that by failing the session restarts the decoder's
+                          per-session codec sniff, so a camera whose audio is
+                          too sparse to finish the sniff inside the sizing
+                          window never converges and publishes nothing at all
+                          (E81). A camera that never sends an audio packet must
+                          publish video forever. Every encoder
                           variant gets the audio input and encoder, since a
                           hardware path with audio and a software fallback
                           without it is the bug class this suite keeps catching.
@@ -368,6 +379,12 @@ class FakeSink:
         self.audio_dropped_reason = reason
         self._audio_transport = None
 
+    # The public entry the loop calls when IT decides to give up on a camera's
+    # audio (a shape that keeps moving past config.AUDIO_FORMAT_REBUILD_LIMIT).
+    # The real sink's is the same one-line delegation, so a fake that diverged
+    # here would be testing a degradation nothing ships.
+    drop_audio = _drop_audio
+
     async def start(self, width, height, fps=15, audio_format=None):
         self.start_calls.append((width, height, fps, audio_format))
         # Runs BEFORE any state is adopted, so a raising hook models a start()
@@ -464,8 +481,10 @@ class Plan:
     audio_fmt: the (sample format, rate, channels) the DELIVERED frames carry.
     audio_peek: what session.audio_format reports when camera_session reads it to
             size the ffmpeg audio input -- i.e. whether a frame had already been
-            decoded by then. `None` models "no audio yet", which is the case the
-            AUDIO_DEFAULT_FORMAT bootstrap (and the guard behind it) exists for.
+            decoded by then. `None` models "no audio yet", which is the case a
+            sparse camera is in on every session (the decoder's codec sniff needs
+            20 packets and a quiet room does not send them inside the sizing
+            window), and the publisher is then built VIDEO-ONLY.
     """
 
     _UNSET = object()
@@ -2721,11 +2740,11 @@ async def test_audio_status_reports_only_what_was_actually_decoded():
     """/control/status must not claim audio that never existed.
 
     This is the field that hid a real outage. `audio_format` used to be rendered
-    from what the running ffmpeg had been LAUNCHED with, and when no frame has
-    been decoded yet that is `AUDIO_DEFAULT_FORMAT` -- literally
-    ("s16", 48000, 2). So a camera whose aiortc audio-decoder thread had died on
-    its first malformed Opus packet, whose published track was pure silence for
-    eleven consecutive sessions, reported a confident
+    from what the running ffmpeg had been LAUNCHED with, and when no frame had
+    been decoded that was a bootstrap guess at the shape the SDP implies --
+    literally ("s16", 48000, 2). So a camera whose aiortc audio-decoder thread
+    had died on its first malformed Opus packet, whose published track was pure
+    silence for eleven consecutive sessions, reported a confident
     `"audio_format": "48000Hz/2ch/s16"` the entire time, alongside
     `state: "streaming"` and a fresh `last_frame_at` (the frame-silence watchdog
     is video-only). Nothing in the status could distinguish "audio is flowing"
@@ -2734,10 +2753,17 @@ async def test_audio_status_reports_only_what_was_actually_decoded():
     So: `audio_format` is null until a real frame is observed, and
     `decoded_audio_frames` -- which no field previously covered -- is the count
     that makes flow checkable at a glance. `dropped_audio_frames` cannot do that
-    job: a stream that simply never decodes drops nothing.
+    job: a stream that simply never decodes drops nothing. What the publisher
+    was launched with is a separate field, `publisher_audio_format`, and the
+    two are never allowed to become one.
     """
-    # 1. Consumption on, publisher up with its audio input, and NOT ONE audio
-    #    frame ever decoded -- the silent-stream failure exactly.
+    # 1. Consumption on and NOT ONE audio frame ever decoded -- the silent-stream
+    #    failure exactly. The publisher now comes up VIDEO-ONLY in that state
+    #    rather than on a guessed 48 kHz stereo input (see
+    #    test_a_camera_that_never_sends_audio_publishes_video_forever), which is
+    #    what makes the status question sharper rather than softer: there is no
+    #    launched shape to mistake for an observation, and the field that says so
+    #    is publisher_audio_format.
     with consume_knob("all", request="all"):
         with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
                             audio_interval=None)],
@@ -2745,25 +2771,31 @@ async def test_audio_status_reports_only_what_was_actually_decoded():
             start(ctx)
             await run_until(ctx, lambda x: x.state.get("state") == "streaming",
                             timeout=8.0, why="a streaming session")
-            await run_until(ctx, lambda x: x.sink is not None
-                            and len(x.sink.pcm_writes) >= 3,
-                            timeout=8.0, why="the audio input's silence top-up")
+            await asyncio.sleep(0.3)
             silent = dict(ctx.state)
             launched_with = ctx.sink.start_calls[0][3]
-            silence_writes = len(ctx.sink.pcm_writes)
+            pcm_writes = len(ctx.sink.pcm_writes)
+            video_writes = len(ctx.sink.writes)
             await stop(ctx)
 
     assert silent.get("state") == "streaming", silent
-    assert launched_with == c.AUDIO_DEFAULT_FORMAT, (
-        f"the bootstrap this test is about did not happen: {launched_with}")
-    assert silence_writes > 1, (
-        "the publisher's audio input was not being kept alive with silence, so "
-        "this is not the scenario the status field lied about")
+    assert launched_with is None, (
+        f"the publisher was given an audio input for a camera that has decoded "
+        f"nothing: {launched_with} -- a guessed shape is what the first real "
+        "frame then had to correct, at the cost of a failed session")
+    assert pcm_writes == 0 and video_writes > 0, (
+        f"{pcm_writes} PCM writes into a publisher with no audio input, and "
+        f"{video_writes} video frames -- the video half is what must keep going")
     assert silent.get("audio_format") is None, (
         f"audio_format reported {silent.get('audio_format')!r} for a camera that "
-        "has never decoded an audio frame -- that is the AUDIO_DEFAULT_FORMAT "
-        "bootstrap being reported as an observation, which is how eleven "
-        "sessions of pure silence went unnoticed")
+        "has never decoded an audio frame, which is how eleven sessions of pure "
+        "silence went unnoticed")
+    assert silent.get("publisher_audio_format") is None, (
+        f"publisher_audio_format reported {silent.get('publisher_audio_format')!r} "
+        "for a video-only publisher")
+    assert silent.get("audio_dropped") is False, (
+        "a publisher that never had an audio input has not DROPPED one -- that "
+        "reads as a degradation an operator would go looking for")
     assert silent.get("decoded_audio_frames") == 0, (
         f"decoded_audio_frames must be 0 when nothing decoded, got "
         f"{silent.get('decoded_audio_frames')!r}")
@@ -3014,11 +3046,17 @@ async def test_a_quiet_camera_is_topped_up_under_the_lead_and_never_in_bursts():
     somewhere else. So the invariant is asserted directly, on the writes
     themselves -- cadence UNDER the lead, and no single write larger than the
     lead either.
+
+    The camera modelled here has already had a frame decoded (`audio_peek`) and
+    then goes quiet, which is what a doorbell does all day and is the only shape
+    of "quiet" this invariant can be about: a camera that has decoded NOTHING
+    gets a video-only publisher, which has no audio input to run dry.
     """
     lead_s = fs._AUDIO_PRIME_MS / 1000.0
     with consume_knob("all", request="all"):
         with scenario([Plan(frames=steady(10, 0.066), tail=("repeat", 0.066, 1440, 1440),
-                            audio_interval=None)],   # offered audio, none arriving
+                            audio_interval=None,     # offered audio, none arriving
+                            audio_peek=("s16", 8000, 1))],
                       SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
             start(ctx)
             await run_until(ctx, lambda x: x.state.get("state") == "streaming",
@@ -3304,8 +3342,8 @@ async def test_a_publisher_that_stopped_reading_is_detected_and_rebuilt():
         f"takes: {recovered}")
 
 
-async def test_an_audio_format_change_forces_a_publisher_rebuild():
-    """The raw-PCM twin of the frame-size guard.
+async def test_an_audio_format_change_rebuilds_at_a_rotation_not_by_failing():
+    """The raw-PCM twin of the frame-size guard, and WHERE the repair happens.
 
     ffmpeg is told the audio pipe's sample format, rate and channel count once,
     on the command line, and then reads the pipe as a fixed-size sample stream.
@@ -3315,9 +3353,22 @@ async def test_an_audio_format_change_forces_a_publisher_rebuild():
     frame size, the only clean recovery is to relaunch ffmpeg with the real
     shape.
 
-    The scenario is the one that actually happens: no audio frame had been
-    decoded yet when the publisher was sized, so it came up on the
-    AUDIO_DEFAULT_FORMAT bootstrap and the first real frame disagreed.
+    **The invariant this pins moved, deliberately.** The repair used to be
+    reached by FAILING the session: the pump set a flag, the streaming loop
+    raised `audio input needs rebuilding`, and the sink-repair block rebuilt on
+    the way back round. That works only if the next session can re-learn the
+    shape, and it cannot: aiortc's codec sniff is per session, so every restart
+    threw away the 20 packets of evidence the repair was waiting on. On a camera
+    whose audio is sparse, the next sizing window therefore saw nothing decoded
+    either, and the camera went round that cycle forever with no publisher at
+    all (E81).
+
+    So the shape is now learned by observation while the session runs, and the
+    publisher is rebuilt at the next ROTATION, where the frame hold already
+    bridges the gap -- the identical path a confirmed frame-RATE change takes,
+    and for the identical reason: audio may not take the camera off the air.
+    Pinned here: the mismatched frame is still never written, the session does
+    not fail, and the rebuilt publisher carries the shape the frames really have.
     """
     # The guard itself, on the REAL sink -- the fake mirrors it, but the thing
     # that has to refuse the write in production is this.
@@ -3332,12 +3383,25 @@ async def test_an_audio_format_change_forces_a_publisher_rebuild():
         "the real sink accepted a frame in a different PCM shape than ffmpeg was "
         "launched with -- the raw pipe is now permanently desynchronised")
 
-    # ...and the loop's response to that refusal: rebuild, with the learned shape.
+    # ...and the loop's response: learn the shape from the frames, keep the
+    # session, rebuild at the rotation.
+    #
+    # Three scripted sessions, because a running publisher can only be mismatched
+    # by a shape that moves UNDER it: the first streams 48 kHz stereo and sizes
+    # the publisher from it, the second decodes nothing by the time the publisher
+    # is inspected (its codec sniff is still running) and then delivers 16 kHz
+    # mono, and the third settles there. It is session two that has to survive
+    # without writing a mismatched sample and without failing.
+    steady_frames = dict(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                         audio_interval=0.02)
     with consume_knob("all", request="all"):
-        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
-                            audio_interval=0.02, audio_fmt=("s16", 16000, 1),
-                            audio_peek=None, audio_samples=320)],
-                      SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+        with scenario([Plan(**steady_frames, audio_fmt=("s16", 48000, 2),
+                            audio_samples=960),
+                       Plan(**steady_frames, audio_fmt=("s16", 16000, 1),
+                            audio_peek=None, audio_samples=320),
+                       Plan(**steady_frames, audio_fmt=("s16", 16000, 1),
+                            audio_samples=320)],
+                      SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0,
                       MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
             start(ctx)
             await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].audio_writes,
@@ -3345,20 +3409,273 @@ async def test_an_audio_format_change_forces_a_publisher_rebuild():
             first, second = ctx.sinks[0], ctx.sinks[1]
             first_fmt = first.start_calls[0][3]
             second_fmt = second.start_calls[0][3]
-            first_stopped, first_audio = first.stopped, list(first.audio_writes)
+            first_stopped = first.stopped
+            # Every write the first publisher took, and their shapes: the 48 kHz
+            # frames of session one belong there, the 16 kHz frames of session
+            # two do not.
+            first_audio = [n for _, n in first.audio_writes]
+            # The mismatched session must have been allowed to FINISH: it wrote
+            # video throughout and ended by rotating, not by raising.
+            first_video, failures = len(first.writes), ctx.state.get("consecutive_failures")
+            last_error = ctx.state.get("last_error")
             state = dict(ctx.state)
             await stop(ctx)
 
-    assert first_fmt == c.AUDIO_DEFAULT_FORMAT, (
-        f"the first publisher was not sized from the documented bootstrap: {first_fmt}")
-    assert not first_audio, (
-        "a mismatched frame was written into a pipe ffmpeg reads at a different "
-        "sample size -- this is silent corruption, not a failure")
+    assert first_fmt == ("s16", 48000, 2), (
+        f"the first publisher was not sized from the peeked frame: {first_fmt}")
+    assert first_audio and all(n == 960 for n in first_audio), (
+        f"the first publisher took a frame that was not the 960-sample 48 kHz "
+        f"shape it was launched for: {first_audio[:8]} -- a mismatched frame "
+        "written into a pipe ffmpeg reads at a different sample size is silent "
+        "corruption, not a failure")
     assert first_stopped == 1, "the mis-sized publisher was left running"
+    assert first_video > 16, (
+        f"the mismatched session published only {first_video} video frames -- it "
+        "was cut short rather than left to rotate, which is the failure loop "
+        "this design exists to remove")
+    assert failures == 0 and last_error is None, (
+        f"the audio-format change failed the session (failures={failures}, "
+        f"last_error={last_error!r}) -- that restarts the codec sniff that has "
+        "to finish for the repair to be possible at all")
     assert second_fmt == ("s16", 16000, 1), (
         f"the rebuilt publisher did not adopt the shape the real frames carry: "
         f"{second_fmt}")
     assert state.get("audio_format") == "16000Hz/1ch/s16", state
+    assert state.get("publisher_audio_format") == "16000Hz/1ch/s16", (
+        f"publisher_audio_format does not describe the running publisher: {state}")
+    assert state.get("audio_format_rebuilds") == 1, (
+        f"the rebuild was not counted against this camera's budget: {state}")
+
+
+async def test_sparse_audio_converges_instead_of_looping_on_a_rebuild():
+    """E81, which is the live failure this whole design is shaped by, and which
+    is a LIVELOCK rather than a slow start.
+
+    The camera: audio too sparse to have decoded anything by the time the
+    publisher is sized. The decoder's codec sniff needs 20 packets, which at the
+    64 ms packetisation these cameras appear to use is 1.28 s of CONTINUOUS
+    audio; a quiet room does not send that inside the ten-video-frame window
+    (~670 ms at 15fps) that the sizing peek happens at the end of. So the peek
+    sees nothing, on this session and on every session after it.
+
+    What that used to cost: the publisher was built from a guessed 48 kHz stereo
+    shape, the first real 8 kHz frame tripped the pipe's format guard, the guard
+    failed the session, the restart destroyed the per-session sniff, and the next
+    peek was blind for exactly the same reason. Round and round, one publisher
+    teardown per lap, and the camera ended up with no publisher at all -- live,
+    it had to be switched to video-only by hand to get anything published.
+
+    Each lap of that loop threw away precisely the progress that would have ended
+    it, which is why "make the race less likely" is not a fix and why the sniff
+    is not shortened. What converges it is that the publisher is never sized from
+    a guess and an audio-format change never fails a session: the shape is
+    learned by OBSERVING the frames while the session runs, and applied by ONE
+    rebuild at a rotation the frame hold already bridges.
+
+    Pinned: exactly two publishers across many sessions, the first video-only and
+    the second carrying the shape the frames really have; not one failed session;
+    and video published throughout, including before the rebuild.
+    """
+    fmt = ("s16", 8000, 1)
+    with consume_knob("all", request="all"):
+        # audio_peek=None on EVERY session: this camera never has a decoded
+        # frame to show by sizing time, which is the whole scenario.
+        with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.05, audio_fmt=fmt, audio_peek=None,
+                            audio_samples=160)],
+                      SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+            # The failure counters in the status are not enough on their own:
+            # they are RESET by the next successful frame batch, so a loop of
+            # fail-reconnect-succeed-fail reads as clean whenever it is sampled.
+            # The log line each failure emits does not get reset.
+            with capture_logs(level=logging.WARNING) as records:
+                start(ctx)
+                await run_until(ctx, lambda x: len(x.sessions) >= 5, timeout=15.0,
+                                why="five sessions of a sparse-audio camera")
+                sinks = list(ctx.sinks)
+                sessions = len(ctx.sessions)
+                first_fmt = sinks[0].start_calls[0][3]
+                first_video = len(sinks[0].writes)
+                second_fmt = sinks[1].start_calls[0][3] if len(sinks) > 1 else "no rebuild"
+                second_audio = [n for _, n in sinks[1].audio_writes] if len(sinks) > 1 else []
+                second_video = len(sinks[1].writes) if len(sinks) > 1 else 0
+                second_stopped = sinks[1].stopped if len(sinks) > 1 else 0
+                state = dict(ctx.state)
+                failed = [r for r in records if "camera session failed" in r]
+                await stop(ctx)
+
+    assert len(sinks) >= 2, (
+        f"one publisher across {sessions} sessions: this camera's audio shape "
+        "was never learned at all, so its video-only publisher never gained the "
+        "audio input it is waiting for")
+    assert len(sinks) == 2, (
+        f"{len(sinks)} publishers were built across {sessions} sessions -- one "
+        "per session is the E81 loop, and one rebuild is all a learned audio "
+        "shape may ever cost")
+    assert first_fmt is None, (
+        f"the first publisher was sized from something other than a decoded "
+        f"frame: {first_fmt} -- a guess here is what the loop was made of")
+    assert first_video > 0 and second_video > 0, (
+        f"video stopped being published across the rebuild ({first_video} then "
+        f"{second_video} frames) -- the camera is never allowed to go dark for "
+        "an audio repair")
+    assert second_fmt == fmt, (
+        f"the rebuilt publisher did not adopt the shape the sparse frames "
+        f"carry: {second_fmt}")
+    assert second_audio and all(n == 160 for n in second_audio), (
+        f"the sparse camera's audio never reached the rebuilt publisher: "
+        f"{second_audio[:5]}")
+    assert second_stopped == 0, (
+        "the rebuilt publisher was torn down again -- convergence means the "
+        "camera settles on one publisher, not that it loops more slowly")
+    assert not failed and state.get("last_error") is None, (
+        f"{len(failed)} session(s) failed on the way to convergence: "
+        f"{failed[:1]} -- and a failed session restarts the codec sniff, which "
+        "is what made the original failure a loop rather than a stumble")
+    assert state.get("state") == "streaming", state
+    assert state.get("audio_format") == "8000Hz/1ch/s16", state
+    assert state.get("publisher_audio_format") == "8000Hz/1ch/s16", state
+    assert state.get("audio_format_rebuilds") == 1, (
+        f"the audio shape cost more than the one rebuild it is allowed: {state}")
+    print(f"  ok  sparse audio: {sessions} sessions, 2 publishers, "
+          f"{len(second_audio)} audio frames published, 0 failed sessions")
+
+
+async def test_a_camera_that_never_sends_audio_publishes_video_forever():
+    """The acceptance case, and the one that was broken: a camera configured to
+    consume audio that never sends a single packet must publish video forever.
+
+    Nothing about it is hypothetical. The living room camera decodes nothing for
+    minutes at a time, and while the publisher was sized from a guessed audio
+    shape that camera could not keep a publisher at all: every session ended in
+    `audio input needs rebuilding` and the next one started the same lap.
+
+    With the input sized from observations only there is nothing to be wrong
+    about. No frame decoded means no audio input, which means no format guard to
+    trip, no rebuild to ask for and no session to fail -- just video, across
+    rotation after rotation, on ONE publisher that outlives them all.
+
+    This is deliberately NOT expressed as "audio_dropped is false": a publisher
+    that never had an audio input has not dropped one, and reporting a
+    degradation that did not happen sends an operator looking for a fault.
+    """
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=None, audio_peek=None)],
+                      SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: len(x.sessions) >= 6, timeout=15.0,
+                            why="six sessions of a silent camera")
+            sinks = list(ctx.sinks)
+            sessions = len(ctx.sessions)
+            sink = sinks[0]
+            launched_with = sink.start_calls[0][3]
+            video_writes, pcm_writes = len(sink.writes), len(sink.pcm_writes)
+            stops, consumed = sink.stopped, ctx.sessions[0].consume_audio
+            state = dict(ctx.state)
+            await stop(ctx)
+
+    assert consumed is True, (
+        "the camera was not even asked to consume audio, so this proves nothing")
+    assert len(sinks) == 1 and stops == 0, (
+        f"{len(sinks)} publishers and {stops} teardowns across {sessions} "
+        "sessions for a camera with no audio at all -- the publisher must "
+        "outlive every rotation")
+    assert launched_with is None and pcm_writes == 0, (
+        f"the publisher was given an audio input ({launched_with}) nothing could "
+        f"ever write to, and {pcm_writes} PCM writes went into it")
+    assert video_writes > 20, (
+        f"only {video_writes} video frames across {sessions} sessions")
+    assert state.get("state") == "streaming", state
+    assert state.get("consecutive_failures") == 0 and state.get("last_error") is None, (
+        f"a session failed for a camera that simply has no audio: "
+        f"{state.get('last_error')!r}")
+    assert state.get("audio_consumed") is True, state
+    assert state.get("audio_format") is None and state.get("audio_codec") is None, state
+    assert state.get("publisher_audio_format") is None, state
+    assert state.get("audio_format_rebuilds") == 0, state
+    assert state.get("audio_dropped") is False, (
+        "a publisher that never had an audio input reported having dropped one")
+    print(f"  ok  no audio at all: {sessions} sessions, 1 publisher, "
+          f"{video_writes} video frames, 0 failed sessions")
+
+
+async def test_audio_format_rebuilds_are_bounded_and_degrade_to_video_only():
+    """A shape that keeps moving costs ONE rebuild, then the audio is given up on.
+
+    A rebuild is not free: the publisher is torn down, MediaMTX destroys the path
+    and every RTSP reader is kicked. Learning a camera's audio shape once is
+    worth that; following a shape that changes every session is not, and an
+    unbounded repair is how a fix for a loop becomes a slower loop. So
+    config.AUDIO_FORMAT_REBUILD_LIMIT bounds it, and past the bound the sink's
+    audio input is dropped in place -- video-only, visibly, on the SAME publisher
+    -- which is the trade `_drop_audio` already makes for a wedged audio pipe.
+    Video is worth more than audio; a camera is never taken off the air for it.
+
+    **This scenario is also the closest reproduction of the live E81 loop, and
+    that is why it is scripted this way.** The camera decodes nothing by sizing
+    time on any session (sparse audio, the codec sniff unfinished) AND the shape
+    it eventually delivers alternates between sessions -- which is what a decoder
+    committing to a different codec on different sessions looks like from here,
+    and the only mechanism that explains a camera failing EVERY session rather
+    than one. Under the design that shipped, each lap sized the publisher from
+    the shape the previous lap learned, met the other one, failed the session and
+    started over: never converging, one publisher teardown per lap, and live it
+    ended with no publisher at all. Here it must settle on two publishers, no
+    failed sessions, and video throughout.
+    """
+    steady_frames = dict(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                         audio_interval=0.02, audio_peek=None)
+    quiet = Plan(**steady_frames, audio_fmt=("s16", 8000, 1), audio_samples=160)
+    loud = Plan(**steady_frames, audio_fmt=("s16", 48000, 2), audio_samples=960)
+    with consume_knob("all", request="all"):
+        with scenario([quiet, loud] * 6,
+                      SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      AUDIO_FORMAT_REBUILD_LIMIT=1) as ctx:
+            with capture_logs(level=logging.WARNING) as records:
+                start(ctx)
+                await run_until(ctx, lambda x: x.state.get("audio_dropped") is True,
+                                timeout=15.0, why="the audio input to be given up on")
+                dropped_at_sessions = len(ctx.sessions)
+                # ...and then keep running, because the interesting claim is what
+                # happens AFTER the budget is spent: nothing.
+                await run_until(ctx, lambda x: len(x.sessions) >= dropped_at_sessions + 4,
+                                timeout=15.0, why="four more sessions after the give-up")
+                sinks = list(ctx.sinks)
+                sessions = len(ctx.sessions)
+                live = sinks[-1]
+                video_before = len(live.writes)
+                await asyncio.sleep(0.2)
+                video_after = len(live.writes)
+                audio_writes = len(live.audio_writes)
+                state = dict(ctx.state)
+                failed = [r for r in records if "camera session failed" in r]
+                await stop(ctx)
+
+    assert not failed, (
+        f"{len(failed)} session(s) failed while the audio shape swung about: "
+        f"{failed[:1]} -- that is the E81 loop, and each failure destroys the "
+        "codec sniff that would have settled it")
+
+    assert len(sinks) == 2, (
+        f"{len(sinks)} publishers across {sessions} sessions -- past the limit "
+        "the audio input is dropped in place, NOT rebuilt again")
+    assert state.get("audio_format_rebuilds") == 1, state
+    assert live.audio_dropped is True, (
+        "the publisher kept an audio input it can only ever write silence into, "
+        "which is the pure-silence failure E59 exists to make impossible")
+    assert state.get("audio_dropped") is True, state
+    assert "spent" in (state.get("audio_dropped_reason") or ""), (
+        f"the reason does not say why audio stopped: "
+        f"{state.get('audio_dropped_reason')!r}")
+    assert state.get("publisher_audio_format") is None, state
+    assert video_after > video_before, (
+        f"video stopped being published after the audio was given up on "
+        f"({video_before} -> {video_after} frames)")
+    assert state.get("state") == "streaming", state
+    print(f"  ok  bounded repair: 1 rebuild, audio dropped after "
+          f"{dropped_at_sessions} sessions, video still publishing "
+          f"{sessions} sessions in ({audio_writes} audio frames published)")
 
 
 async def _started_sink(audio_format, backend="vaapi"):
@@ -3480,14 +3797,15 @@ async def test_the_cameras_real_8khz_mono_audio_flows_through_unchanged():
         f"the {fs._AUDIO_SILENCE_MAX_BURST_S}s it is defined as")
 
     # 4. End to end through the loop, from the state that actually occurs on a
-    #    cold start: nothing decoded when the publisher is sized, so it comes up
-    #    on the 48 kHz AUDIO_DEFAULT_FORMAT bootstrap and the first real 8 kHz
-    #    frame rebuilds it. That IS "a rate change between sessions is handled".
+    #    cold start: nothing has decoded when the publisher is sized (the codec
+    #    sniff is still running), so it comes up VIDEO-ONLY and gains its 8 kHz
+    #    audio input at the next rotation, once real frames have said what shape
+    #    they are.
     with consume_knob("all", request="all"):
         with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
                             audio_interval=0.02, audio_fmt=fmt,
                             audio_peek=None, audio_samples=160)],
-                      SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0,
                       MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
             start(ctx)
             await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].audio_writes,
@@ -3499,7 +3817,9 @@ async def test_the_cameras_real_8khz_mono_audio_flows_through_unchanged():
             state = dict(ctx.state)
             await stop(ctx)
 
-    assert first_fmt == c.AUDIO_DEFAULT_FORMAT, first_fmt
+    assert first_fmt is None, (
+        f"the first publisher was given an audio input before anything had "
+        f"decoded: {first_fmt}")
     assert second_fmt == fmt, (
         f"the rebuilt publisher did not adopt the 8 kHz mono shape the frames "
         f"carry: {second_fmt}")
@@ -4519,7 +4839,10 @@ TESTS = [
     test_the_frame_queue_is_sized_in_time_not_in_frames,
     test_a_wedged_audio_pipe_degrades_to_video_only,
     test_a_publisher_that_stopped_reading_is_detected_and_rebuilt,
-    test_an_audio_format_change_forces_a_publisher_rebuild,
+    test_an_audio_format_change_rebuilds_at_a_rotation_not_by_failing,
+    test_sparse_audio_converges_instead_of_looping_on_a_rebuild,
+    test_a_camera_that_never_sends_audio_publishes_video_forever,
+    test_audio_format_rebuilds_are_bounded_and_degrade_to_video_only,
     test_the_cameras_real_8khz_mono_audio_flows_through_unchanged,
     test_ffmpeg_duplicated_frame_warnings_are_counted,
     test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio,

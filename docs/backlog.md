@@ -35,6 +35,16 @@ and evidence. Grouped by whether anything can actually be done about them.
   `audio_decoder.discarded` flat. The entry lists what could not be verified
   from a workstation, including whether 8 kHz AAC is as acceptable downstream as
   48 kHz was.
+- **E81**: fixed in the bridge, **awaiting live validation**. A camera with
+  sparse audio could not finish E80's codec sniff before its publisher was
+  sized, so the publisher was built from a guessed audio shape, the first real
+  frame failed the session, and the restart threw away the sniff: a livelock,
+  and that camera published nothing at all. The publisher is now built
+  video-only until a real frame has been decoded, and gains its audio input by
+  one bounded rebuild at a rotation; no audio-format change can fail a session.
+  Validation is re-enabling audio on the living room camera and watching
+  `publisher_audio_format` fill in exactly once, `audio_format_rebuilds` reach
+  1 and stop, and no `camera session failed` lines appear for it.
 - **E62 / E60**: fixed in the bridge, **awaiting live validation**. Audio
   consumption took the doorbell off the air after ~14 minutes while
   `/control/status` reported `streaming` throughout. Four changes shipped: audio
@@ -54,6 +64,11 @@ and evidence. Grouped by whether anything can actually be done about them.
   instrumentation: it traces proactive rotations only, a record open at camera
   shutdown is dropped, drop timestamps are bounded per session, and the records
   are log-only (with the case for `/control/status` argued and declined).
+
+- **E82** (open, minor): four things E81 deliberately did not do, including that
+  the learned audio shape does not survive a container restart (costing one
+  rotation of video-only publishing per restart) and that a camera sending fewer
+  than 20 audio packets per session never publishes audio at all.
 
 - **E75** (open, minor) - the stack watcher is now versioned at
   `ops/stack-watch.sh` but is untested shell that has already produced three
@@ -75,10 +90,10 @@ and evidence. Grouped by whether anything can actually be done about them.
   `/var/log/syslog`, not the empty virtiofsd log, and the fix is
   `--sandbox=chroot` in `/etc/libvirt/virtiofsd.opt`.
 
-- **E81** (open, BLOCKING) - a camera with sparse audio cannot finish the E80
-  codec sniff before the sink is sized, and livelocks on
-  `audio input needs rebuilding`. The living room is video-only again because of
-  it; the doorbell is unaffected and correct.
+
+- **E83** (open, BLOCKING) - the mu-law audio path leaks ~15 MB per session
+  rotation and took the bridge to `bridge-unreachable`. Audio consumption is OFF
+  on the live deployment. Measure with `tracemalloc` before changing anything.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -2421,10 +2436,10 @@ entries are the mechanism that keeps it under review
   100 ms prime, the 0.1 s per-call ceiling and `write_silence_to`'s fill are all
   sample counts derived from the observed rate, so the muxer lead E60 depends on
   is unchanged, and the top-up cadence is a time and therefore rate-independent.
-  The first session of a process still sizes the publisher from
-  `AUDIO_DEFAULT_FORMAT` (48 kHz stereo, what the SDP implies) and rebuilds once
-  when the real shape arrives; the learned shape persists across rotations, so
-  it costs at most one rebuild per camera per process.
+  How the publisher is sized for the new shape is **E81's**, not this entry's:
+  sizing it from the SDP's 48 kHz stereo shape until a frame arrived is what
+  livelocked a sparse-audio camera. It is now built video-only until a real
+  frame has been decoded and gains its audio input at a rotation.
 
   **What to expect live, and it is self-verifying.** `decoded_audio_frames`
   should climb at roughly the packet rate rather than at 3/s: about **50 frames
@@ -2472,12 +2487,14 @@ entries are the mechanism that keeps it under review
       decoder) or a decoder built by this bridge instead of by
       `decoder_worker`. Neither is worth doing for a counter; the per-camera
       `audio_codec` covers the question that actually gets asked.
-    * **`AUDIO_DEFAULT_FORMAT` is still the SDP's shape.** Setting it to 8 kHz
-      mono would remove the one first-session rebuild on this account and add
-      one on any camera that really does send Opus. It is left as the shape an
-      unknown camera's SDP claims.
+    * **`AUDIO_DEFAULT_FORMAT` was left as the SDP's shape**, on the reasoning
+      that it is what an unknown camera's SDP claims and that the mismatch
+      costs one rebuild. That reasoning was wrong in a way this entry could not
+      see: the rebuild it costs is reached by FAILING the session, and the
+      restart destroys the per-session sniff. **E81** removes the constant
+      rather than retuning it.
 
-- **E81 (open, BLOCKING audio on sparse-audio cameras) A camera whose audio is
+- **E81 (DONE in the bridge, awaiting live validation) A camera whose audio is
   sparse cannot finish the codec sniff before the sink is sized, and livelocks.**
   Found by deploying E80. The doorbell, whose audio is continuous, committed to
   mu-law in about two seconds and has run correctly since. The living room did
@@ -2499,14 +2516,165 @@ entries are the mechanism that keeps it under review
   Any fix must make progress survive a restart, or must stop an audio-format
   change from failing the session at all.
 
-  Candidate directions, none implemented: build the sink video-only when the
-  audio format is not yet known and do exactly one rebuild once it is; or bound
-  format-change rebuilds per session and degrade to video-only after that, the
-  way E62 already degrades a wedged audio pipe; or carry sniff state across
-  sessions for a camera, since the codec is a property of the device rather than
-  of the session. The last is the most direct but needs care: the codec must
-  still be re-checked if the device or the gateway ever changes.
-
   Not the sniff length. Shortening it would make the race less likely without
   removing it, and would weaken the codec decision that E80 deliberately made
-  strong.
+  strong. `SNIFF_PACKETS` and `OPUS_CONFIDENCE` are unchanged.
+
+  **Fixed by removing the guess, not by winning the race.** Three changes, and
+  the first is the one that matters:
+
+    1. **The audio input is sized from an OBSERVED decoded frame or not built at
+       all.** A camera with nothing decoded yet gets a **video-only** publisher.
+       `AUDIO_DEFAULT_FORMAT` is deleted rather than retuned: while the
+       publisher could be built from a shape nobody had seen, something had to
+       correct it later, and the correction was the loop. There is now nothing
+       to be wrong about. The shape is still remembered across rotations (it is
+       a property of the device, not of a session) and still re-checked against
+       every decoded frame, so a device that really changes shape is noticed on
+       its first frame rather than trusted from an old session.
+    2. **An audio-format change never fails a session.** The publisher is
+       rebuilt at the next rotation, through the identical path a confirmed
+       frame-RATE change takes (E64), where the frame hold already bridges the
+       gap. Until then a frame in the wrong shape is skipped and its span filled
+       with silence, so the muxer lead the VIDEO pipe rides on (E60) is
+       untouched. The per-session audio pump now runs for a video-only publisher
+       too: it is what observes the shape, and it keeps the decoded-audio queue
+       drained.
+    3. **Format rebuilds are counted and bounded**
+       (`AUDIO_FORMAT_REBUILD_LIMIT`, 1 per camera per process). Past the bound
+       the audio input is dropped in place and the camera publishes video only
+       for the rest of the process, exactly as E62 already degrades a wedged
+       audio pipe. This is what stops a *different* loop: if the sniff commits
+       to a different codec on different sessions, an unbounded repair would buy
+       a reader-kicking publisher teardown once per rotation forever.
+
+  **Why not the other two directions.** Carrying sniff state across sessions is
+  the one the entry called most direct, and it cannot be done honestly from
+  where the state lives: aiortc builds its decoder inside `decoder_worker`, a
+  thread that has no idea which camera it belongs to, so per-camera carry-over
+  would have to be process-wide, which is exactly the "re-check if the device
+  changes" hazard the entry warned about. The FORMAT is carried instead, which
+  is the property the publisher actually needs, is already per camera, and is
+  re-checked on every decoded frame. Bounding rebuilds alone would have left the
+  publisher still being built from a guess, i.e. still one wrong guess away from
+  the loop, so it ships as the backstop rather than the fix.
+
+  **What it costs, stated rather than hidden.** A camera whose sniff does not
+  finish inside the sizing window now publishes video-only for up to one
+  rotation (~165 s) at process start before its audio appears, where the shipped
+  code took one failed session (~2 s) to get there on a camera with continuous
+  audio. Audio arrives later on the doorbell in exchange for arriving at all on
+  the living room. A per-camera format cache that survives a restart would
+  remove even that; recorded as **E82** rather than built, because it adds
+  persistent state to remove a one-rotation delay.
+
+  **Pinned by tests**, in `camera-bridge/tests/test_camera_session.py`:
+  `test_sparse_audio_converges_instead_of_looping_on_a_rebuild` (the live
+  sequence: two publishers across many sessions, none failed),
+  `test_a_camera_that_never_sends_audio_publishes_video_forever` (the acceptance
+  case: one publisher, no audio input, no failure, forever) and
+  `test_audio_format_rebuilds_are_bounded_and_degrade_to_video_only`. The last
+  one is also the closest **reproduction of the live loop**: with the shipped
+  design restored (a guessed shape plus a session-failing repair) it goes red
+  with `2 session(s) failed while the audio shape swung about`, which is the
+  live signature. All three were proven to fail against deliberately broken
+  source, one invariant at a time.
+
+  **Not verified from here.** The exact live mechanism of the forever-loop. Read
+  alone, the shipped code should have converged after ONE failed session, since
+  the learned shape persists across rotations: the reading that fits "failed
+  every session" is that the codec sniff decided differently on different
+  sessions, so each session's guess met the other codec's frames. That is
+  consistent with sparse audio (the 20 sniffed packets are whatever happened to
+  arrive) and it is what the bounded-rebuild test scripts, but it was not
+  confirmed against the live camera before audio was switched off for it. Either
+  way the fix does not depend on which it was: the publisher is never sized from
+  a guess and no audio-format change can fail a session, so both readings are
+  removed. What to watch when audio is re-enabled on the living room camera:
+  `publisher_audio_format` going from `null` to `"8000Hz/1ch/s16"` exactly once,
+  `audio_format_rebuilds` reaching 1 and stopping, no `camera session failed`
+  lines for that camera, and `sessions_pcmu` climbing while `sessions_opus`
+  stays at 0 -- if `sessions_opus` climbs at all, the flapping-decision reading
+  was right and it is worth reading the commit lines' counts.
+
+- **E82 (open, minor) What E81 deliberately did not do.** Four things were
+  considered while fixing the sparse-audio livelock and left out on purpose.
+  Recorded so none of them is mistaken for an oversight, and so the reasoning is
+  available if one of them ever becomes worth doing.
+
+    * **The learned audio shape does not survive a process restart.** It is
+      per camera and per process (`known_audio_fmt`), so every container restart
+      re-learns it, which costs one rotation (~165 s) of video-only publishing
+      per consuming camera on a camera whose codec sniff cannot finish inside
+      the ~670 ms sizing window. Persisting it beside `restart_guard.py`'s state
+      file would make audio appear on the first session instead. The cost is
+      persistent state and a staleness question: an entry would have to be keyed
+      by something that changes when the device does (model, firmware, MAC) and
+      would still need the first decoded frame to be authoritative over it. A
+      wrong cached shape would cost exactly one bounded rebuild, never a loop,
+      so the risk is small; the payoff is one rotation at start-up, so the work
+      is not obviously worth it either. Deliberately not built.
+    * **A camera whose sniff never completes within a single session never
+      publishes audio.** The decision needs `SNIFF_PACKETS` (20) packets and the
+      decoder is rebuilt with each session, so a camera sending fewer than 20
+      audio packets per ~165 s session decodes nothing, ever. It publishes video
+      forever and nothing fails, which is the correct degradation, but it is a
+      real limit and it is invisible except as `decoded_audio_frames: 0` with
+      `audio_consumed: true`. Fixing it means carrying sniff state across
+      sessions, which cannot be attributed to a camera from inside aiortc's
+      decoder thread (see E81), so it would need a decoder this bridge builds
+      itself. Not known to affect any camera on this account: the living room
+      camera decoded 268 frames in 60 s when it was measured (E80).
+    * **The publisher is not rebuilt mid-session to add audio.** The rebuild
+      waits for the next rotation, where the frame hold already bridges the gap
+      and the two-writer exclusion is already established. Doing it mid-session
+      would shorten the wait to a few seconds but would add a second place that
+      builds sinks, inside the loop whose comments enumerate the bugs that have
+      already shipped there once each. Deliberately not attempted.
+    * **`decoded_audio_frames` counts frames the publisher could not take.** It
+      is "this camera decoded audio", not "that audio reached the RTSP path", so
+      during the one rotation between learning a shape and rebuilding for it, it
+      climbs while the stream still carries no audio. `publisher_audio_format`
+      is what distinguishes them, and the HA **Audio state** sensor (E61) does
+      not read it, so that sensor says `flowing` for that rotation. A sensor
+      change plus a version bump; deferred, not forgotten.
+
+- **E83 (open, BLOCKING audio) The mu-law audio path leaks about 15 MB per
+  session rotation.** Found by the stack watcher, not by looking, and it had
+  already taken the bridge to `bridge-unreachable` once before it was noticed.
+
+  **Attribution is from the watcher's own history, not from reasoning.** Before
+  v1.24.0 the container climbed to 81 to 85 percent of its 768 MiB limit and
+  **plateaued**, exactly as E74 measured and closed. After v1.24.0 deployed at
+  17:49 it went 41.6, 65.3, 77.5, 84.8, **99.10** percent and did not stop, and
+  logged `bridge-unreachable` at 19:25. A later 13 minute curve measured
+  496 MB to 651 MB, **+155 MB**, while `sessions_pcmu` went 10 to 20: about
+  **15 MB per session**, with thread count flat at 119 throughout, so this is not
+  the accumulation E74 ruled out.
+
+  **It scales with audio volume, which is why it appeared exactly here.** E80
+  took real decoded audio from about 3 frames per second to about 15, so
+  whatever retains a per-session reference now retains five times as much. At
+  roughly 2,475 audio frames per 165 s session, 15 MB works out near 6 kB per
+  frame, which is the right order for a retained `av.AudioFrame`.
+
+  Audio consumption is **off** on the live deployment as a result. Both cameras
+  publish video and the container sits at about 40 percent.
+
+  **Do not assume the sniff's held frames are the cause.** That list is bounded
+  at 20 packets, which is roughly 120 kB per session, two orders of magnitude
+  short of what is measured. Something retains frames for the life of a session,
+  or retains the session itself. Candidates worth measuring before changing
+  anything: a module-level structure in the decoder patch keyed by decoder
+  instance that is never evicted, and the retired session's own queues.
+
+  **Measure, do not guess.** The bridge has no profiler in the image; a
+  `tracemalloc` snapshot across two rotations behind a flag would name the
+  allocation site directly, and that is cheaper than another round of plausible
+  hypotheses. This entry exists because the last two audio problems were both
+  solved by measurement and both nearly solved wrongly by inference.
+
+  Related: the doorbell was also dropping 34 to 970 video frames per five minute
+  window through this period against a 7 to 10 per minute baseline. That is
+  almost certainly the memory pressure slowing the consumer rather than a second
+  defect, but it has not been separated and should not be assumed.

@@ -486,23 +486,29 @@ def janus_consume_audio_for(camera_id) -> bool:
     return True
 
 
-# Sample format assumed for the audio input while NO audio frame has been decoded
-# yet. It is only ever a bootstrap value: camera_session takes the real format off
-# the first decoded frame and rebuilds the publisher if this guess was wrong (the
-# raw-PCM pipe guard in ffmpeg_sink.write_audio is what forces that).
+# How many times ONE camera's publisher may be rebuilt, in one process, because
+# the raw audio shape it was launched with is not the shape the camera sends.
 #
-# It is the shape the SDP implies -- the offer is `audio(port=9,opus)` and aiortc
-# decodes Opus to 48 kHz stereo signed-16 -- and on this account's cameras it is
-# WRONG, because the track advertised as Opus carries G.711 mu-law and decodes to
-# 8 kHz mono signed-16 (see aiortc_opus_patch). It stays the bootstrap anyway, and
-# deliberately: it is what an unknown camera's SDP claims, the real shape is
-# learned from the first decoded frame of the first session and then remembered
-# across rotations (camera_session's known_audio_fmt), and the decoder commits to
-# its codec inside the first ~400 ms -- comfortably before the ten-video-frame
-# batch that triggers the peek. So the mismatch costs at most one publisher
-# rebuild, on a camera that has never streamed in this process, and usually not
-# even that.
-AUDIO_DEFAULT_FORMAT = ("s16", 48000, 2)
+# There is no bootstrap shape to be wrong about any more: a publisher is built
+# with an audio input only once a real decoded frame has been observed, and
+# video-only until then (camera_session sizes it; the shape is remembered across
+# rotations because it is a property of the device). So the ONE rebuild this
+# allows is the expected one -- video-only, then the shape the camera really
+# sends, once, at a rotation the frame hold already bridges.
+#
+# It is a bound rather than a preference. A rebuild tears the publisher down,
+# MediaMTX destroys the path and every RTSP reader is kicked, so a shape that
+# keeps moving (a decoder that commits to a different codec on different
+# sessions, say) must not be able to buy that glitch once per rotation forever.
+# Past this many, the audio input is given up on and the camera publishes video
+# only for the rest of the process -- visibly, in audio_dropped /
+# audio_dropped_reason -- which is the trade FfmpegSink already makes for a
+# wedged audio pipe: video is worth more than audio.
+#
+# Raising it trades reader interruptions for a chance that a genuinely unstable
+# shape eventually settles. There is no evidence any camera on this account
+# needs more than one.
+AUDIO_FORMAT_REBUILD_LIMIT = 1
 # Bound on the per-session decoded-audio queue in janus_client. Audio arrives in
 # 20 ms frames, so this is ~1s of buffer: enough to ride out an encode hiccup,
 # short enough that a stalled consumer drops audio (and says so) instead of

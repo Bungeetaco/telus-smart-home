@@ -45,17 +45,22 @@ async def _close_with_timeout(session: JanusCameraSession, camera_id: str) -> No
 
 
 def _audio_format_str(fmt) -> str | None:
-    """`(sample format, rate, channels)` as /control/status's `audio_format`
-    string, or None for "nothing observed".
+    """`(sample format, rate, channels)` as a /control/status string, or None.
 
-    Deliberately fed from OBSERVED frames only. It used to be rendered from what
-    the running ffmpeg had been LAUNCHED with, which is
-    `config.AUDIO_DEFAULT_FORMAT` -- literally ("s16", 48000, 2) -- whenever no
-    frame had been decoded yet. That made the field report a confident
+    /control/status carries two different audio shapes and they must never be
+    confused: `audio_format` is fed from OBSERVED frames only, and
+    `publisher_audio_format` is what the running ffmpeg's audio input was
+    launched with. `audio_format` used to be rendered from the launched shape,
+    which -- before a frame had been decoded -- was a bootstrap GUESS at the
+    48 kHz stereo the SDP implies. That made the field report a confident
     "48000Hz/2ch/s16" for a camera whose audio-decoder thread was dead and whose
     published track was pure silence, and it is why eleven consecutive sessions
     of total silence went unnoticed. A field that reads the same whether or not
-    audio exists cannot answer the only question it is ever asked."""
+    audio exists cannot answer the only question it is ever asked. The publisher
+    no longer starts from a guess at all (see run_camera_forever), so the two
+    shapes are now an observation and a fact rather than an observation and an
+    assumption -- but they are still separate fields, because the gap between
+    them is exactly "a rebuild is owed at the next rotation"."""
     if not fmt:
         return None
     return f"{fmt[1]}Hz/{fmt[2]}ch/{fmt[0]}"
@@ -426,6 +431,15 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # the second one is the one that went unanswered for two days.
         "audio_consumed": consume_audio, "audio_format": None,
         "audio_codec": None,
+        # ...and the publisher's side of the same question. audio_format is what
+        # the camera SENDS; publisher_audio_format is what the running ffmpeg's
+        # audio input was launched to read, or null while the publisher is
+        # video-only -- which it is until a real frame has been decoded, because
+        # the audio input is never sized from a guess (E81). The two differing is
+        # what "a publisher rebuild is owed at the next rotation" looks like from
+        # outside, and audio_format_rebuilds is how many this camera has spent of
+        # the config.AUDIO_FORMAT_REBUILD_LIMIT it is allowed per process.
+        "publisher_audio_format": None, "audio_format_rebuilds": 0,
         "decoded_audio_frames": 0, "dropped_audio_frames": 0,
         # "audio was dropped mid-session" -- the publisher gave up on its audio
         # input and is publishing video only (ffmpeg_sink._drop_audio). Without
@@ -515,7 +529,16 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # rebuilding the publisher for nothing.
     sink_audio_fmt: tuple | None = None
     known_audio_fmt: tuple | None = None
-    audio_rebuild_needed = False
+    # How many times this camera's publisher has been rebuilt because the audio
+    # shape it was launched with is not the shape the camera sends, and whether
+    # its audio has been given up on for the rest of the process. Learning the
+    # shape once is the expected cost; anything past
+    # config.AUDIO_FORMAT_REBUILD_LIMIT is a source whose shape keeps moving, and
+    # a rebuild kicks every RTSP reader, so it degrades to video-only the way a
+    # wedged audio pipe already does (E62) rather than buying a glitch per
+    # rotation forever.
+    audio_format_rebuilds = 0
+    audio_given_up = False
     last_frame = None
     last_live = 0.0  # monotonic time a real (non-repeated) frame last arrived
     hold_task: asyncio.Task | None = None
@@ -527,6 +550,17 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # allocation, no attribute reads, nothing on the audio or video write paths.
     handover: handover_trace.HandoverTrace | None = None
 
+    def _publisher_audio_format(sink_):
+        """The shape the RUNNING publisher's audio input reads, or None when it
+        has none: video-only because nothing has been decoded yet, video-only
+        because this camera does not consume audio, or video-only because the
+        input was given up on. Read off the sink itself rather than from what
+        the loop asked for, since start() can legitimately come up without the
+        audio input it was given a format for."""
+        if sink_ is None or not sink_.audio_enabled:
+            return None
+        return _audio_format_str(sink_.audio_format)
+
     def _note_audio_dropped(sink_):
         # The publisher gave up on its audio input mid-session and kept
         # publishing video. Recorded once, from whichever writer noticed --
@@ -535,18 +569,40 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         if sink_ is not None and sink_.audio_dropped \
                 and not status[camera_id].get("audio_dropped"):
             _update_status(audio_dropped=True,
-                           audio_dropped_reason=sink_.audio_dropped_reason)
+                           audio_dropped_reason=sink_.audio_dropped_reason,
+                           publisher_audio_format=None)
 
     async def _pump_audio(sess):
         # Per-session: drains this session's decoded audio into the publisher's
-        # second input. It may not raise into its ensure_future (asyncio would log
-        # a never-retrieved exception at GC time) and it may not fail the session
-        # directly -- a sink that refuses a frame sets the rebuild flag and the
-        # VIDEO loop acts on it, so the repair goes through exactly the same path
-        # a frame-size change does. A sink that has DROPPED its audio input is
-        # not a refusal to repair: it is already publishing video only, and this
-        # pump simply stops.
-        nonlocal known_audio_fmt, audio_rebuild_needed, decoded_audio_frames_total
+        # second input -- and, when the publisher has no second input, OBSERVES
+        # that audio anyway. It runs for every consuming camera, whatever shape
+        # the publisher is in, because it has three jobs and only the first
+        # needs an audio input:
+        #
+        #   * write the decoded audio, and keep the audio timeline advancing
+        #     with silence when there is none (a timeline that stops is what
+        #     stops ffmpeg reading the VIDEO pipe -- config.AUDIO_SILENCE_TOPUP_S);
+        #   * keep this session's decoded-audio queue drained, so a video-only
+        #     publisher does not turn into a camera that counts dropped audio
+        #     frames nobody was ever going to read;
+        #   * record what shape the frames really are, which is the ONLY way a
+        #     publisher that came up video-only ever learns it has audio to
+        #     carry.
+        #
+        # It may not raise into its ensure_future (asyncio would log a
+        # never-retrieved exception at GC time) and it may not fail the session,
+        # directly or through a flag. Nothing about audio may: a publisher whose
+        # audio input has to change is repaired at the next ROTATION, through
+        # the same path a frame-size or frame-rate change takes, where the frame
+        # hold is already bridging the gap. Failing the session instead (which
+        # is what this used to ask for, via a flag the streaming loop turned
+        # into a RuntimeError) cost a failed session AND a backoff AND -- since
+        # the decoder's codec sniff is per session -- threw away exactly the
+        # progress that would have ended the repair. On a camera whose audio is
+        # sparse enough that the sniff cannot finish inside one sizing window,
+        # that is a livelock rather than a slow start, and it left the camera
+        # with no publisher at all (E81).
+        nonlocal known_audio_fmt, decoded_audio_frames_total
         # Audio written since this loop last yielded. The queue holds up to
         # AUDIO_QUEUE_MAXSIZE frames, so a backlog can be tens of frames deep and
         # each one costs an executor round trip on the same executor
@@ -558,11 +614,18 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # so the steady state costs one boolean test per frame and never a
         # method call.
         first_write = True
+        # Said once per session, never per frame: a publisher already scheduled
+        # to be rebuilt would otherwise log a line per decoded frame, which at
+        # this stream's rate is its own outage.
+        mismatch_logged = False
         try:
             while True:
                 frame = await sess.next_audio_frame(c.AUDIO_SILENCE_TOPUP_S)
                 if frame is None:
                     return                      # session over; the hold takes it from here
+                # Re-read every iteration: the sink can be given up on mid-pump
+                # (a wedged pipe), and this loop outlives that.
+                writable = sink is not None and sink.audio_enabled
                 if frame is AUDIO_TIMEOUT:
                     # No audio this interval. Keep the input alive with silence
                     # rather than letting the mux hold the VIDEO back waiting on
@@ -576,37 +639,74 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # cadence has to stay under the ceiling as well as under the
                     # lead.
                     unyielded_s = 0.0           # this branch already waited
-                    if sink is not None and sink.audio_enabled:
+                    if writable:
                         if not await sink.write_silence_to():
+                            # The audio input is gone (a wedged pipe, already
+                            # latched by the sink). The video half is untouched
+                            # and this loop keeps going: it still has a queue to
+                            # drain and a format to watch.
                             _note_audio_dropped(sink)
-                            if sink.audio_dropped:
-                                return          # video-only from here; nothing to repair
-                            audio_rebuild_needed = True
-                            return
-                        if first_write and handover is not None:
+                        elif first_write and handover is not None:
                             first_write = False
                             handover.mark("pump_first_write", sink, sess)
                     continue
                 # Counted BEFORE the write: this is "a frame was decoded and
                 # reached the publisher's pump", which is the fact
-                # /control/status could not report before -- a sink that then
-                # refuses the frame is a separate, already-visible failure
-                # (the rebuild below).
+                # /control/status could not report before. It counts frames the
+                # publisher could not take as well -- a video-only publisher
+                # waiting for its rebuild, or a mismatched shape below -- which
+                # is why publisher_audio_format is served beside it: this
+                # counter answers "is this camera decoding audio", not "is that
+                # audio on the RTSP path".
                 decoded_audio_frames_total += 1
                 observed = ffmpeg_sink.audio_format_of(frame)
                 if observed != known_audio_fmt:
-                    # Purely an observation, exactly like reading (w, h) off a
-                    # video frame -- the GUARD that stops a mismatched frame
-                    # corrupting the pipe lives in sink.write_audio.
+                    # An observation, exactly like reading (w, h) off a video
+                    # frame -- and the load-bearing one: this is what the next
+                    # rotation sizes the publisher's audio input from, and for a
+                    # publisher that came up video-only it is the only evidence
+                    # this camera has audio at all. The GUARD that stops a
+                    # mismatched frame corrupting a running pipe stays in
+                    # sink.write_audio; the check below just avoids reaching it
+                    # once per frame.
                     known_audio_fmt = observed
                     _update_status(**_audio_status_fields(observed))
                 _update_status(decoded_audio_frames=decoded_audio_frames_total)
-                if sink is None or not await sink.write_audio(frame):
+                if not writable:
+                    # A video-only publisher: nothing had been decoded for this
+                    # camera when it was built, or its audio input has been
+                    # given up on. Observing the frame IS the work here; the
+                    # rotation reads known_audio_fmt and rebuilds once.
+                    continue
+                if observed != sink.audio_format:
+                    # ffmpeg was told this pipe's shape once, on the command
+                    # line, and reads it as a fixed-size sample stream: a frame
+                    # of another shape does not fail, it reinterprets every later
+                    # sample from the wrong offset (noise, plus permanent drift
+                    # on a changed rate). So the frame is SKIPPED and its span
+                    # filled from the wallclock, which keeps the muxer lead -- and
+                    # with it ffmpeg's reading of the VIDEO pipe -- intact for the
+                    # rest of this session. The repair is the rotation's, and is
+                    # bounded there.
+                    if not mismatch_logged:
+                        mismatch_logged = True
+                        log.warning(
+                            "%s: the publisher's audio input was launched for %s "
+                            "and the decoded frames now carry %s -- filling with "
+                            "silence and rebuilding it at the next rotation "
+                            "(only the first such frame is logged)",
+                            camera["id"], sink.audio_format, observed)
+                    if not await sink.write_silence_to():
+                        _note_audio_dropped(sink)
+                    continue
+                if not await sink.write_audio(frame):
+                    # Either the input has been given up on (latched by the sink,
+                    # video untouched) or the frame's bytes disagreed with its own
+                    # declared shape past the sink's tolerance. Neither is this
+                    # loop's to repair, and neither may end it: it still has a
+                    # queue to drain and a format to watch.
                     _note_audio_dropped(sink)
-                    if sink is not None and sink.audio_dropped:
-                        return                  # video-only from here; nothing to repair
-                    audio_rebuild_needed = True
-                    return
+                    continue
                 if first_write and handover is not None:
                     first_write = False
                     handover.mark("pump_first_write", sink, sess)
@@ -923,18 +1023,34 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # corrupt the encode) -- otherwise the same RTSP session
                 # carries straight on and readers never notice the rotation.
                 await _stop_hold()
-                # Size the audio input from a REAL decoded frame wherever possible.
-                # The audio m-line comes first in the offer and its RTP starts with
-                # the video's, so by the time ten video frames have been collected
-                # a decoded audio frame has almost always already been queued --
-                # this reads its shape without consuming it and without making the
-                # video path wait on audio. The decoder holds its first
-                # aiortc_opus_patch.SNIFF_PACKETS packets (~400 ms) while it works
-                # out which codec is really arriving, which is deliberately shorter
-                # than the ten-frame video batch above (~670 ms at 15fps) so this
-                # peek still sees a real frame. AUDIO_DEFAULT_FORMAT is only the
-                # bootstrap for the case where none has arrived yet; if it turns
-                # out to be wrong, write_audio's guard forces a rebuild.
+                # Size the audio input from a REAL decoded frame, or do not size
+                # one at all.
+                #
+                # The audio m-line comes first in the offer and its RTP starts
+                # with the video's, so by the time ten video frames have been
+                # collected a decoded audio frame may already have been queued --
+                # this reads its shape without consuming it and without making
+                # the video path wait on audio. Once a shape has been seen it is
+                # remembered across rotations (known_audio_fmt), because a
+                # camera's audio shape is a property of the device, not of a
+                # session; every decoded frame re-checks it (see _pump_audio), so
+                # a device that really does change shape is noticed on its first
+                # frame rather than trusted from an old session.
+                #
+                # When NOTHING has been decoded for this camera yet, the
+                # publisher is built VIDEO-ONLY and audio is added later, by a
+                # single rebuild at a rotation. It used to be built from a
+                # bootstrap GUESS instead -- the 48 kHz stereo shape the SDP
+                # implies -- which on this account's cameras is wrong, because
+                # the track advertised as Opus carries 8 kHz mono G.711 mu-law
+                # (see aiortc_opus_patch). The first real frame then tripped
+                # write_audio's format guard, the guard failed the session, and
+                # the restart threw away the decoder's per-session codec sniff --
+                # so the next sizing window saw nothing decoded either, and the
+                # camera went round that cycle forever with no publisher at all.
+                # It is a livelock rather than a slow start, and only a design
+                # with nothing to guess wrongly removes it: a shape that is not
+                # known yet is not a shape (E81).
                 if consume_audio:
                     observed_audio = getattr(session, "audio_format", None)
                     if observed_audio is not None and observed_audio != known_audio_fmt:
@@ -944,15 +1060,51 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # healthy camera it lands a rotation before the pump's
                         # first frame does.
                         _update_status(**_audio_status_fields(observed_audio))
+                # None means "publish video only", and it is the state a camera
+                # that never sends a single audio packet stays in forever: no
+                # audio input, no format guard to trip, no failed session, video
+                # for as long as the camera streams.
                 desired_audio_fmt = (
-                    (known_audio_fmt or c.AUDIO_DEFAULT_FORMAT) if consume_audio else None)
-                audio_rebuild_needed = False
+                    known_audio_fmt if consume_audio and not audio_given_up else None)
+                # A publisher whose audio input does not match what this camera
+                # really sends. BOUNDED: learning the shape once (video-only ->
+                # the observed shape) is the expected cost and is where the
+                # budget goes; past config.AUDIO_FORMAT_REBUILD_LIMIT the shape
+                # is not settling, and a rebuild kicks every RTSP reader, so the
+                # audio input is given up on and the camera publishes video only
+                # for the rest of the process -- the same trade FfmpegSink
+                # already makes for a wedged audio pipe (E62), for the same
+                # reason: video is worth more than audio. Once given up on, the
+                # comparison is skipped entirely, so the permanent None cannot
+                # read as a fresh change against what ffmpeg was launched with
+                # and rebuild the publisher once per rotation forever.
+                audio_format_changed = (
+                    sink is not None and not audio_given_up
+                    and sink_audio_fmt != desired_audio_fmt)
+                if audio_format_changed and \
+                        audio_format_rebuilds >= c.AUDIO_FORMAT_REBUILD_LIMIT:
+                    audio_format_changed = False
+                    audio_given_up = True
+                    reason = (
+                        f"the decoded audio shape keeps changing (ffmpeg was "
+                        f"launched for {sink_audio_fmt}, the frames now carry "
+                        f"{desired_audio_fmt}) and this camera has already spent "
+                        f"its {c.AUDIO_FORMAT_REBUILD_LIMIT} audio-format "
+                        f"rebuild(s) for this process")
+                    desired_audio_fmt = None
+                    log.error("%s: %s -- publishing VIDEO ONLY for the rest of "
+                              "this process rather than rebuilding the publisher "
+                              "(and kicking every RTSP reader) for each change",
+                              camera["id"], reason)
+                    sink.drop_audio(reason)
+                    _update_status(audio_dropped=True, audio_dropped_reason=reason,
+                                   publisher_audio_format=None)
                 # A confirmed frame-rate change is applied HERE, at a rotation
                 # boundary, and nowhere else -- the frame hold is already bridging
                 # this gap, so the rebuild costs one glitch rather than a glitch
-                # plus a failed session plus a backoff. That is also why it is not
-                # raised from the streaming loop the way an audio-format change is:
-                # a rate change must never take the camera off the air.
+                # plus a failed session plus a backoff. An audio-format change is
+                # applied here for the same reason and by the same rule: neither
+                # may take the camera off the air.
                 #
                 # Re-checked against the CURRENT reading rather than trusted from
                 # when it was confirmed: this session's own first batch may have
@@ -1004,8 +1156,10 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # A changed raw AUDIO format is a rebuild for exactly the
                         # same reason a changed frame size is: ffmpeg was told the
                         # pipe's shape once, on the command line, and cannot be
-                        # told again.
-                        or sink_audio_fmt != desired_audio_fmt
+                        # told again. Decided above, where it is also counted and
+                        # bounded -- an unbounded one is a reader-kicking glitch
+                        # per rotation for as long as the shape keeps moving.
+                        or audio_format_changed
                         # ...and a changed FRAME RATE, for the third time the same
                         # reason: `-framerate` and `-g` were set once, on the command
                         # line. The rate is a device setting that can change while
@@ -1038,6 +1192,22 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # actually happened, so a rebuild that never took place
                         # cannot suppress a later, genuine one.
                         rate.rebuilt(time.monotonic(), rate_rebuild_from)
+                    if audio_format_changed:
+                        # Counted only where a rebuild really happened, and only
+                        # when the AUDIO FORMAT is what caused it: a publisher
+                        # replaced for a dead process or a changed frame size
+                        # picks up the current shape for free and must not spend
+                        # the budget that stops a moving shape rebuilding
+                        # forever.
+                        audio_format_rebuilds += 1
+                        log.info(
+                            "%s: the publisher's audio input is now %s, was %s "
+                            "-- audio-format rebuild %d of the %d this camera "
+                            "may spend in one process. Readers see one "
+                            "reconnect; this is not a fault.",
+                            camera["id"], desired_audio_fmt or "absent",
+                            sink_audio_fmt or "absent", audio_format_rebuilds,
+                            c.AUDIO_FORMAT_REBUILD_LIMIT)
                     # What this ffmpeg was LAUNCHED with -- the command line is
                     # what the rebuild check above is really about, and start()
                     # can legitimately come up video-only anyway (an unsupported
@@ -1051,20 +1221,30 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # audio input at all) carrying audio, but start() can come
                     # up with the audio already dropped (a pipe that would not
                     # open), and that must be as visible as a mid-session drop.
+                    #
+                    # publisher_audio_format is the one status field that DOES
+                    # describe the command line, which is why it is named for the
+                    # publisher and read off the sink: audio_format stays an
+                    # observation (it is written only where a real frame is seen
+                    # -- the peek above and the audio pump -- because reporting
+                    # the launched shape as an observation is what let eleven
+                    # sessions of pure silence read "48000Hz/2ch/s16").
                     _update_status(publisher_alive=True,
                                    audio_dropped=sink.audio_dropped,
-                                   audio_dropped_reason=sink.audio_dropped_reason)
-                    # NOTE: /control/status's audio_format is deliberately NOT
-                    # written here. What the sink was launched with is a guess
-                    # (AUDIO_DEFAULT_FORMAT) until a frame has actually been
-                    # decoded, and publishing that guess is what let eleven
-                    # sessions of pure silence report "48000Hz/2ch/s16". The
-                    # field is written only where a real frame is observed --
-                    # the peek above and the audio pump.
+                                   audio_dropped_reason=sink.audio_dropped_reason,
+                                   publisher_audio_format=_publisher_audio_format(sink),
+                                   audio_format_rebuilds=audio_format_rebuilds)
                 if handover is not None:
                     handover.sink_rebuilt = sink_rebuilt
                     handover.mark("publisher_ready", sink, session)
-                if consume_audio and sink.audio_enabled:
+                if consume_audio:
+                    # Started for every consuming camera, INCLUDING one whose
+                    # publisher came up video-only: the pump is also this loop's
+                    # only observer of the decoded audio shape, and a video-only
+                    # publisher is precisely the case that needs observing (it is
+                    # waiting to learn whether this camera has audio at all). It
+                    # is also what keeps the session's decoded-audio queue
+                    # drained. See _pump_audio.
                     audio_task = asyncio.ensure_future(_pump_audio(session))
                     if handover is not None:
                         # CREATED, not running: ensure_future only schedules it,
@@ -1122,15 +1302,18 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 rate.session_started(time.monotonic())
                 frame_iter = session.frames()
                 while True:
-                    if audio_rebuild_needed:
-                        # Set by the audio pump when the sink refused a frame --
-                        # a changed PCM format, or a pipe ffmpeg has stopped
-                        # reading. Raised from HERE rather than from the pump so
-                        # the repair runs through the identical path a frame-size
-                        # change takes: fail the session, close it, then let the
-                        # sink-repair block above rebuild the publisher with the
-                        # format learned from the real frames.
-                        raise RuntimeError("audio input needs rebuilding, restarting sink")
+                    # NOTHING about audio is checked here, and that is the whole
+                    # of E81. A learned or changed audio shape used to be raised
+                    # from this point as a RuntimeError, on the reasoning that
+                    # the sink-repair block above should own the rebuild. It
+                    # does -- but reaching it by FAILING the session also
+                    # restarts the aiortc decoder, whose codec sniff is per
+                    # session, so each repair destroyed the evidence it was
+                    # repairing towards and the camera looped there forever with
+                    # no publisher at all. The rebuild now happens at the next
+                    # rotation, where the frame hold already bridges the gap and
+                    # the session that learned the shape has been allowed to
+                    # finish. See the sizing block above.
                     remaining_to_rotate = rotate_deadline - time.monotonic()
                     if remaining_to_rotate <= 0:
                         log.info("%s: proactive session rotation", camera["id"])

@@ -178,8 +178,10 @@ repeated frames.
 
 The sink is only actually replaced when it has genuinely died
 (`sink.proc is None`, the process exited, or it is no longer **consuming**;
-see below) or the camera's frame size or raw audio shape changed; otherwise the
-same RTSP session carries straight through the rotation and readers never notice.
+see below), the camera's frame size or frame rate changed, or its raw audio
+shape did (a bounded number of times per process; see "Downstream (listen)
+audio"); otherwise the same RTSP session carries straight through the rotation
+and readers never notice.
 
 ### Publisher liveness: "publishing" vs "publishing to nowhere"
 
@@ -375,10 +377,11 @@ come from the resolution setting.
 7. **Apply, at a rotation.** A confirmed change updates `known_fps` immediately
    and sets a flag; the publisher is rebuilt at the **next session rotation**,
    through the same `sink_wh`-style check a frame-size change uses. It is never
-   raised from the streaming loop the way an audio-format change is, because
-   **a rate change must never take the camera off the air**: the rotation gap is
-   already bridged by the frame hold, so the change costs the one glitch a
-   rebuild costs, not a glitch plus a failed session plus a backoff. The flag is
+   raised from the streaming loop, because **a rate change must never take the
+   camera off the air**: the rotation gap is already bridged by the frame hold,
+   so the change costs the one glitch a rebuild costs, not a glitch plus a
+   failed session plus a backoff. An audio-format change is applied at the same
+   point, by the same rule, and for the same reason. The flag is
    re-checked against the current reading at that point, so a rate that wandered
    and came home rebuilds nothing.
 8. **Bound.** `RATE_REBUILD_MIN_INTERVAL_S` (300 s, a little under two rotations)
@@ -930,23 +933,46 @@ Five properties of that path are load-bearing:
   fill starts: one writer on the pipe at a time. A camera that is offered audio
   and then sends none gets the same top-up from the pump itself, so the muxer
   never waits on a permanently quiet input.
-- **A changed raw PCM shape rebuilds the publisher**, exactly as a changed frame
-  size does. ffmpeg is told the pipe's sample format, rate and channel count once
-  on the command line and reads it as a fixed-size sample stream; a frame in a
-  different shape does not fail, it reinterprets every later sample from the
-  wrong offset: noise, plus permanent drift on a changed rate. The input is
-  normally sized from a real decoded frame (read off the session after the first
-  video frames land, without consuming it); when no audio has arrived yet it
-  starts from the negotiated 48 kHz stereo signed-16 shape and rebuilds if that
-  guess was wrong. On this account's cameras it **is** wrong: the frames are
-  8 kHz mono signed-16, because the track advertised as Opus carries G.711
-  µ-law (see "The audio track is decoded as the codec that arrives" below). That
-  costs at most one rebuild per camera per process, because the learned shape is
-  remembered across rotations, and usually not even that: the decoder commits to
-  a codec within ~400 ms, ahead of the ten-video-frame batch that triggers the
-  peek. Nothing in the pacing is written in terms of a particular rate: the
-  prime, the per-call ceiling and the silence fill are all sample counts derived
-  from the observed rate, so 8 kHz gives the same 100 ms lead as 48 kHz.
+- **The audio input is sized from an observation or not at all, and a changed
+  shape is repaired at a rotation.** ffmpeg is told the pipe's sample format,
+  rate and channel count once on the command line and reads it as a fixed-size
+  sample stream; a frame in a different shape does not fail, it reinterprets
+  every later sample from the wrong offset: noise, plus permanent drift on a
+  changed rate. So the shape has to be right, and the only shape known to be
+  right is one that came off a real decoded frame -- read off the session after
+  the first video frames land, without consuming it, and remembered across
+  rotations because it is a property of the device rather than of a session.
+
+  **A camera with nothing decoded yet gets a VIDEO-ONLY publisher.** Its audio
+  input is added later, by one rebuild at a rotation, once real frames have said
+  what shape they are; the per-session audio pump runs either way and is what
+  observes them. A camera that never sends a single audio packet therefore
+  publishes video, forever, with no audio input, no rebuild and no failed
+  session.
+
+  This is not a fallback, it is the whole mechanism, and the alternative is a
+  livelock rather than a slower start. The input used to be sized from the
+  48 kHz stereo shape the SDP implies whenever nothing had decoded, which on this
+  account's cameras is wrong (the frames are 8 kHz mono, because the track
+  advertised as Opus carries G.711 µ-law -- see "The audio track is decoded as
+  the codec that arrives" below). The first real frame then tripped the pipe's
+  format guard, the guard failed the session, and the restart threw away the
+  decoder's per-session codec sniff -- so the next sizing window was blind for
+  the same reason as the last. On a camera whose audio is sparse, that cycle
+  never ended and the camera published nothing at all.
+
+  **Rebuilds for the audio shape are counted and bounded**
+  (`AUDIO_FORMAT_REBUILD_LIMIT`, 1 per camera per process). Learning the shape
+  once is the expected cost; a shape that keeps moving is not worth a publisher
+  teardown -- every RTSP reader kicked -- per rotation, so past the bound the
+  audio input is dropped in place and the camera publishes video only for the
+  rest of the process, visibly, in `audio_dropped` / `audio_dropped_reason`.
+  Until the rebuild lands, a frame in the wrong shape is skipped and its span
+  filled with silence, so the muxer lead the video pipe rides on is unaffected.
+
+  Nothing in the pacing is written in terms of a particular rate: the prime, the
+  per-call ceiling and the silence fill are all sample counts derived from the
+  observed rate, so 8 kHz gives the same 100 ms lead as 48 kHz.
 
 The audio stream's timeline is its own sample count, and the video's is the wall
 clock (which is why no video input carries `-r`; see "How the video input
@@ -965,19 +991,27 @@ built from, so a hardware path that publishes audio while the software fallback
 silently does not is not expressible.
 
 `/control/status` reports `audio_consumed`, `audio_format`, `audio_codec`,
-`decoded_audio_frames`, `dropped_audio_frames`, `audio_dropped` and
+`publisher_audio_format`, `audio_format_rebuilds`, `decoded_audio_frames`,
+`dropped_audio_frames`, `audio_dropped` and
 `audio_dropped_reason` per camera, plus a process-wide `audio_decoder` block of
 decode counters (see
 [control-api.md](control-api.md)). `audio_format` is the shape of a frame that
 was actually **decoded**, and is `null` until one has been, never the shape the
-publisher was launched with, which is a guess until the first frame arrives.
-`audio_codec` names the decoder those frames came from, `pcmu` or `opus`, which
+publisher was launched with. That shape has its own field,
+`publisher_audio_format`, which is `null` while the publisher is video-only: the
+two differing is what "a rebuild is owed at the next rotation" looks like from
+outside, and `audio_format_rebuilds` is how many of the allowed rebuilds this
+camera has spent. `audio_codec` names the decoder those frames came from,
+`pcmu` or `opus`, which
 is a different question from their shape and the one that went unanswered while
 the bridge spent two days decoding µ-law as Opus.
 `decoded_audio_frames` is what makes flow checkable at a glance: consumption on
-and that counter stuck at `0` is a silent stream. `audio_consumed` keeps saying
-what the camera is **configured** to do; `audio_dropped` is what says the
-publisher stopped doing it. Note that the frame-silence watchdog is
+and that counter stuck at `0` is a silent stream. It counts what this camera
+DECODES, which for the rotation between learning a shape and rebuilding for it
+is briefly more than what reaches the RTSP path; `publisher_audio_format` is the
+field that says whether the publisher is carrying any. `audio_consumed` keeps
+saying what the camera is **configured** to do; `audio_dropped` is what says the
+publisher gave up on an input it had. Note that the frame-silence watchdog is
 **video-only**: audio can stop while a camera still reports `streaming`.
 
 #### The audio track is decoded as the codec that arrives, not the one advertised
@@ -1024,6 +1058,18 @@ launch ffmpeg with the wrong `-ar`/`-ac`. The sniff window's frames are
 **buffered, not dropped**, and the winner's are handed over the moment it is
 chosen, so measuring costs no audio.
 
+The 20-packet window is ~400 ms at 20 ms framing, which is inside the
+ten-video-frame batch (~670 ms at 15 fps) that the publisher's sizing peek
+happens at the end of -- so a camera whose audio is continuous publishes it from
+its very first session. **That is a latency property, not a correctness one.**
+Sparse audio misses the window by a long way (20 packets is 1.28 s of continuous
+audio at the 64 ms packetisation these cameras appear to use, and a quiet room
+does not send that), and what a missed window costs is one rotation of
+video-only publishing, not a mis-sized publisher: see "The audio input is sized
+from an observation or not at all" above. Shortening the sniff to widen the
+margin is explicitly rejected -- it weakens the codec decision to make a race
+less likely rather than removing it, and the race is already gone.
+
 The committed decoder is aiortc's own `aiortc.codecs.g711.PcmuDecoder`, not a
 hand-rolled µ-law table, so its frames carry the `pts`, `time_base`, sample
 format and layout the rest of the pipeline expects (s16, mono, 8000 Hz,
@@ -1043,9 +1089,13 @@ started exactly once per receiver with no restart path.
 
 Nothing above notices. The receiver gates further RTP on the Thread *object*,
 which stays truthy after the thread dies, so packets keep being queued to nobody
-(~8,000 per session); the frame-silence watchdog is video-only; and the sink
-keeps the audio input alive with silence, so the RTSP path carries a perfectly
-valid, perfectly silent AAC track. Measured on the live published stream before
+(~8,000 per session); the frame-silence watchdog is video-only; and a sink that
+already has an audio input keeps it alive with silence, so the RTSP path carries
+a perfectly valid, perfectly silent AAC track. (A decoder that dies before ever
+producing a frame now leaves the publisher video-only instead, since the audio
+input is only ever built from an observed frame; that is visible as
+`publisher_audio_format: null`, but it is still not a fault this bridge can
+repair.) Measured on the live published stream before
 any of this: **9,572,352 of 9,572,352 samples at the s16 noise floor**, with
 `max_volume == mean_volume` (not one nonzero sample) across eleven consecutive
 sessions, each of which logged `Exception in thread audio-decoder` and left zero
