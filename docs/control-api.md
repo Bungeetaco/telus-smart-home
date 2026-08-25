@@ -161,7 +161,11 @@ poll — costs no upstream requests.
       "audio_consumed": true,
       "audio_format": "48000Hz/2ch/s16",
       "decoded_audio_frames": 4821,
-      "dropped_audio_frames": 0
+      "dropped_audio_frames": 0,
+      "audio_dropped": false,
+      "audio_dropped_reason": null,
+      "publisher_alive": true,
+      "last_publish_at": 1723406400
     }
   },
   "talk": {
@@ -191,6 +195,10 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 | `audio_format` | string \| null | The raw PCM shape of an audio frame this camera has actually **decoded**, as `<rate>Hz/<channels>ch/<sample format>` — `null` until one has been. It is an observation, never the shape the publisher was launched with: that is a bootstrap guess (`AUDIO_DEFAULT_FORMAT`) until the first frame lands, and reporting it made this field read `"48000Hz/2ch/s16"` for a camera publishing pure silence. Once observed it persists across rotations, since a camera's audio shape does not change between sessions; use `decoded_audio_frames` to ask whether audio is flowing *now* |
 | `decoded_audio_frames` | int | Lifetime total, since process start, of decoded audio frames this camera's sessions have handed to the publisher. Present (`0`) from the camera's first status entry. Unlike the two drop counters this is updated **as each frame arrives**, not folded in when a session ends, so it does not lag a rotation — it is the field to poll twice and compare. `audio_consumed: true` with this stuck at `0` is a silent stream, not a quiet one, and it is the only field in this response that can tell them apart |
 | `dropped_audio_frames` | int | Lifetime total, since process start, of decoded **audio** frames dropped because the consumer fell behind. Present (`0`) from the camera's first status entry, and accumulated across rotations exactly like `dropped_frames`. Deliberately a separate field: `fps` and `dropped_frames` are a contract about the video stream, and a number that quietly started counting two different things would be worse than no number at all. Note that it cannot detect audio that never decodes at all — a stream that produces nothing drops nothing |
+| `audio_dropped` | bool | Whether the running publisher **gave up on its audio input** mid-session and is now publishing video only — because ffmpeg stopped reading the audio pipe, or the pipe closed under it. Video is worth more than audio, so this degrades instead of rebuilding the publisher (which would kick every RTSP reader off the path), and the degradation lasts until the publisher is next rebuilt for some other reason. `audio_consumed` keeps saying what the camera is **configured** to do; this says whether the publisher is still doing it, and without it the difference is invisible — `decoded_audio_frames` keeps climbing either way, because frames are still being decoded, they just no longer reach ffmpeg |
+| `audio_dropped_reason` | string \| null | What was observed when the audio input was dropped, including the pipe backlog in bytes; `null` while `audio_dropped` is false |
+| `publisher_alive` | bool \| null | Whether this camera's ffmpeg publisher exists **and is still consuming what it is fed** — the process being alive is not sufficient on its own, which is how a camera once reported `state: "streaming"` with `consecutive_failures: 0` while MediaMTX had no path at all. `null` until the camera's first publisher starts. False drives a publisher rebuild, so it is normally seen only in the moment before one; a value that stays false means the rebuild is not succeeding either. It cannot see past ffmpeg — it proves ffmpeg is reading its input, not that MediaMTX still accepts what ffmpeg writes |
+| `last_publish_at` | int \| null | Unix timestamp of the last frame ffmpeg actually **took**, against `last_frame_at`'s "a frame arrived from the camera". `null` until the first published frame. The two normally move together; the gap between them is the difference between "streaming" and "streaming to nowhere", and a `last_frame_at` that keeps advancing while this one does not is a publisher that has stopped reading |
 
 `state: "restart_deferred"` is the most informative value: the camera hit the
 `MAX_CONSECUTIVE_SESSION_FAILURES` escape hatch, but it has fired too often
@@ -203,6 +211,11 @@ a camera whose audio has stopped still reports `state: "streaming"` with a fresh
 audio. What it can tell you is whether audio is flowing: poll
 `decoded_audio_frames` twice and compare, and treat `audio_consumed: true` with
 `audio_format: null` as "this camera has never decoded a single audio frame".
+Two fields answer questions no counter can: `audio_dropped: true` is a publisher
+that stopped carrying audio (rather than a camera that never sent any), and
+`last_publish_at` falling behind `last_frame_at` is a publisher that has stopped
+taking video — the case where every other field in this response still reads
+healthy.
 
 **Example**
 

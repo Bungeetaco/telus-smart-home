@@ -49,6 +49,49 @@ class _AudioTimeout:
 
 AUDIO_TIMEOUT = _AudioTimeout()
 
+# --- how deep the decoded-video queue is, in TIME rather than in frames -------
+# The queue between the decoder (_pump_track) and the publisher
+# (camera_session's sink.write_frame) is what absorbs a consumer hiccup; past
+# its depth the oldest frame is dropped and the camera visibly loses frames.
+# Its depth was a flat 4 frames, which means completely different things per
+# camera: 267 ms at the doorbell's 15fps but 667 ms at the 6fps camera on the
+# same account. Sizing it in milliseconds makes one number mean one thing
+# everywhere.
+#
+# ~500 ms is chosen against what a stall actually costs here: the audio-pacing
+# defect this queue could not absorb stalled the video pipe for 165-330 ms at a
+# time (see config.AUDIO_SILENCE_TOPUP_S), and a session rotation's own hiccup is
+# shorter than that.
+#
+# THE FLOOR AND THE CEILING ARE MEMORY. A decoded 1440x1440 yuv420p frame is
+# 1440*1440*1.5 = 3.11 MB, and this queue is per camera. 8 frames is 24.9 MB,
+# which the container carries comfortably (mem_limit 768 MiB, ~435 MiB in use);
+# 16 would be 49.8 MB per camera and is not a trade worth making for a queue that
+# is not supposed to fill in the first place.
+#
+# And it is DEFENCE IN DEPTH, not the fix. A deeper queue does not remove a
+# stall, it converts dropped frames into latency: every frame it holds is a frame
+# the viewer sees late. The fix is not to stall the writer.
+VIDEO_QUEUE_TARGET_MS = 500
+VIDEO_QUEUE_MIN_FRAMES = 4      # what shipped; also ~667 ms at 6fps
+VIDEO_QUEUE_MAX_FRAMES = 8      # 24.9 MB at 1440x1440 -- see above
+
+
+def video_queue_maxsize(fps=None) -> int:
+    """Frames of decoded-video buffer for a camera running at `fps`.
+
+    `None` (the first session of a camera, before its rate has been measured)
+    takes the same 15fps assumption camera_session's own fps fallback does.
+    """
+    try:
+        rate = float(fps) if fps else 15.0
+    except (TypeError, ValueError):
+        rate = 15.0
+    if rate <= 0:
+        rate = 15.0
+    frames = int(round(rate * VIDEO_QUEUE_TARGET_MS / 1000.0))
+    return max(VIDEO_QUEUE_MIN_FRAMES, min(VIDEO_QUEUE_MAX_FRAMES, frames))
+
 
 def _sdp_media_summary(sdp_text) -> str:
     """Compact, redaction-safe one-line summary of an SDP's media lines.
@@ -143,7 +186,8 @@ def _create_reply_error(reply: dict) -> str | None:
 class JanusCameraSession:
     """One Janus streaming-plugin session for one camera. Yields decoded video frames."""
 
-    def __init__(self, camera: dict, video_source: dict, consume_audio: bool = False):
+    def __init__(self, camera: dict, video_source: dict, consume_audio: bool = False,
+                 fps=None):
         self.camera = camera
         self.vs = video_source
         # Whether an offered audio track is PUMPED (queued for camera_session to
@@ -162,7 +206,12 @@ class JanusCameraSession:
         self._remote_desc_set = asyncio.Event()
         self._pending_candidates: list[dict] = []
         self._webrtcup = asyncio.Event()
-        self._track_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+        # Sized in TIME, from this camera's own measured rate where it is known
+        # (camera_session remembers it across rotations and passes it in). See
+        # video_queue_maxsize.
+        self.fps = fps
+        self._track_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=video_queue_maxsize(fps))
         self._dropped_frames = 0
         # Bounded for exactly the reason the video queue is: a consumer that falls
         # behind must drop and SAY SO, not grow. Only ever filled when

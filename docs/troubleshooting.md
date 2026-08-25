@@ -19,6 +19,8 @@ the component READMEs.
 - [Alarm.com rate-limiting (HTTP 429)](#alarmcom-rate-limiting-http-429)
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
+- [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
+- [The status says `streaming` but MediaMTX has no path](#the-status-says-streaming-but-mediamtx-has-no-path)
 - [A live view drifts further behind real time the longer it runs](#a-live-view-drifts-further-behind-real-time-the-longer-it-runs)
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [A camera's stream carries no audio, or the audio stops](#a-cameras-stream-carries-no-audio-or-the-audio-stops)
@@ -348,9 +350,74 @@ answering at all, so this diagnosis usually needs no curl (see
 [ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity)).
 `dropped_frames` is the lifetime count of frames the ingest queue discarded
 because the consumer fell behind — a steadily climbing total on one camera says
-the encode side cannot keep up with that stream, where the picture alone just
-looks subtly choppy. It updates when each ~165 s session ends, so it can lag
-the live session by up to one rotation.
+something downstream of the decoder is stalling that stream, where the picture
+alone just looks subtly choppy (see the next section for the cause that is not
+the encoder). It updates when each ~165 s session ends, so it can lag the live
+session by up to one rotation. `publisher_alive` and `last_publish_at` answer the
+question the rest of the response cannot: whether ffmpeg is still taking the
+frames `last_frame_at` says arrived.
+
+---
+
+## Frames dropped as `consumer falling behind`, on the camera with audio
+
+**Symptom.** One camera logs `dropped N frame(s) -- consumer falling behind`
+continuously — hundreds to thousands per ~165 s session — while the other camera
+in the same process drops none. `/control/status` looks healthy otherwise. The
+picture is choppy; nothing errors.
+
+**Cause.** Not the encoder, and not the camera's resolution. It is the **audio
+input pacing the publisher**. ffmpeg's muxer can only emit a video packet once it
+holds audio covering that packet's timestamp, so the audio has to stay ahead of
+the video; the audio pipe is primed with a 100 ms lead and that lead decays by
+elapsed real time between top-ups. A quiet camera — a doorbell is quiet nearly
+all the time — is fed only by the silence top-up, and if that runs less often
+than the lead, ffmpeg **stops reading the video pipe** until the next top-up
+arrives. The frames that pile up behind it are dropped by the ingest queue, a
+layer away from anything audio-shaped.
+
+Measured in the deployed container at 15 fps, 900 frames per 60 s run: a 0.5 s
+top-up cadence stalled 120 frames (13%), a 0.1 s cadence stalled 162, and 0.05 s
+stalled none. Two hypotheses that look obvious here are **disproven**: the
+per-frame pixel copy costs 0.24 ms of a 66.7 ms frame interval, and pre-scaling
+the source changes the stall count by exactly zero.
+
+**Fix / design.** `AUDIO_SILENCE_TOPUP_S` is 0.05 s, half the lead, and no single
+write may hand ffmpeg more than the lead's worth of PCM
+(`_AUDIO_SILENCE_MAX_BURST_S`). The frame hold ticks on whichever deadline is
+shorter — the camera's frame interval or the top-up cadence — because one top-up
+per repeated frame is 167 ms on a 6 fps camera. See
+[camera-bridge.md](camera-bridge.md#the-audio-path).
+
+**Diagnosis.** Frames dropping on the camera that has `audio_consumed: true`
+while a video-only camera in the same process drops none is this, not encode
+contention. If both cameras drop, look at the encoder instead.
+
+---
+
+## The status says `streaming` but MediaMTX has no path
+
+**Symptom.** `state: "streaming"`, `consecutive_failures: 0` and a fresh
+`last_frame_at` for a camera, while MediaMTX logs `no stream is available on
+path telus_...` and refuses every reader. Nothing reconnects.
+
+**Cause.** The bridge used to have no way to tell "publishing" from "publishing
+to nowhere". The frame-silence watchdog watches frames *arriving from Janus*, and
+the publisher-repair check asked only whether the ffmpeg **process** had exited —
+which, throughout the outage, it had not.
+
+**Fix / design.** The sink now bounds `stdin.drain()` (`_VIDEO_DRAIN_TIMEOUT_S`,
+5 s), so an ffmpeg that has stopped **consuming** frames is detected, marked, and
+rebuilt rather than left in place — and, just as importantly, no longer parks the
+camera's loop forever on an await with no timeout. `/control/status` carries
+`publisher_alive` and `last_publish_at` beside `last_frame_at`.
+
+**Diagnosis.** Poll `/control/status` twice: `last_frame_at` advancing while
+`last_publish_at` does not is a publisher that has stopped reading. Note the
+limit of the check — it proves ffmpeg is reading its input, not that MediaMTX
+still accepts what ffmpeg writes, so an ffmpeg encoding into a socket that goes
+nowhere would still read as alive. If the status looks healthy and MediaMTX still
+has no path, check MediaMTX's own log for the publisher's ANNOUNCE.
 
 ---
 
@@ -452,6 +519,14 @@ If `audio_consumed` is `true` and there is still no sound:
   specifically because HA's HLS worker takes only aac/mp3 and Frigate's `-c copy`
   preset needs an mp4-legal codec. A consumer configured to expect something else
   will drop it.
+- **The publisher may have given up on its audio input.** If ffmpeg stopped
+  reading the audio pipe, the sink drops audio and keeps publishing video —
+  deliberately, since rebuilding the publisher would kick every RTSP reader off
+  the path. `/control/status` reports `audio_dropped: true` with an
+  `audio_dropped_reason`, and audio stays off for that camera until the publisher
+  is next rebuilt for some other reason. This is the one case where
+  `decoded_audio_frames` keeps climbing while the published stream carries
+  nothing: frames are still being decoded, they just no longer reach ffmpeg.
 - **Audio dying is not automatically recovered.** The frame-silence watchdog is
   video-only, so a camera whose audio stops still reports `state: "streaming"`
   with a fresh `last_frame_at` and nothing reconnects. It is *detectable* —
@@ -468,21 +543,27 @@ Three log lines worth grepping:
 once per session, and the line carries the packet's length and first 16 bytes,
 which is how the still-unidentified offending packet gets identified),
 `ffmpeg has stopped reading the audio pipe`
-(ffmpeg stopped draining input 1 — the publisher is rebuilt) and
+(ffmpeg stopped draining input 1 — the audio input is **dropped** and the same
+publisher keeps publishing video; the line ends `publishing VIDEO ONLY from this
+encoder`, and `/control/status` then carries `audio_dropped: true` with the
+reason) and
 `audio format changed mid-session` (the decoded PCM shape changed, so the
 encoder is relaunched with the real one — expected at most once, on the first
 session that ever carries audio).
 
-**If `ffmpeg has stopped reading the audio pipe` repeats every few seconds**, the
-two inputs' timelines have come apart: the audio timeline is real time, so if the
+**If `ffmpeg has stopped reading the audio pipe` appears at all**, the two
+inputs' timelines have come apart: the audio timeline is real time, so if the
 video timeline advances more slowly than the wall clock, audio outruns video, the
 muxer's interleaver stops accepting audio packets, and the pipe backs up until
-the sink rebuilds the publisher — kicking every RTSP reader each time, while the
-video itself keeps flowing. The known cause is `-r <fps>` on ffmpeg's raw video
-input, which overrides `-use_wallclock_as_timestamps` and makes that timeline
-advance per frame *written* rather than per second *elapsed*; no command line the
-bridge builds carries it, on either path, for exactly this reason (see
-[camera-bridge.md](camera-bridge.md)). Confirm with
+the sink gives up on audio. Audio for that camera stays off until the publisher
+is next rebuilt for some other reason; video is unaffected. The known cause is a
+video timeline running behind real time — historically `-r <fps>` on ffmpeg's raw
+video input, which overrides `-use_wallclock_as_timestamps` and makes that
+timeline advance per frame *written* rather than per second *elapsed*; no command
+line the bridge builds carries it, on either path, for exactly this reason (see
+[camera-bridge.md](camera-bridge.md)). The other way to starve that timeline is
+for the camera to be **dropping frames** (`consumer falling behind` below), so
+check that first. Confirm the command line with
 `docker exec telus-cam-bridge sh -c 'tr "\0" " " < /proc/<pid>/cmdline'` for the
 ffmpeg process: there must be **no `-r` before `-i pipe:0`** — the camera's frame
 rate is declared as `-framerate <fps>` there instead. Any *other* cause of a

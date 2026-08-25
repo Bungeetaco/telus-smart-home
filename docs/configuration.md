@@ -233,6 +233,29 @@ because the hatch kills the process:
 | `RESTART_GUARD_BACKOFF_INITIAL_S` | `60` | First throttled sleep-before-exit (then 120s, 240s, … capped). The sleep runs in-process, so Docker cannot restart until it finishes — this is the hard floor on restart frequency. |
 | `RESTART_GUARD_BACKOFF_MAX_S` | `15 * 60` (15 min) | Cap on that backoff. Well past the ~101s `Retry-After`, so a sustained failure stops re-hammering the limiter that caused it. |
 
+#### Media pipeline: video queue and audio pacing (module constants)
+
+Not environment variables. These live in `config.py`, `janus_client.py` and
+`ffmpeg_sink.py`, and they are the numbers that decide whether the doorbell keeps
+its frames. **`AUDIO_SILENCE_TOPUP_S` and `_AUDIO_SILENCE_MAX_BURST_S` are paced
+against `_AUDIO_PRIME_MS`** — the audio input has to stay ahead of the video or
+ffmpeg stops reading the video pipe; see
+[camera-bridge.md](camera-bridge.md#the-audio-path) for the mechanism and the
+measured table.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `VIDEO_QUEUE_TARGET_MS` (`janus_client`) | `500` | Depth of the decoded-video queue, in **time**. The frame count is `round(fps × this / 1000)`, from the camera's own measured rate, so one number means one thing on every camera — a flat 4 frames was 267 ms at 15 fps and 667 ms at 6 fps. Defence in depth only: a deeper queue converts dropped frames into latency, it does not remove a stall. |
+| `VIDEO_QUEUE_MIN_FRAMES` / `VIDEO_QUEUE_MAX_FRAMES` (`janus_client`) | `4` / `8` | Floor and ceiling on that count. The ceiling is memory: a decoded 1440×1440 yuv420p frame is 3.11 MB, so 8 frames is 24.9 MB per camera (container `mem_limit` 768 MiB, ~435 MiB in use) and 16 would be 49.8 MB. Above ~16 fps the ceiling binds before the time target does. |
+| `AUDIO_DEFAULT_FORMAT` | `("s16", 48000, 2)` | Shape the audio input is sized with while no frame has been decoded yet — a bootstrap only. The first real frame's shape wins, rebuilding the publisher if this guess was wrong. |
+| `AUDIO_QUEUE_MAXSIZE` | `50` | Decoded-audio queue depth (~1 s at 20 ms frames). Drop-oldest with its own counter, like the video queue. |
+| `AUDIO_SILENCE_TOPUP_S` | `0.05` | How long the audio pump waits for a decoded frame before topping the publisher up with silence — and therefore the **cadence of that top-up**. It must stay comfortably under the 100 ms lead the pipe is primed with. It shipped at `0.5`, five times the lead, which stalled 120 of every 900 frames (13%) on the doorbell; `0.1` — exactly the lead — stalled 162. Not a failure timeout: nothing is declared dead. |
+| `AUDIO_PUMP_MAX_BURST_S` | `0.1` | How much audio the pump may write in one uninterrupted pass before yielding to the event loop, so draining a backlog cannot monopolise the loop or the executor `write_frame`'s pixel copy shares. A **yield**, not a real-time pace: audio that lags the video is what stalls the video pipe, so a backlog must be delivered as fast as the loop allows. |
+| `_AUDIO_PRIME_MS` (`ffmpeg_sink`) | `100` | Silence written into the audio pipe the instant it opens. Two jobs: it lets `avformat_find_stream_info` complete on a raw input, and it is the **lead** the audio timeline keeps over the wallclock-stamped video. Every cadence above is chosen against it. |
+| `_AUDIO_SILENCE_MAX_BURST_S` (`ffmpeg_sink`) | `0.1` | Ceiling on a single silence top-up. What it clips is still owed — the fill is derived from elapsed wallclock, so the next call recomputes it and keeps repaying, and A/V sync is unaffected. |
+| `_AUDIO_PIPE_MAX_BUFFER` (`ffmpeg_sink`) | `512 * 1024` | Unwritten audio the pipe transport may hold (~2.7 s) before the sink gives up on **audio only** and keeps publishing video (`audio_dropped` in `/control/status`). |
+| `_VIDEO_DRAIN_TIMEOUT_S` (`ffmpeg_sink`) | `5.0` | How long a frame may sit unread in the video pipe before the publisher is treated as gone and rebuilt. A healthy write is ~2 ms, so this is ~75 frames' worth of not being read. It is also what stops an ffmpeg that has stopped reading from parking the camera's loop forever. |
+
 #### Paths and internal endpoints (module constants)
 
 | Setting | Value | Meaning |
