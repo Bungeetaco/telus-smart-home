@@ -57,10 +57,6 @@ and evidence. Grouped by whether anything can actually be done about them.
   left is to run it on the live doorbell and read the records; the suspected
   mechanism stays unconfirmed until then, and no fix is to be attempted before.
 
-- **E78** (open, needs the provider) - the living room camera HAS a microphone,
-  switched off upstream (`areMicrophoneAndSpeakerOn=False`); not exposed in the
-  app or the portal, so it is a TELUS call. `hasBuiltInMicrophone` is `False`
-  for both cameras and is meaningless here.
 
 **Recently shipped, listed only because the trap is expensive**
 
@@ -2178,8 +2174,8 @@ entries are the mechanism that keeps it under review
   small summary (the last rotation's `worst_gap.ms`, `lead_min_ms` and drop
   count) rather than the whole record.
 
-- **E78 (open, needs the provider) The living room camera has a microphone and
-  it is switched off upstream.** This entry exists because the previous claim
+- **E78 (DONE) The living room camera has a microphone; it was switched off
+  upstream, and TELUS enabled it.** This entry exists because the previous claim
   was wrong and was repeated in several places: that the ADC-V522IR "cannot take
   audio". What was actually observed is that requesting audio on it produces
   zero video frames and a first-frame timeout. That shows the session dies, not
@@ -2264,3 +2260,44 @@ entries are the mechanism that keeps it under review
   **Operational note that will bite someone: once a manual `<filesystem>` device
   is in the XML, edit that VM in Unraid's XML view only.** The Form view can drop
   manual additions. A backup of the pre-change XML is on the flash drive.
+
+- **E78 resolution, 2026-08-25.** TELUS enabled two-way audio on the ADC-V522IR
+  server-side. Their words: it is a server-side setting a previous technician had
+  not set up, because their newer cameras usually do not support it. The
+  diagnosis in this entry was right and the `hasBuiltInMicrophone` field was as
+  meaningless as recorded.
+
+  The flags moved as predicted: `areMicrophoneAndSpeakerOn` False to True,
+  `microphoneAndSpeakerFeatureSupport` 0 to 2, `supports_call_volume` False to
+  True. The camera then negotiated audio immediately, where before it had
+  delivered zero frames and timed out.
+
+  **Three things that would each have cost a session to rediscover.**
+
+  **1. Enabling it was not enough. The portal toggle had to be cycled.** With the
+  provisioning in place the camera offered `audio(port=9,opus)`, the track was
+  consumed, `webrtcup` succeeded and MediaMTX published two tracks, while
+  `decoded_audio_frames` stayed at **0** and `audio_format` stayed **null**
+  across five rotations and fifteen minutes. Toggling Microphone/Speaker off and
+  back on in the alarm.com portal fixed it on the next session. So the platform
+  can report audio enabled while the camera is still not capturing.
+
+  **2. A hypothesis recorded here was wrong, and the wrong version should not be
+  repeated.** The obvious suspect for the silence was `isAudioRecordingOn`, the
+  one flag still `False` where the doorbell reads `True`, with
+  `canToggleAudioRecording` also `False`. It is **not** the gate: audio flows now
+  with that flag still `False`. Whatever `isAudioRecordingOn` governs, it is not
+  live-stream audio, and a second support call asking for it would have been
+  wasted.
+
+  **3. The technician's change silently reset the live video resolution.** The
+  camera came back publishing 640x360 where it had been 1280x720, which looked
+  like audio costing resolution and was not. `live_resolution` had been reset to
+  the low option; setting it back in the portal restored 1280x720 on the next
+  renegotiation, exactly as E34 says that setting behaves. **After any
+  provider-side change to a device, re-check its other settings**, because a
+  technician editing server-side config is exactly when unrelated values move.
+
+  Both cameras now record with audio: verified in written segments as `h264` plus
+  `aac` 48 kHz mono. The living room's Frigate input was moved to
+  `preset-record-generic-audio-copy` for the same reason as the doorbell's (E79).
