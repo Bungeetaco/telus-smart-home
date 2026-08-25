@@ -25,6 +25,16 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 **Blocking, and actionable now**
 
+- **E80**: fixed in the bridge, **awaiting live validation**. The audio track is
+  advertised as Opus and carries G.711 mu-law at 8 kHz, so ~94% of it was being
+  discarded and the published audio was ~6% real audio and ~94% silence fill.
+  The decoder now sniffs the first 20 packets of each session and commits to the
+  codec that actually arrives. Self-verifying: `decoded_audio_frames` should
+  climb at ~50/s per consuming camera rather than ~3/s, with
+  `audio_codec: "pcmu"`, `audio_format: "8000Hz/1ch/s16"` and
+  `audio_decoder.discarded` flat. The entry lists what could not be verified
+  from a workstation, including whether 8 kHz AAC is as acceptable downstream as
+  48 kHz was.
 - **E62 / E60**: fixed in the bridge, **awaiting live validation**. Audio
   consumption took the doorbell off the air after ~14 minutes while
   `/control/status` reported `streaming` throughout. Four changes shipped: audio
@@ -64,6 +74,11 @@ and evidence. Grouped by whether anything can actually be done about them.
   VM ever fails to start with `virtiofsd died unexpectedly`, the real error is in
   `/var/log/syslog`, not the empty virtiofsd log, and the fix is
   `--sandbox=chroot` in `/etc/libvirt/virtiofsd.opt`.
+
+- **E81** (open, BLOCKING) - a camera with sparse audio cannot finish the E80
+  codec sniff before the sink is sized, and livelocks on
+  `audio input needs rebuilding`. The living room is video-only again because of
+  it; the doorbell is unaffected and correct.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -1496,10 +1511,26 @@ when it ships.
   The rejected packet is **G.711 µ-law audio on the Opus payload type**:
   `len=512`, bytes clustered on `0x7c`–`0x7f` and `0xfc`–`0xff`, which is µ-law
   near-silence. Neither of the suspected shapes (Ogg `OpusHead`/`OpusTags`, H.264
-  NAL bytes); those merely reproduce the same error class. The doorbell's own
-  upstream audio is µ-law, so the likeliest reading is that the relay forwards a
-  device-native frame before its Opus transcode is running; that remains
-  **unverified**. It costs a few milliseconds of audio per session.
+  NAL bytes); those merely reproduce the same error class.
+
+  **The reading of that packet recorded here was wrong, and the error is the
+  interesting part.** "The relay forwards a device-native frame or two before its
+  Opus transcode is running, costing a few milliseconds of audio per session"
+  was inferred from the log line firing **once per session**, and the log line
+  fires once per session because this patch throttles it to once per session.
+  The whole stream is µ-law; ~94% of it was being dropped, and the drop was
+  invisible because the only evidence was a line whose cadence was set by the
+  logger rather than by the stream. See **E80**, which is where the mislabel is
+  identified and fixed. Two lessons stay attached to this entry: a throttled log
+  line's cadence says nothing about the frequency of what it reports, and a
+  guard that discards is not a fix until the discard rate is counted.
+
+  This also revises the live confirmation above. Zero dead decoder threads and
+  a track that measures real sound are both true and are still the evidence that
+  the thread-death half is fixed; `decoded_audio_frames` climbing at 730 in
+  three minutes (4/s) was read as "audio is flowing" when it is 8% of the ~50/s a
+  20 ms audio stream implies. The number needed for that judgement was in the
+  entry all along.
 
 - **E61 (DONE) Audio health is visible from Home Assistant.** Each camera gets a
   `Audio state` ENUM diagnostic sensor on its own device, fed by the existing
@@ -2301,3 +2332,181 @@ entries are the mechanism that keeps it under review
   Both cameras now record with audio: verified in written segments as `h264` plus
   `aac` 48 kHz mono. The living room's Frigate input was moved to
   `preset-record-generic-audio-copy` for the same reason as the doorbell's (E79).
+  That 48 kHz is the rate the bridge published while it was Opus-decoding a
+  µ-law stream; with **E80** it becomes 8 kHz mono, which is the rate the cameras
+  actually send. The segments still carry `h264` plus `aac`, which is what the
+  `-c copy` recording preset needs.
+
+- **E80 (DONE in the bridge, awaiting live validation) The audio track is
+  advertised as Opus and carries G.711 mu-law, so ~94% of it was being
+  discarded.** Downstream audio from both cameras arrived as short fragments
+  separated by silence, which sounded like speech skipping around rather than
+  like an outage, while every health signal stayed green: `state: streaming`,
+  `audio_consumed: true`, `audio_dropped: false`, and `decoded_audio_frames`
+  climbing.
+
+  **Measured.** Over 60 s the doorbell decoded **181** audio frames and the
+  living room **268**, where 20 ms audio frames are 50/s. So roughly **6 to 9
+  percent** of the published audio timeline was real audio and the rest was the
+  sink's silence fill.
+
+  **The cause is a codec mislabel, not a decoder fault.** The Janus offer
+  advertises `audio(port=9,opus)`. The bytes are **G.711 mu-law at 8 kHz**.
+  aiortc believes the advertised codec, tries to Opus-decode mu-law, and
+  `aiortc_opus_patch.py` discards what libopus rejects to keep the decoder
+  thread alive (E59). The fraction that happens to satisfy a TOC byte decodes as
+  noise, and that fraction is what was getting through.
+
+  Four independent lines of evidence, recorded so none of this is re-derived:
+
+    * **The discarded payloads.** The doorbell's head is
+      `7effff7f7efe7ffffffffefefeff7efe`: alternating `0x7e`/`0x7f`/`0xfe`/`0xff`
+      is mu-law encoding near-silence, which is what a doorbell microphone
+      produces nearly all the time. The living room's is
+      `332038a8a9bd2223989e1e289e9f3a1d`, ordinary varying audio as mu-law.
+    * **The official Android app, instrumented.** It instantiated **no audio
+      codec at all** (only `video/avc` and `video/raw`), which is what G.711
+      decoded in software looks like.
+    * **`AudioFlinger`'s own numbers from that run.** `notificationFrames to
+      160` is 20 ms at 8 kHz. Two `AudioTrack` sessions delivered 252,160 and
+      212,480 frames: 31.5 s and 26.6 s at 8 kHz, matching two roughly
+      30-second viewings. At 48 kHz they would be 5 s, i.e. the app would be as
+      broken as the bridge was, and it is not.
+    * **The device is mu-law in both directions.** Talkdown to this doorbell
+      works as mu-law at 8 kHz, and L16 is impossible on it (E4).
+
+  **Fixed by sniffing rather than by believing the SDP.** Each session decodes
+  its first `SNIFF_PACKETS` (20) packets with **both** candidate decoders,
+  commits to one for that session's life, and logs the decision once. The
+  committed decoder is aiortc's own `g711.PcmuDecoder`, not a hand-rolled mu-law
+  table, so its frames carry the `pts`, `time_base`, format and layout the rest
+  of the pipeline expects.
+
+  Four design choices, each deliberate:
+
+    * **Decide once, not per packet.** Trying both decoders forever pays for two
+      decodes on every packet and can flap mid-stream, and a flap here is not
+      cosmetic: a frame in the other codec's shape (48 kHz stereo against 8 kHz
+      mono) trips `write_audio`'s format guard and rebuilds the publisher,
+      kicking every RTSP reader, once per rotation forever.
+    * **Emit nothing until committed, and HOLD rather than drop.** One spurious
+      Opus frame ahead of a mu-law stream is enough to size the ffmpeg audio
+      input wrongly, so the sniff window's frames are buffered and the winner's
+      are delivered at the commit. Measuring costs no audio.
+    * **Opus wins ties, wins when nothing decoded, and wins whenever libopus is
+      reading `OPUS_CONFIDENCE` (0.75) of the sample.** Only a stream libopus
+      largely *cannot* read is re-labelled, so a camera that really does send
+      Opus is unaffected, and a stream neither decoder can read degrades to
+      exactly the previous behaviour: discard the packet, keep the decoder
+      thread alive, keep publishing video.
+    * **20 packets** is ~400 ms at 20 ms framing: wide enough that the decision
+      cannot be luck, short enough to land before the ten-video-frame batch
+      (~670 ms at 15fps) that sizes the publisher's audio input.
+
+  **Counters, because one log line per session is exactly how this hid.** E59's
+  drop line is throttled to once per session by necessity, and that made a
+  *wholesale* mismatch read like an occasional glitch for two days.
+  `/control/status` now serves a process-wide `audio_decoder` block
+  (`decoded_opus`, `decoded_pcmu`, `discarded`, `sessions_opus`,
+  `sessions_pcmu`, plus the two constants) in which **every packet lands in
+  exactly one bucket**, and each camera gets an `audio_codec` field naming the
+  decoder its frames came from. Process-wide is a limit rather than a choice:
+  aiortc builds its decoder inside `decoder_worker`, a thread no
+  `RTCRtpReceiver` keeps a reference to, so a count cannot honestly be
+  attributed to a camera; the per-camera field is derived from the decoded
+  frames' shape instead, which identifies the decoder exactly.
+
+  **The sample rate changes with it**, from 48 kHz stereo to 8 kHz mono. Nothing
+  in the pacing was rate-specific and this was verified rather than assumed: the
+  100 ms prime, the 0.1 s per-call ceiling and `write_silence_to`'s fill are all
+  sample counts derived from the observed rate, so the muxer lead E60 depends on
+  is unchanged, and the top-up cadence is a time and therefore rate-independent.
+  The first session of a process still sizes the publisher from
+  `AUDIO_DEFAULT_FORMAT` (48 kHz stereo, what the SDP implies) and rebuilds once
+  when the real shape arrives; the learned shape persists across rotations, so
+  it costs at most one rebuild per camera per process.
+
+  **What to expect live, and it is self-verifying.** `decoded_audio_frames`
+  should climb at roughly the packet rate rather than at 3/s: about **50 frames
+  per second per consuming camera**, i.e. ~1500 across a 30 s poll, and the
+  fraction of the audio timeline that is real audio should go from ~6% to
+  essentially 100%. `/control/status` should show `audio_codec: "pcmu"` and
+  `audio_format: "8000Hz/1ch/s16"` on both cameras, `audio_decoder.discarded`
+  flat at or near zero, and `sessions_pcmu` climbing by one per camera per
+  rotation while `sessions_opus` stays at 0. One `committing this session to`
+  line per session per camera.
+
+  **Not verified from here, and worth knowing:**
+
+    * **The packet rate itself.** The 6-to-9-percent figures come from decoded
+      frames per second against an assumed 50 packets/s. E59 logged a `len=512`
+      payload, which at 8 kHz mu-law is 64 ms and would imply ~15.6 packets/s
+      and a higher accidental-Opus rate. Either way the sniff's margin holds,
+      but the exact discard fraction is only pinned once
+      `audio_decoder.discarded` is read live against `decoded_pcmu`.
+    * **The RTP clock.** `PcmuDecoder` reads the RTP timestamp on a 1/8000 time
+      base; whether the gateway stamps at 8 kHz or at the advertised 48 kHz is
+      unknown. Harmless either way, because nothing downstream reads the `pts`:
+      the ffmpeg audio input carries no `-use_wallclock_as_timestamps` and its
+      timeline is its own sample count.
+    * **8 kHz AAC downstream.** The publisher now encodes AAC at 8 kHz. AAC-LC
+      supports it and ffmpeg accepts it, but that HA's HLS worker and Frigate's
+      `-c copy` preset are as happy with 8 kHz as with 48 kHz has not been
+      confirmed on the live stack. First thing to check after deploying: that
+      recorded segments still carry an `aac` track and that HA still plays it.
+    * **Why the gateway mislabels the track.** Still unknown, and it does not
+      need to be known: the bridge decodes what arrives. The plausible reading
+      is that the relay forwards the device's native mu-law without transcoding
+      while advertising the codec its browser player negotiates.
+
+  **Deferred, recorded rather than lost:**
+
+    * **The Home Assistant integration does not surface `audio_codec`.** The
+      `Audio state` sensor (E61) carries `audio_format` as an attribute but not
+      the codec, and its `flowing` state compares a counter against itself, so a
+      fragment stream reads `flowing` exactly like a whole one. Adding the
+      attribute, or a "frames per second" derivation that could tell them apart,
+      is an integration change (and a version bump) rather than a bridge one.
+    * **The counters are process-wide.** Per-camera attribution would need
+      either a change upstream in aiortc (a receiver that keeps a handle on its
+      decoder) or a decoder built by this bridge instead of by
+      `decoder_worker`. Neither is worth doing for a counter; the per-camera
+      `audio_codec` covers the question that actually gets asked.
+    * **`AUDIO_DEFAULT_FORMAT` is still the SDP's shape.** Setting it to 8 kHz
+      mono would remove the one first-session rebuild on this account and add
+      one on any camera that really does send Opus. It is left as the shape an
+      unknown camera's SDP claims.
+
+- **E81 (open, BLOCKING audio on sparse-audio cameras) A camera whose audio is
+  sparse cannot finish the codec sniff before the sink is sized, and livelocks.**
+  Found by deploying E80. The doorbell, whose audio is continuous, committed to
+  mu-law in about two seconds and has run correctly since. The living room did
+  not: it failed every session with
+  `RuntimeError: audio input needs rebuilding, restarting sink`, reconnected,
+  and started over, never converging. It had no publisher at all until audio was
+  switched back off for that camera.
+
+  The sequence: `camera_session` sizes the ffmpeg audio input from a peek at the
+  first ten video frames. The sniff needs 20 audio packets, which at 64 ms
+  packetisation is 1.28 s of *continuous* audio. A quiet room sends far less than
+  that in the window, so the peek sees no decoded frame, the sink is built at the
+  `AUDIO_DEFAULT_FORMAT` 48 kHz shape, the first real 8 kHz frame then demands a
+  rebuild, the rebuild raises from the streaming loop, the session restarts, and
+  the sniff begins again from zero. Each restart throws away the sniff progress
+  that would have ended it.
+
+  **The load-bearing detail is that the failure mode is a loop, not a stall.**
+  Any fix must make progress survive a restart, or must stop an audio-format
+  change from failing the session at all.
+
+  Candidate directions, none implemented: build the sink video-only when the
+  audio format is not yet known and do exactly one rebuild once it is; or bound
+  format-change rebuilds per session and degrade to video-only after that, the
+  way E62 already degrades a wedged audio pipe; or carry sniff state across
+  sessions for a camera, since the codec is a property of the device rather than
+  of the session. The last is the most direct but needs care: the codec must
+  still be re-checked if the device or the gateway ever changes.
+
+  Not the sniff length. Shortening it would make the race less likely without
+  removing it, and would weaken the codec decision that E80 deliberately made
+  strong.

@@ -27,6 +27,7 @@ the component READMEs.
 - [`More than 1000 frames duplicated` on a healthy-looking camera](#more-than-1000-frames-duplicated-on-a-healthy-looking-camera)
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [A camera's stream carries no audio, or the audio stops](#a-cameras-stream-carries-no-audio-or-the-audio-stops)
+- [Audio plays in fragments that jump around](#audio-plays-in-fragments-that-jump-around)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
 - [Talkdown audio sounds bad on the doorbell speaker](#talkdown-audio-sounds-bad-on-the-doorbell-speaker)
 - [Talkdown logs a certificate fingerprint mismatch](#talkdown-logs-a-certificate-fingerprint-mismatch)
@@ -638,14 +639,21 @@ no audio track is ever offered for it, so the bridge logs
 `JANUS_CONSUME_AUDIO names this camera but JANUS_REQUEST_AUDIO does not` **once**
 and treats consumption as off. Check `/control/status`: `audio_consumed` is the
 resolved answer, `audio_format` is the shape of a frame the camera has actually
-decoded (`null` until one has been), and `decoded_audio_frames` is the count of
-those frames.
+decoded (`null` until one has been), `audio_codec` names the decoder those
+frames came from, and `decoded_audio_frames` is the count of those frames.
 
 **Read those two together first.** `audio_consumed: true` with
 `audio_format: null` and `decoded_audio_frames: 0` means the bridge has never
 decoded a single audio frame from this camera; the published track is silence
 the sink generated, not audio the camera sent. If the counter is climbing
 between two polls, audio *is* flowing and the problem is downstream.
+
+**Then check the RATE it is climbing at.** Audio arrives in 20 ms frames, so a
+healthy stream decodes about **50 frames a second**: two polls 30 s apart should
+move `decoded_audio_frames` by ~1500. A counter that climbs at a few a second is
+the [codec-mismatch case below](#audio-plays-in-fragments-that-jump-around),
+not a quiet room, and it is the one failure here that a moving counter does not
+rule out.
 
 With the HA integration installed you do not have to do that comparison by
 hand: each camera carries an **Audio state** sensor that does exactly this
@@ -658,7 +666,7 @@ is the decoder-death case below.
 
 If `audio_consumed` is `true` and there is still no sound:
 
-- **A malformed packet may have killed the decoder thread.** aiortc's Opus
+- **An undecodable packet may have killed the decoder thread.** aiortc's Opus
   decoder has no error handling where its H.264 one does, and its decode loop is
   a thread target, so one bad packet ends the session's `audio-decoder` thread
   permanently: while RTP keeps arriving, the video watchdog keeps saying
@@ -667,7 +675,7 @@ If `audio_consumed` is `true` and there is still no sound:
   the patch being absent or having stopped applying is
   `Exception in thread audio-decoder` in the container log, one per session,
   with `decoded_audio_frames` pinned at `0`. See
-  [camera-bridge.md](camera-bridge.md#aiortcs-opus-decoder-is-patched-to-survive-a-bad-packet).
+  [camera-bridge.md](camera-bridge.md#the-audio-track-is-decoded-as-the-codec-that-arrives-not-the-one-advertised).
 - **The camera may not be sending any.** The gateway offers the track whether or
   not the camera fills it. The stream still carries an audio track (the bridge
   keeps it alive with silence) so a silent track is not a broken one. This is
@@ -696,14 +704,17 @@ If `audio_consumed` is `true` and there is still no sound:
   `dropped_audio_frames` separately for a consumer falling behind; a stream that
   simply went quiet drops nothing.
 
-Three log lines worth grepping:
-`OpusDecoder: dropped an undecodable packet and kept the audio decoder alive`
-(the patched decoder throwing away a packet libopus rejected; expected at most
-once per session. The packet is identified: G.711 µ-law arriving on the Opus
-payload type, at stream start; see
-[camera-bridge.md](camera-bridge.md#downstream-listen-audio); the line keeps
-carrying the length and first 16 bytes so a *different* undecodable shape
-would show itself),
+Four log lines worth grepping:
+`audio decoder <tag>: committing this session to` (which codec the session
+decided the arriving bytes really are, with the counts it decided on; one line
+per session per camera, and the `<tag>` ties it to that session's later drop
+lines, since aiortc names every audio decoder thread `audio-decoder` and the
+decoder does not know which camera it belongs to),
+`dropped an undecodable packet and kept the audio decoder alive`
+(the committed decoder throwing away a packet it could not read; the line keeps
+carrying the length and first 16 bytes so a *different* undecodable shape would
+show itself, and it is throttled, so read the running total from
+`/control/status`'s `audio_decoder.discarded` rather than counting lines),
 `ffmpeg has stopped reading the audio pipe`
 (ffmpeg stopped draining input 1: the audio input is **dropped** and the same
 publisher keeps publishing video; the line ends `publishing VIDEO ONLY from this
@@ -775,6 +786,63 @@ Backends:
 > That is a decode problem in that other process, not this bridge's encode
 > backend: if a local detector is silently missing frames, compare its actual
 > capture fps against its configured detect fps and try software decode there.
+
+---
+
+## Audio plays in fragments that jump around
+
+**Symptom.** A camera's stream has sound, but it arrives in short fragments
+separated by silence, so speech is unintelligible and sounds like it is skipping
+around. Every health signal is green: `state: "streaming"`,
+`audio_consumed: true`, `audio_dropped: false`, and `decoded_audio_frames` is
+climbing.
+
+**Cause.** The bridge is decoding the audio track as the **wrong codec**. The
+Janus offer advertises `audio(port=9,opus)`, and on this account's cameras the
+bytes are **G.711 mu-law at 8 kHz**. A decoder that believes the advertised
+codec rejects most of the stream, and the small fraction that happens to satisfy
+a TOC byte decodes as noise; every rejected packet's span is published as the
+sink's generated silence, which is why it sounds like fragments rather than like
+an outage. Measured live while this was happening: the doorbell decoded **181
+audio frames in 60 s** and the living room **268**, where 20 ms frames are 50/s,
+so roughly 6 to 9 percent of the audio timeline was real.
+
+**Diagnosis.** Two fields answer it directly, and neither needs the container
+log:
+
+```bash
+curl -s -H "Authorization: Bearer $SECRET" $BASE/control/status \
+  | jq '{decoder: .audio_decoder,
+         cameras: (.cameras | map_values({audio_codec, audio_format,
+                                          decoded_audio_frames}))}'
+```
+
+- Each camera's **`audio_codec`** names the decoder its frames actually came
+  from: `"pcmu"` (G.711 mu-law, 8 kHz mono) or `"opus"` (48 kHz stereo). On this
+  account it should read `"pcmu"`.
+- The process-wide **`audio_decoder`** block accounts for every audio packet in
+  exactly one of `decoded_opus`, `decoded_pcmu` and `discarded`. **A large
+  `discarded` beside a small decoded count is the mismatch.** Healthy looks like
+  `discarded` flat at or near zero while `decoded_pcmu` climbs at ~50/s per
+  consuming camera.
+
+Poll `decoded_audio_frames` twice 30 s apart as a cross-check: ~1500 apart is a
+whole timeline; a few tens apart is a fragment stream.
+
+**Why the log alone was not enough.** The decoder's drop line is throttled to
+once per session on purpose, because a per-packet WARNING on a 50 packets/s
+stream would be its own outage. That makes a *wholesale* mismatch look exactly
+like an occasional glitch, which is how this went unnoticed for two days. The
+counters exist so it cannot happen again; read them, not the line count.
+
+**Fix.** Nothing to configure. The bridge decides per session, by decoding the
+first 20 packets with both candidate decoders and committing to whichever one
+actually reads the stream, and it logs the decision once
+(`audio decoder <tag>: committing this session to ...`). If `audio_codec` reads
+`"opus"` with a large `discarded`, the decision is going the wrong way: capture
+the commit line, which carries the counts it decided on and the first packet
+libopus rejected, and see
+[camera-bridge.md](camera-bridge.md#the-audio-track-is-decoded-as-the-codec-that-arrives-not-the-one-advertised).
 
 ---
 

@@ -75,6 +75,7 @@ _TMP = tempfile.mkdtemp(prefix="telus-control-test-")
 c.SHARED_DIR = _TMP
 c.CONTROL_SECRET_PATH = os.path.join(_TMP, "control_secret")
 
+from bridge import aiortc_opus_patch  # noqa: E402
 from bridge import control_server as cs  # noqa: E402
 from bridge.mws_client import TOKEN_STATUS_LOGGED_OUT  # noqa: E402
 from bridge.telus_auth import RateLimited  # noqa: E402
@@ -943,6 +944,43 @@ async def test_snapshot_errors_never_log_the_signed_url():
           "the signed URL appears in no log record")
 
 
+async def test_status_serves_the_audio_decode_counters():
+    """/control/status carries the audio decode counters, not just the log.
+
+    The decoder's own drop line is once per session by necessity, and that is
+    exactly how a WHOLESALE codec mismatch hid for two days behind a line that
+    read like an occasional glitch: the track advertised as Opus was carrying
+    G.711 mu-law, so ~94% of packets were dropped and the published audio was
+    mostly silence fill. The counters are what make that impossible to miss, and
+    they are only useful if they are actually reachable -- a route that quietly
+    stopped serving them would put the failure back out of sight.
+
+    Process-wide by necessity too: aiortc builds its decoder inside
+    decoder_worker, a thread no RTCRtpReceiver keeps a handle on, so a count
+    cannot honestly be attributed to a camera. The per-camera answer is each
+    camera's own `audio_codec`, which camera_session writes.
+    """
+    async with _app() as (client, headers, _calls):
+        resp = await client.get("/control/status", headers=headers)
+        body = await resp.json()
+
+    assert resp.status == 200, resp.status
+    assert "audio_decoder" in body, (
+        f"/control/status no longer carries the audio decode counters: "
+        f"{sorted(body)}")
+    counters = body["audio_decoder"]
+    for key in ("decoded_opus", "decoded_pcmu", "discarded",
+                "sessions_opus", "sessions_pcmu", "sniff_packets",
+                "opus_confidence"):
+        assert key in counters, (
+            f"{key} is missing from the served counters: {counters}")
+    assert counters["sniff_packets"] == aiortc_opus_patch.SNIFF_PACKETS, counters
+    # ...and it is the live snapshot, not a frozen copy taken at import.
+    assert counters == aiortc_opus_patch.decode_stats(), counters
+    print("  ok  status: the audio decode counters are served whole, live, and "
+          "process-wide")
+
+
 async def main():
     failures = 0
     tests = (test_records_are_found_inside_the_ack_envelope,
@@ -962,7 +1000,8 @@ async def main():
              test_mws_routes_report_unavailable_without_a_talk_manager,
              test_a_rate_limited_website_call_answers_429_not_502,
              test_events_and_history_limits_are_clamped,
-             test_snapshot_errors_never_log_the_signed_url)
+             test_snapshot_errors_never_log_the_signed_url,
+             test_status_serves_the_audio_decode_counters)
     for test in tests:
         try:
             result = test()

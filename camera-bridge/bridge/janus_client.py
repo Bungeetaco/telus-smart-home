@@ -18,11 +18,15 @@ from aiortc.sdp import candidate_from_sdp
 
 from . import config as c
 # Imported for its import-time side effect, and imported HERE because this module
-# is what builds the RTCPeerConnection that creates the Opus decoder. Without it,
-# one malformed Opus packet kills the session's audio-decoder thread outright
-# (aiortc's Opus decoder has no error handling where its H.264 one does), and the
-# published audio track is silence for the life of the session -- which is exactly
-# what was happening. See the module docstring for the measurements.
+# is what builds the RTCPeerConnection that creates the audio decoder. It does two
+# things without which this bridge publishes no usable audio at all. It decodes
+# the track as the codec that actually ARRIVES rather than the one the offer
+# below advertises: the offer says `audio(port=9,opus)` and the bytes are G.711
+# mu-law at 8 kHz, so believing the label left ~6% of the audio timeline real and
+# the rest silence fill. And it keeps a packet no decoder can read from killing
+# the session's audio-decoder thread outright (aiortc's Opus decoder has no error
+# handling where its H.264 one does), which published silence for the life of the
+# session. See that module's docstring for the measurements.
 from . import aiortc_opus_patch  # noqa: F401
 # Single definition of "what shape is this decoded audio frame" -- the sink's raw
 # PCM guard compares against exactly this tuple, so it must not be re-derived here.

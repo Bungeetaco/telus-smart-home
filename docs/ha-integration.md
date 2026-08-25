@@ -1364,6 +1364,16 @@ not apply: entity creation is sticky, so an entity that appears and vanishes
 with a bridge env var breaks any automation naming it, and a camera with no
 audio entity at all reads as "fine", the very gap this closes.
 
+What `flowing` cannot tell you is whether the timeline is **whole**. It compares
+a counter against itself, so a stream decoding a few frames a second reads
+`flowing` exactly like one decoding the ~50/s that 20 ms audio frames imply.
+That difference is audible (fragments of speech separated by silence fill) and
+was real on this account, where the audio track advertised as Opus turned out to
+carry G.711 mu-law. The bridge answers it directly, and the integration does not
+surface it: read `audio_codec` and the process-wide `audio_decoder` counters on
+[`/control/status`](control-api.md#get-controlstatus), or watch
+`decoded_audio_frames` move by ~1500 across a 30 s poll rather than by tens.
+
 Reading the state honestly: `stalled` reflects **one poll window** (30 s).
 Session rotation and a reconnect can each span one, so trigger on the state
 *persisting*, not on the first sample:
