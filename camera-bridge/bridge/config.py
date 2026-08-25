@@ -489,10 +489,19 @@ def janus_consume_audio_for(camera_id) -> bool:
 # Sample format assumed for the audio input while NO audio frame has been decoded
 # yet. It is only ever a bootstrap value: camera_session takes the real format off
 # the first decoded frame and rebuilds the publisher if this guess was wrong (the
-# raw-PCM pipe guard in ffmpeg_sink.write_audio is what forces that). It matches
-# what the gateway negotiates -- the offer is `audio(port=9,opus)`, and aiortc
-# decodes Opus to 48 kHz stereo signed-16 -- so in practice the guess is right and
-# no rebuild happens.
+# raw-PCM pipe guard in ffmpeg_sink.write_audio is what forces that).
+#
+# It is the shape the SDP implies -- the offer is `audio(port=9,opus)` and aiortc
+# decodes Opus to 48 kHz stereo signed-16 -- and on this account's cameras it is
+# WRONG, because the track advertised as Opus carries G.711 mu-law and decodes to
+# 8 kHz mono signed-16 (see aiortc_opus_patch). It stays the bootstrap anyway, and
+# deliberately: it is what an unknown camera's SDP claims, the real shape is
+# learned from the first decoded frame of the first session and then remembered
+# across rotations (camera_session's known_audio_fmt), and the decoder commits to
+# its codec inside the first ~400 ms -- comfortably before the ten-video-frame
+# batch that triggers the peek. So the mismatch costs at most one publisher
+# rebuild, on a camera that has never streamed in this process, and usually not
+# even that.
 AUDIO_DEFAULT_FORMAT = ("s16", 48000, 2)
 # Bound on the per-session decoded-audio queue in janus_client. Audio arrives in
 # 20 ms frames, so this is ~1s of buffer: enough to ride out an encode hiccup,

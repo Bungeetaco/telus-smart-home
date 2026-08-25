@@ -201,7 +201,8 @@ The same listener serves the rest of the control API (see
 `docs/control-api.md`), including `GET /control/status` -- per-camera
 `state`, `consecutive_failures`, `last_frame_at`, `fps`, `hardware_encode`,
 `dropped_frames`, `last_error`, `publisher_alive`, `last_publish_at`, the audio
-fields, same bearer auth as every other endpoint.
+fields, plus a process-wide `audio_decoder` block of decode counters; same
+bearer auth as every other endpoint.
 `camera_session.py`'s `run_camera_forever` updates its own entry directly;
 the control server just reflects it. `dropped_frames` is the camera's
 lifetime consumer-fell-behind drop total since process start, accumulated as

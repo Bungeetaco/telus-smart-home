@@ -159,7 +159,8 @@ poll) costs no upstream requests.
       "dropped_frames": 0,
       "last_error": null,
       "audio_consumed": true,
-      "audio_format": "48000Hz/2ch/s16",
+      "audio_format": "8000Hz/1ch/s16",
+      "audio_codec": "pcmu",
       "decoded_audio_frames": 4821,
       "dropped_audio_frames": 0,
       "audio_dropped": false,
@@ -174,6 +175,15 @@ poll) costs no upstream requests.
     "stopped": 1,
     "failed": 1,
     "last_failure_reason": "media_error"
+  },
+  "audio_decoder": {
+    "decoded_opus": 0,
+    "decoded_pcmu": 49213,
+    "discarded": 0,
+    "sessions_opus": 0,
+    "sessions_pcmu": 12,
+    "sniff_packets": 20,
+    "opus_confidence": 0.75
   }
 }
 ```
@@ -192,7 +202,8 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 | `dropped_frames` | int | Lifetime total, since process start, of frames dropped because the consumer fell behind the decoder (the ingest queue's latency-over-completeness drop; see [camera-bridge.md](camera-bridge.md)). Present (`0`) from the camera's first status entry. The total is accumulated when each ~165 s video session **ends**, on healthy rotation and on the failure paths alike, not per frame, so it can lag the live session's drops by up to one rotation. Resets with the process, like the rest of this response |
 | `last_error` | string \| null | Most recent error string, or `null` |
 | `audio_consumed` | bool | Whether the downstream audio track is being decoded and published on this camera's RTSP path. True only when `JANUS_CONSUME_AUDIO` **and** `JANUS_REQUEST_AUDIO` both name the camera; naming it in only the first is a misconfiguration that reads `false` here and is logged once (see [configuration.md](configuration.md)) |
-| `audio_format` | string \| null | The raw PCM shape of an audio frame this camera has actually **decoded**, as `<rate>Hz/<channels>ch/<sample format>`; `null` until one has been. It is an observation, never the shape the publisher was launched with: that is a bootstrap guess (`AUDIO_DEFAULT_FORMAT`) until the first frame lands, and reporting it made this field read `"48000Hz/2ch/s16"` for a camera publishing pure silence. Once observed it persists across rotations, since a camera's audio shape does not change between sessions; use `decoded_audio_frames` to ask whether audio is flowing *now* |
+| `audio_format` | string \| null | The raw PCM shape of an audio frame this camera has actually **decoded**, as `<rate>Hz/<channels>ch/<sample format>`; `null` until one has been. It is an observation, never the shape the publisher was launched with: that is a bootstrap guess (`AUDIO_DEFAULT_FORMAT`) until the first frame lands, and reporting it made this field read `"48000Hz/2ch/s16"` for a camera publishing pure silence. Once observed it persists across rotations, since a camera's audio shape does not change between sessions; use `decoded_audio_frames` to ask whether audio is flowing *now*. On this account's cameras the observed shape is `"8000Hz/1ch/s16"`: the track is advertised as Opus and carries G.711 mu-law (see `audio_codec`) |
+| `audio_codec` | string \| null | Which decoder produced this camera's audio frames: `"pcmu"` (G.711 mu-law at 8 kHz, what this account's cameras actually send) or `"opus"` (what the Janus offer **advertises**). `null` until a frame has been decoded. It is derived from the frame shape in `audio_format`, which identifies the decoder exactly: aiortc pins its Opus decoder to 48 kHz stereo and its mu-law decoder to 8 kHz mono. Read it against the process-wide `audio_decoder` block: `"opus"` here with almost every packet in `discarded` is the codec mislabel that once left ~6% of the audio timeline real and the rest silence fill |
 | `decoded_audio_frames` | int | Lifetime total, since process start, of decoded audio frames this camera's sessions have handed to the publisher. Present (`0`) from the camera's first status entry. Unlike the two drop counters this is updated **as each frame arrives**, not folded in when a session ends, so it does not lag a rotation; it is the field to poll twice and compare. `audio_consumed: true` with this stuck at `0` is a silent stream, not a quiet one, and it is the only field in this response that can tell them apart |
 | `dropped_audio_frames` | int | Lifetime total, since process start, of decoded **audio** frames dropped because the consumer fell behind. Present (`0`) from the camera's first status entry, and accumulated across rotations exactly like `dropped_frames`. Deliberately a separate field: `fps` and `dropped_frames` are a contract about the video stream, and a number that quietly started counting two different things would be worse than no number at all. Note that it cannot detect audio that never decodes at all: a stream that produces nothing drops nothing |
 | `audio_dropped` | bool | Whether the running publisher **gave up on its audio input** and is now publishing video only, because ffmpeg stopped reading the audio pipe, the pipe closed under it, the pipe could not be opened when the publisher started, or a persistent run of decoded frames failed to match their own declared shape. Video is worth more than audio, so this degrades instead of rebuilding the publisher (which would kick every RTSP reader off the path), and the degradation lasts until the publisher is next rebuilt for some other reason. `audio_consumed` keeps saying what the camera is **configured** to do; this says whether the publisher is still doing it, and without it the difference is invisible: `decoded_audio_frames` keeps climbing either way, because frames are still being decoded, they just no longer reach ffmpeg |
@@ -202,6 +213,22 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 | `measured_fps` | int \| null | The rate the camera is actually **delivering**: the bridge's last settled measurement (a median over `RATE_RESAMPLE_FRAMES` inter-frame deltas, taken clear of the session-start burst). Read it against `fps`, which is what ffmpeg was **declared** with: a material gap is padding (measured below declared) or dropping (measured above) before ffmpeg says so. `null` until the first settled batch; survives rotations; updated as frames flow, so it lags a reconnect gap |
 | `rate_pending` | int \| null | A **confirmed** rate change waiting for the session rotation that applies it (rate rebuilds happen only at rotations, so readers pay one reconnect instead of a failed session). `null` otherwise, including after the rotation re-checked the current reading and found the change no longer real |
 | `duplicated_frame_warnings` | int | Lifetime count, since process start, of ffmpeg's `frames duplicated` stderr warnings, accumulated across publisher rebuilds like `dropped_frames`. The **encoder's own** corroboration that the declared rate exceeds what the camera delivers. Observability only, and read it knowing its limits: it is one-directional (a too-LOW declaration, the direction that destroys frames, never fires it), not quantitative, and coarse (fixed 1000-frame thresholds). A rate correction that worked shows here as the count going quiet |
+
+The top-level `audio_decoder` block carries the audio decode counters for the
+whole process, not for one camera. That is a limit of what is knowable, not an
+oversight: aiortc builds its audio decoder inside `decoder_worker`, a thread no
+`RTCRtpReceiver` keeps a reference to, so a count cannot honestly be attributed
+to a camera from there. The per-camera answer is each camera's `audio_codec`.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `decoded_opus` | int | Audio RTP packets, since process start, that were decoded as Opus and delivered |
+| `decoded_pcmu` | int | The same for G.711 mu-law |
+| `discarded` | int | Packets that reached nobody: neither candidate could read them while the session was choosing a codec, or the committed decoder rejected them afterwards. **`decoded_opus + decoded_pcmu + discarded` is every audio packet the process has seen**, which is what makes a wholesale codec mismatch impossible to miss: a stream being decoded as the wrong codec puts nearly all of its packets here. The decoder's own drop log is once per session by necessity (a per-packet warning on a ~50 packets/s stream is its own outage), and that is exactly how such a mismatch once read like an occasional glitch for two days |
+| `sessions_opus` | int | Decoder sessions that committed to Opus. One decoder is built per Janus session per camera, so this climbs by one per camera per ~165 s rotation |
+| `sessions_pcmu` | int | The same for mu-law |
+| `sniff_packets` | int | How many packets each session samples before committing (a constant, echoed here so the response is self-describing) |
+| `opus_confidence` | float | What fraction of that sample libopus must accept for the session to commit to Opus (a constant, echoed for the same reason) |
 
 `state: "restart_deferred"` is the most informative value: the camera hit the
 `MAX_CONSECUTIVE_SESSION_FAILURES` escape hatch, but it has fired too often
@@ -214,6 +241,9 @@ a camera whose audio has stopped still reports `state: "streaming"` with a fresh
 audio. What it can tell you is whether audio is flowing: poll
 `decoded_audio_frames` twice and compare, and treat `audio_consumed: true` with
 `audio_format: null` as "this camera has never decoded a single audio frame".
+A camera that decodes far fewer frames than the ~50/s a 20 ms audio stream
+implies is decoding the wrong codec rather than hearing a quiet room: check
+`audio_codec` and the `audio_decoder` block's `discarded`.
 Two fields answer questions no counter can: `audio_dropped: true` is a publisher
 that stopped carrying audio (rather than a camera that never sent any), and
 `last_publish_at` falling behind `last_frame_at` is a publisher that has stopped

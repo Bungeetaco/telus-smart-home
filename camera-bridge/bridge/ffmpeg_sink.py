@@ -88,9 +88,13 @@ config.JANUS_CONSUME_AUDIO):
   The encoder is AAC, and that is not a free choice: Home Assistant's HLS stream
   worker accepts only aac/mp3 for audio, and Frigate's `-c copy` recording preset
   needs a codec that is legal in an mp4 container. AAC is the only codec that
-  satisfies both consumers, so Opus (what the gateway actually sends) is
-  transcoded rather than passed through. The published audio is mono; the sample
-  rate is whatever the decoded frames actually carry, never assumed.
+  satisfies both consumers, so what the gateway sends (G.711 mu-law on a payload
+  type advertised as Opus -- see aiortc_opus_patch) is transcoded rather than
+  passed through. The published audio is mono; the sample rate is whatever the
+  decoded frames actually carry, never assumed, which on this account's cameras
+  is 8 kHz rather than the 48 kHz the SDP implies. Nothing in the pacing below
+  is written in terms of a particular rate: the prime, the top-up ceiling and
+  the silence fill are all sample counts derived from `audio_format[1]`.
 
   Every encoder variant gets the audio input and the audio encoder by
   CONSTRUCTION -- they are spliced into the `common_in`/`common_out` fragments all

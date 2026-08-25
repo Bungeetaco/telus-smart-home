@@ -3,6 +3,7 @@ import logging
 import os
 import time
 
+from . import aiortc_opus_patch
 from . import config as c
 from . import ffmpeg_sink
 from . import handover_trace
@@ -58,6 +59,23 @@ def _audio_format_str(fmt) -> str | None:
     if not fmt:
         return None
     return f"{fmt[1]}Hz/{fmt[2]}ch/{fmt[0]}"
+
+
+def _audio_status_fields(fmt) -> dict:
+    """The two /control/status fields a decoded audio frame answers: its raw PCM
+    shape, and the CODEC that produced it.
+
+    They are written together, from the same observed frame, because they are
+    two readings of one fact and a status where they disagree would be worse
+    than either alone. The codec is a derivation from the shape rather than a
+    second guess -- aiortc configures its Opus decoder to 48 kHz stereo and its
+    mu-law decoder to 8 kHz mono, and aiortc_opus_patch's import guard refuses
+    to run if either of those moves (see codec_for_audio_format). It cannot be
+    read from the decoder directly: aiortc creates it inside decoder_worker, a
+    thread this loop has no handle on.
+    """
+    return {"audio_format": _audio_format_str(fmt),
+            "audio_codec": aiortc_opus_patch.codec_for_audio_format(fmt)}
 
 
 # --- the frame rate is a DEVICE SETTING, not a constant discovered once -------
@@ -401,7 +419,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # with audio_consumed true and decoded_audio_frames stuck at 0 is
         # publishing silence, which is exactly the failure aiortc_opus_patch.py
         # exists for and which nothing here could see before.
+        # audio_codec is written beside audio_format and from the same observed
+        # frame: the track is ADVERTISED as Opus and this account's cameras send
+        # G.711 mu-law on it (see aiortc_opus_patch), so "what shape are the
+        # samples" and "what codec produced them" are different questions and
+        # the second one is the one that went unanswered for two days.
         "audio_consumed": consume_audio, "audio_format": None,
+        "audio_codec": None,
         "decoded_audio_frames": 0, "dropped_audio_frames": 0,
         # "audio was dropped mid-session" -- the publisher gave up on its audio
         # input and is publishing video only (ffmpeg_sink._drop_audio). Without
@@ -575,7 +599,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # video frame -- the GUARD that stops a mismatched frame
                     # corrupting the pipe lives in sink.write_audio.
                     known_audio_fmt = observed
-                    _update_status(audio_format=_audio_format_str(observed))
+                    _update_status(**_audio_status_fields(observed))
                 _update_status(decoded_audio_frames=decoded_audio_frames_total)
                 if sink is None or not await sink.write_audio(frame):
                     _note_audio_dropped(sink)
@@ -904,7 +928,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # the video's, so by the time ten video frames have been collected
                 # a decoded audio frame has almost always already been queued --
                 # this reads its shape without consuming it and without making the
-                # video path wait on audio. AUDIO_DEFAULT_FORMAT is only the
+                # video path wait on audio. The decoder holds its first
+                # aiortc_opus_patch.SNIFF_PACKETS packets (~400 ms) while it works
+                # out which codec is really arriving, which is deliberately shorter
+                # than the ten-frame video batch above (~670 ms at 15fps) so this
+                # peek still sees a real frame. AUDIO_DEFAULT_FORMAT is only the
                 # bootstrap for the case where none has arrived yet; if it turns
                 # out to be wrong, write_audio's guard forces a rebuild.
                 if consume_audio:
@@ -915,7 +943,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # honest answer /control/status can give -- and on a
                         # healthy camera it lands a rotation before the pump's
                         # first frame does.
-                        _update_status(audio_format=_audio_format_str(observed_audio))
+                        _update_status(**_audio_status_fields(observed_audio))
                 desired_audio_fmt = (
                     (known_audio_fmt or c.AUDIO_DEFAULT_FORMAT) if consume_audio else None)
                 audio_rebuild_needed = False

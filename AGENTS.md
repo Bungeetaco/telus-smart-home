@@ -142,13 +142,19 @@ Each of these looks like something to clean up and is not. See
   `.github/scripts/check_patch.py` (which also asserts the private *instance*
   attributes the replaced `async_login` depends on).
 - **`camera-bridge/bridge/aiortc_opus_patch.py` replaces `aiortc.codecs.opus.OpusDecoder.decode`.**
-  Upstream it has no error handling (its H.264 twin does) and `decoder_worker` (a
-  thread target) has none either, so one malformed Opus packet permanently kills a
-  session's `audio-decoder` thread and the published audio becomes pure silence with
-  every health signal still green. Same model as the three above: import-time patch,
-  import-time guard, exercised by the every-bridge-module-imports CI job and
-  `tests/test_opus_decoder_patch.py`. Delete it only when upstream fixes this: the
-  guard fires if upstream grows its own handler, which is what that would look like.
+  It does two jobs. The gateway advertises the audio track as Opus and sends **G.711
+  mu-law at 8 kHz**, so the patch sniffs the first packets of each session with both
+  decoders, commits to one, and holds the sniffed frames until it decides (a frame in
+  the losing codec's shape rebuilds the publisher and kicks every RTSP reader). And
+  upstream's Opus decode has no error handling (its H.264 twin does) while
+  `decoder_worker` (a thread target) has none either, so one undecodable packet
+  permanently kills a session's `audio-decoder` thread and the published audio becomes
+  pure silence with every health signal still green. Same model as the three above:
+  import-time patch, import-time guard, exercised by the every-bridge-module-imports CI
+  job and `tests/test_opus_decoder_patch.py`. Backlog E59 and E80 carry the evidence.
+  Do not "simplify" the sniff into a per-packet fallback, and do not delete the module
+  when upstream fixes the missing handler (the guard fires on that) without keeping the
+  codec selection.
 
 ## Settled dead ends -- do not reopen
 

@@ -938,7 +938,15 @@ Five properties of that path are load-bearing:
   normally sized from a real decoded frame (read off the session after the first
   video frames land, without consuming it); when no audio has arrived yet it
   starts from the negotiated 48 kHz stereo signed-16 shape and rebuilds if that
-  guess was wrong.
+  guess was wrong. On this account's cameras it **is** wrong: the frames are
+  8 kHz mono signed-16, because the track advertised as Opus carries G.711
+  µ-law (see "The audio track is decoded as the codec that arrives" below). That
+  costs at most one rebuild per camera per process, because the learned shape is
+  remembered across rotations, and usually not even that: the decoder commits to
+  a codec within ~400 ms, ahead of the ten-video-frame batch that triggers the
+  peek. Nothing in the pacing is written in terms of a particular rate: the
+  prime, the per-call ceiling and the silence fill are all sample counts derived
+  from the observed rate, so 8 kHz gives the same 100 ms lead as 48 kHz.
 
 The audio stream's timeline is its own sample count, and the video's is the wall
 clock (which is why no video input carries `-r`; see "How the video input
@@ -956,77 +964,124 @@ spliced into the `common_in`/`common_out` fragments every encoder variant is
 built from, so a hardware path that publishes audio while the software fallback
 silently does not is not expressible.
 
-`/control/status` reports `audio_consumed`, `audio_format`,
+`/control/status` reports `audio_consumed`, `audio_format`, `audio_codec`,
 `decoded_audio_frames`, `dropped_audio_frames`, `audio_dropped` and
-`audio_dropped_reason` per camera (see
+`audio_dropped_reason` per camera, plus a process-wide `audio_decoder` block of
+decode counters (see
 [control-api.md](control-api.md)). `audio_format` is the shape of a frame that
 was actually **decoded**, and is `null` until one has been, never the shape the
 publisher was launched with, which is a guess until the first frame arrives.
+`audio_codec` names the decoder those frames came from, `pcmu` or `opus`, which
+is a different question from their shape and the one that went unanswered while
+the bridge spent two days decoding µ-law as Opus.
 `decoded_audio_frames` is what makes flow checkable at a glance: consumption on
 and that counter stuck at `0` is a silent stream. `audio_consumed` keeps saying
 what the camera is **configured** to do; `audio_dropped` is what says the
 publisher stopped doing it. Note that the frame-silence watchdog is
 **video-only**: audio can stop while a camera still reports `streaming`.
 
-#### aiortc's Opus decoder is patched to survive a bad packet
+#### The audio track is decoded as the codec that arrives, not the one advertised
 
 `bridge/aiortc_opus_patch.py` replaces `aiortc.codecs.opus.OpusDecoder.decode`
-at import time, and without it downstream audio does not work at all on this
-account's doorbell.
+at import time, and without it downstream audio does not work on this account's
+cameras. It does two jobs.
 
-Upstream, aiortc's two decoders are not written the same way. `H264Decoder.decode`
-wraps its decode in `try/except av.FFmpegError`, logs and returns no frames, so a
-bad packet costs one packet. `OpusDecoder.decode` has **no handler**, and neither
-does `rtcrtpreceiver.decoder_worker`, which is a *thread target*. So one
-malformed Opus packet kills that session's `audio-decoder` thread outright, and
-the thread is started exactly once per receiver with no restart path.
+**1. The codec mislabel.** The Janus offer advertises `audio(port=9,opus)`. The
+bytes that arrive are **G.711 µ-law at 8 kHz**. aiortc believes the advertised
+codec, so libopus rejects most of the stream and the small fraction that happens
+to satisfy a TOC byte decodes as noise. Measured live with only the
+packet-survival wrapper in place: the doorbell decoded **181 audio frames in
+60 s** and the living room **268**, where 20 ms frames are 50/s. Roughly 6 to 9
+percent of the published audio timeline was real and the rest was the sink's
+silence fill, which is why it sounded like fragments jumping around rather than
+like an outage.
+
+The evidence that the payload is µ-law rather than damaged Opus:
+
+- The dropped payloads themselves. The doorbell's head is
+  `7effff7f7efe7ffffffffefefeff7efe`: alternating `0x7e`/`0x7f`/`0xfe`/`0xff` is
+  µ-law encoding near-silence, which is what a doorbell microphone produces
+  nearly all the time. The living room's is `332038a8a9bd2223989e1e289e9f3a1d`,
+  ordinary varying audio as µ-law.
+- The official Android app instantiates **no audio codec at all** (only
+  `video/avc` and `video/raw`), which is what G.711 decoded in software looks
+  like. Its `AudioFlinger` sets `notificationFrames to 160`, i.e. 20 ms at
+  8 kHz, and two `AudioTrack` sessions delivered 252,160 and 212,480 frames:
+  31.5 s and 26.6 s at 8 kHz, matching two roughly 30-second viewings. At 48 kHz
+  those would be 5 s, i.e. the app would be as broken as the bridge was.
+- Talkdown to the same doorbell works as µ-law at 8 kHz, and L16 is impossible
+  on the device. The camera is a µ-law device in both directions.
+
+So the decoder is chosen by **sniffing** the first `SNIFF_PACKETS` (20) packets
+of each session with both candidates and committing to one for that session's
+life. Deciding once rather than per packet is deliberate: per-packet fallback
+pays for two decodes forever and can flap mid-stream, and on this pipeline a
+flap is not cosmetic, a frame in the other codec's shape (48 kHz stereo against
+8 kHz mono) trips `write_audio`'s format guard and rebuilds the publisher,
+kicking every RTSP reader. Nothing is emitted until the decision is made, for
+the same reason: one spurious Opus frame ahead of a µ-law stream is enough to
+launch ffmpeg with the wrong `-ar`/`-ac`. The sniff window's frames are
+**buffered, not dropped**, and the winner's are handed over the moment it is
+chosen, so measuring costs no audio.
+
+The committed decoder is aiortc's own `aiortc.codecs.g711.PcmuDecoder`, not a
+hand-rolled µ-law table, so its frames carry the `pts`, `time_base`, sample
+format and layout the rest of the pipeline expects (s16, mono, 8000 Hz,
+interleaved). Its `pts` is the RTP timestamp read on a 1/8000 time base; whether
+the gateway stamps at 8 kHz or at the advertised 48 kHz is **unverified**, and
+harmless either way, because nothing downstream reads it (the ffmpeg audio input
+carries no `-use_wallclock_as_timestamps` and its timeline is its own sample
+count).
+
+**2. Surviving a packet nothing can decode.** Upstream, aiortc's two decoders
+are not written the same way. `H264Decoder.decode` wraps its decode in
+`try/except av.FFmpegError`, logs and returns no frames, so a bad packet costs
+one packet. `OpusDecoder.decode` has **no handler**, and neither does
+`rtcrtpreceiver.decoder_worker`, which is a *thread target*. So one undecodable
+packet kills that session's `audio-decoder` thread outright, and the thread is
+started exactly once per receiver with no restart path.
 
 Nothing above notices. The receiver gates further RTP on the Thread *object*,
 which stays truthy after the thread dies, so packets keep being queued to nobody
 (~8,000 per session); the frame-silence watchdog is video-only; and the sink
 keeps the audio input alive with silence, so the RTSP path carries a perfectly
 valid, perfectly silent AAC track. Measured on the live published stream before
-the patch: **9,572,352 of 9,572,352 samples at the s16 noise floor**, with
+any of this: **9,572,352 of 9,572,352 samples at the s16 noise floor**, with
 `max_volume == mean_volume` (not one nonzero sample) across eleven consecutive
 sessions, each of which logged `Exception in thread audio-decoder` and left zero
 live audio-decoder threads. The bridge's own audio pump also leaked a task per
 session, waiting forever on a `recv()` whose end-of-stream sentinel only the dead
 worker could produce.
 
-The patch mirrors h264.py exactly: catch `av.FFmpegError`, log, return no frames.
-The decoder object survives a rejected `avcodec_send_packet()` and decodes the
-next packet normally.
+That survival behaviour is the floor and is unchanged: a packet the **committed**
+decoder rejects is dropped, the thread lives, and video publishing is untouched,
+mirroring h264.py exactly. A camera that really does send Opus commits to Opus
+and behaves as it did before the sniff existed.
 
-**The bad packet is G.711 µ-law audio arriving on the Opus payload type.**
-Captured by the patch's own log line, once per session, consistently:
-
-```
-len=512 head=7efe7ffeff7fffff7eff7effff7ffeff
-len=512 head=7dfefe7e7ffefeff7c7dfefeff7efcfc
-```
-
-512 bytes of values clustered on `0x7c`–`0x7f` and `0xfc`–`0xff` is µ-law near
-silence: in G.711 µ-law, silence encodes to `0x7F`/`0xFF` and small excursions
-sit either side. It is not Opus, and it is not either of the shapes originally
-suspected (`OpusHead`/`OpusTags` identification headers, or H.264 NAL bytes);
-those merely reproduce the same error class. libopus does not reject ordinary
-Opus, every TOC code-0 packet, the shape of every normal 20 ms WebRTC Opus
-packet, decodes (0 of 500 rejected in a calibration sweep), so only a non-Opus
-payload can produce this.
-
-Why the gateway emits it is **unverified**: the doorbell's own upstream audio is
-µ-law (that is the codec its talkdown PUT path takes), so the most plausible
-reading is that the relay forwards a device-native µ-law frame or two before its
-Opus transcode is running. What is certain is that the packets are rejected
-once per session, at stream start, and that dropping them costs a few
-milliseconds of audio rather than the whole session.
+**Counters, because one log line per session is how this hid.** The drop log has
+to be once per session (a per-packet WARNING on a ~50 packets/s stream is its own
+outage), and that is precisely why a *wholesale* mismatch read like an occasional
+glitch for two days. So every packet's outcome is counted as well as logged.
+`/control/status` serves the process-wide totals under `audio_decoder`
+(`decoded_opus`, `decoded_pcmu`, `discarded`, `sessions_opus`, `sessions_pcmu`,
+plus the `sniff_packets`/`opus_confidence` constants), and every packet lands in
+exactly one of the first three. The per-camera answer is each camera's own
+`audio_codec` field, derived from the decoded frames' shape: aiortc pins its Opus
+decoder to 48 kHz stereo and its µ-law decoder to 8 kHz mono, so the shape
+identifies the decoder exactly. It cannot be read from the decoder object
+directly, because aiortc creates it inside `decoder_worker`, a thread no
+`RTCRtpReceiver` keeps a reference to.
 
 The patch carries an import-time compatibility guard, on the same terms as the
-integration's three `telus_*_patch.py` modules: it refuses to apply if the class
-or method moved, if it is being applied twice, or if upstream has grown its own
-exception handling (which would most likely mean upstream fixed this and the
-module should be deleted). Neither aiortc 1.15.0 (the pin) nor upstream `main`
-fixes it today; both `OpusDecoder.decode` and `decoder_worker` are unchanged.
+integration's three `telus_*_patch.py` modules: it refuses to apply if
+`OpusDecoder` or its `decode` moved, if it is being applied twice, if upstream
+has grown its own exception handling (which would most likely mean upstream
+fixed the dead-thread half), if `g711.PcmuDecoder` moved, or if either decoder's
+declared sample rate moved (which would break the shape-to-codec mapping the
+status field depends on). A silent degradation to Opus-only is the
+6-percent-real-audio outage all over again, so the µ-law half is as loud as the
+Opus half. Neither aiortc 1.15.0 (the pin) nor upstream `main` fixes the missing
+handler today; both `OpusDecoder.decode` and `decoder_worker` are unchanged.
 
 #### What is established about asking for the track
 

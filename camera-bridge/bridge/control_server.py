@@ -50,6 +50,7 @@ Contract (as implemented -- this is what callers must match):
                                                  "dropped_frames": <int>,
                                                  "audio_consumed": <bool>,
                                                  "audio_format": <str or null>,
+                                                 "audio_codec": <str or null>,
                                                  "decoded_audio_frames": <int>,
                                                  "dropped_audio_frames": <int>,
                                                  "audio_dropped": <bool>,
@@ -59,7 +60,14 @@ Contract (as implemented -- this is what callers must match):
                                                  "measured_fps": <int or null>,
                                                  "rate_pending": <int or null>,
                                                  "duplicated_frame_warnings": <int>},
-                                                ...}}
+                                                ...},
+                     "audio_decoder": {"decoded_opus": <int>,
+                                       "decoded_pcmu": <int>,
+                                       "discarded": <int>,
+                                       "sessions_opus": <int>,
+                                       "sessions_pcmu": <int>,
+                                       "sniff_packets": <int>,
+                                       "opus_confidence": <float>}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
       reconnect counts, last-frame age, and current encode mode, without
@@ -86,7 +94,13 @@ Contract (as implemented -- this is what callers must match):
       it is an OBSERVATION, never the shape ffmpeg was launched with (that is
       config.AUDIO_DEFAULT_FORMAT until a frame arrives, and reporting it made
       this field read "48000Hz/2ch/s16" for eleven consecutive sessions that
-      published pure silence). "decoded_audio_frames" is the lifetime total of
+      published pure silence). "audio_codec" names the decoder those frames
+      actually came from -- "pcmu" (G.711 mu-law at 8 kHz, what this account's
+      cameras really send) or "opus" (what the Janus offer ADVERTISES) -- and
+      is null until a frame has been decoded. It is derived from the frame
+      shape beside it, which identifies the decoder exactly (see
+      aiortc_opus_patch.codec_for_audio_format).
+      "decoded_audio_frames" is the lifetime total of
       decoded audio frames handed to the publisher, updated as each frame
       arrives rather than folded in at session end, so consumption on with this
       stuck at 0 is a silent stream. "dropped_audio_frames" is the lifetime
@@ -117,6 +131,16 @@ Contract (as implemented -- this is what callers must match):
       state "streaming" with a fresh "last_frame_at". Nothing here RECONNECTS a
       camera on dead audio; comparing two polls of "decoded_audio_frames" is
       how a caller detects it.
+      "audio_decoder" is PROCESS-WIDE, not per camera: aiortc builds its audio
+      decoder inside decoder_worker, a thread no RTCRtpReceiver keeps a
+      reference to, so a count cannot honestly be attributed to one camera from
+      there. Every audio RTP packet the process decodes lands in exactly one of
+      "decoded_opus", "decoded_pcmu" and "discarded", which is what makes a
+      wholesale codec mismatch impossible to miss -- a stream being decoded as
+      the wrong codec puts nearly all of its packets in "discarded".
+      "sessions_opus"/"sessions_pcmu" count how many decoder sessions committed
+      to each codec, and "sniff_packets"/"opus_confidence" echo the constants
+      that decision is made with (see aiortc_opus_patch).
 
     GET http://127.0.0.1:<CONTROL_PORT>/control/cameras
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
@@ -532,6 +556,7 @@ from aiohttp import web
 APP_CURRENT_SECRET = web.AppKey("current_secret", dict)
 APP_SECRET_ROTATION_TASK = web.AppKey("secret_rotation_task", asyncio.Task)
 
+from . import aiortc_opus_patch
 from . import arming_devices
 from . import camera_settings
 from . import partitions as partitions_mod
@@ -1124,8 +1149,13 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         if (err := _check_auth(request)) is not None:
             return err
         # "talk" is a small summary; the full counters live at /control/metrics.
+        # "audio_decoder" is PROCESS-WIDE rather than per camera, because
+        # aiortc builds its decoder inside a thread nothing keeps a handle on
+        # (see aiortc_opus_patch.decode_stats); the per-camera answer is each
+        # camera's own "audio_codec".
         return web.json_response({"cameras": camera_status,
-                                  "talk": metrics.talk.summary()})
+                                  "talk": metrics.talk.summary(),
+                                  "audio_decoder": aiortc_opus_patch.decode_stats()})
 
     async def handle_metrics(request: web.Request) -> web.Response:
         """Counters for the talkdown path: attempts, outcomes, failure reasons,

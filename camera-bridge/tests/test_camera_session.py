@@ -3361,6 +3361,161 @@ async def test_an_audio_format_change_forces_a_publisher_rebuild():
     assert state.get("audio_format") == "16000Hz/1ch/s16", state
 
 
+async def _started_sink(audio_format, backend="vaapi"):
+    """A REAL FfmpegSink that has run the whole of start() except the exec.
+
+    Everything the audio input depends on actually happens: the pipe is opened,
+    the per-sample width is computed, and the prime is written. Only the child
+    process is faked, so the sample accounting under test is the shipped one.
+    """
+    async def fake_try_start(self, args, pass_fds=()):
+        return True
+
+    saved_backend, saved_try = c.ENCODE_BACKEND, fs.FfmpegSink._try_start
+    c.ENCODE_BACKEND = backend
+    fs.FfmpegSink._try_start = fake_try_start
+    try:
+        sink = fs.FfmpegSink("cam")
+        await sink.start(1280, 720, 15, audio_format=audio_format)
+        return sink
+    finally:
+        c.ENCODE_BACKEND, fs.FfmpegSink._try_start = saved_backend, saved_try
+
+
+async def test_the_cameras_real_8khz_mono_audio_flows_through_unchanged():
+    """The publisher, its pacing and the status at the rate the cameras REALLY
+    send.
+
+    The audio track is advertised as Opus and carries G.711 mu-law, so the
+    decoded frames are 8 kHz MONO, not the 48 kHz stereo every audio constant in
+    this codebase was written beside (see bridge/aiortc_opus_patch.py). Nothing
+    in the pacing may be rate-specific: the prime, the per-call ceiling and the
+    silence fill are all sample counts derived from the sink's own
+    `audio_format[1]`, and a single hardcoded 48000 anywhere in that chain would
+    be silent -- it would publish audio at the wrong speed, or leave the muxer
+    lead six times shorter than the constant it is chosen against, which is the
+    E60 video stall arriving through a different door.
+
+    The command line is pinned on every encoder variant for the same reason
+    test_every_encoder_variant_gets_the_audio_input_and_encoder pins the 48 kHz
+    one: the software fallback is not exotic, it fires on every start() where
+    /dev/dri is missing.
+    """
+    fmt = ("s16", 8000, 1)
+    rate = fmt[1]
+
+    # 1. The command line, on all three variants. The rate travels to BOTH the
+    #    raw input (how ffmpeg reads the pipe) and the AAC encoder (what it
+    #    publishes); either one left at 48000 resamples the whole stream.
+    for backend in ("vaapi", "nvenc", "software"):
+        captured = await _captured_ffmpeg_args(backend, fmt)
+        assert captured, backend
+        for args, pass_fds in captured:
+            fd = pass_fds[0]
+            audio_in = ["-f", "s16le", "-ar", "8000", "-ac", "1",
+                        "-analyzeduration", "0", "-probesize", "32",
+                        "-i", f"pipe:{fd}"]
+            audio_out = ["-map", "0:v:0", "-map", "1:a:0",
+                         "-c:a", "aac", "-ac", "1", "-ar", "8000", "-b:a", "64k",
+                         "-af", "aresample=async=1"]
+            assert _subsequence_at(args, audio_in) > 0, (
+                f"{backend}: the 8 kHz mono raw input is missing or not "
+                f"contiguous: {args}")
+            assert _subsequence_at(args, audio_out) > _subsequence_at(args, audio_in), (
+                f"{backend}: the AAC encoder is not at the frames' own rate: {args}")
+            assert "48000" not in args, (
+                f"{backend}: a 48000 survived onto the command line of an 8 kHz "
+                f"publisher: {args}")
+            # The video half is untouched by the audio rate.
+            video_in = args[:args.index("-i")]
+            assert "-r" not in video_in and _subsequence_at(
+                video_in, ["-framerate", "15"]) > 0, args
+
+    # 2. The prime, which IS the muxer lead the video pipe rides on. It has to
+    #    be _AUDIO_PRIME_MS of TIME at whatever rate the frames carry, not a
+    #    fixed sample count.
+    sink = await _started_sink(fmt)
+    try:
+        primed = sink._audio_samples_written
+        assert sink._audio_bytes_per_sample == 2, (
+            f"8 kHz mono s16 is 2 bytes per sample across all channels, not "
+            f"{sink._audio_bytes_per_sample}")
+        assert primed == int(rate * fs._AUDIO_PRIME_MS / 1000), (
+            f"the pipe was primed with {primed} samples, which at {rate}Hz is "
+            f"{primed / rate * 1000:.0f}ms rather than the "
+            f"{fs._AUDIO_PRIME_MS}ms lead every top-up cadence is chosen "
+            "against -- a lead computed at a hardcoded 48000 would be six times "
+            "too long here, and one computed in samples six times too short")
+        assert abs(sink.audio_timeline_s - fs._AUDIO_PRIME_MS / 1000.0) < 1e-9, (
+            f"the timeline reads {sink.audio_timeline_s}s for a "
+            f"{fs._AUDIO_PRIME_MS}ms prime at {rate}Hz")
+    finally:
+        await sink.stop()
+
+    # 3. The silence fill, on the REAL method with a scripted clock. Same
+    #    invariants as the 48 kHz case: exact wallclock tracking, and a per-call
+    #    ceiling expressed in TIME.
+    quiet, writes, primed = _silence_rig(rate=rate, channels=1)
+    started = quiet._audio_started_at
+    cap_samples = int(rate * fs._AUDIO_SILENCE_MAX_BURST_S)
+    assert await quiet.write_silence_to(now=started + 0.05) is True
+    assert writes == [], (
+        f"silence was written while the audio still led the wallclock: {writes}")
+    for elapsed in (0.15, 0.19, 0.27, 0.33, 0.41):
+        now = started + elapsed
+        assert await quiet.write_silence_to(now=now) is True
+        assert quiet._audio_samples_written == int((now - started) * rate), (
+            f"after {elapsed:.2f}s the 8 kHz stream holds "
+            f"{quiet._audio_samples_written} samples, not the "
+            f"{int((now - started) * rate)} elapsed real time calls for")
+    assert max(writes) <= cap_samples * quiet._audio_bytes_per_sample, (
+        f"a single 8 kHz top-up handed over {max(writes)} bytes, past the "
+        f"{fs._AUDIO_SILENCE_MAX_BURST_S}s ceiling")
+    # The cadence is a TIME, so it is rate-independent by construction -- but
+    # only while the two quantities it is compared against are also times.
+    assert c.AUDIO_SILENCE_TOPUP_S < fs._AUDIO_PRIME_MS / 1000.0 <= 1.0, (
+        "the top-up cadence no longer sits under the muxer lead")
+    assert cap_samples / rate == fs._AUDIO_SILENCE_MAX_BURST_S, (
+        f"the per-call ceiling is {cap_samples / rate}s at {rate}Hz rather than "
+        f"the {fs._AUDIO_SILENCE_MAX_BURST_S}s it is defined as")
+
+    # 4. End to end through the loop, from the state that actually occurs on a
+    #    cold start: nothing decoded when the publisher is sized, so it comes up
+    #    on the 48 kHz AUDIO_DEFAULT_FORMAT bootstrap and the first real 8 kHz
+    #    frame rebuilds it. That IS "a rate change between sessions is handled".
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02, audio_fmt=fmt,
+                            audio_peek=None, audio_samples=160)],
+                      SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].audio_writes,
+                            timeout=10.0, why="a rebuilt 8 kHz publisher carrying audio")
+            first_fmt = ctx.sinks[0].start_calls[0][3]
+            second = ctx.sinks[1]
+            second_fmt = second.start_calls[0][3]
+            audio_writes = list(second.audio_writes)
+            state = dict(ctx.state)
+            await stop(ctx)
+
+    assert first_fmt == c.AUDIO_DEFAULT_FORMAT, first_fmt
+    assert second_fmt == fmt, (
+        f"the rebuilt publisher did not adopt the 8 kHz mono shape the frames "
+        f"carry: {second_fmt}")
+    assert audio_writes and all(n == 160 for _, n in audio_writes), (
+        f"the 8 kHz frames were not written whole: {audio_writes[:5]}")
+    assert state.get("audio_format") == "8000Hz/1ch/s16", state
+    # ...and the field that says WHICH codec, not just which shape. This is the
+    # question nothing in the status could answer while the bridge spent two
+    # days decoding mu-law as Opus.
+    assert state.get("audio_codec") == "pcmu", (
+        f"audio_codec reads {state.get('audio_codec')!r} for a stream of 8 kHz "
+        "mono frames, which only the G.711 mu-law decoder produces")
+    print(f"  ok  8kHz mono audio: argv, {fs._AUDIO_PRIME_MS}ms prime, wallclock "
+          f"fill and status all follow the frames' own rate")
+
+
 async def test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio():
     """A frame whose bytes disagree with its own declared shape must not fail
     the session -- a rebuild cannot fix it, so forcing one is a loop.
@@ -4365,6 +4520,7 @@ TESTS = [
     test_a_wedged_audio_pipe_degrades_to_video_only,
     test_a_publisher_that_stopped_reading_is_detected_and_rebuilt,
     test_an_audio_format_change_forces_a_publisher_rebuild,
+    test_the_cameras_real_8khz_mono_audio_flows_through_unchanged,
     test_ffmpeg_duplicated_frame_warnings_are_counted,
     test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio,
     test_silence_is_the_formats_zero_not_zero_bytes,
