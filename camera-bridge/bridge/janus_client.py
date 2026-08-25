@@ -4,11 +4,13 @@ against camerafeed.har's captured _webSocketMessages, and confirmed live end-to-
 against both real cameras on this account (webrtcup + decoded frames flowing).
 """
 import asyncio
+import collections
 import contextlib
 import itertools
 import json
 import logging
 import re
+import time
 
 import websockets
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription
@@ -76,6 +78,14 @@ AUDIO_TIMEOUT = _AudioTimeout()
 VIDEO_QUEUE_TARGET_MS = 500
 VIDEO_QUEUE_MIN_FRAMES = 4      # what shipped; also ~667 ms at 6fps
 VIDEO_QUEUE_MAX_FRAMES = 8      # 24.9 MB at 1440x1440 -- see above
+
+# How many drop timestamps one session remembers when config.HANDOVER_TRACE is
+# on (E76). The drop LOG is throttled to the first of a session and then every
+# 150th, which for a session that drops fourteen is exactly one line and no way
+# to place those drops in time against a rotation -- so with tracing on the
+# times are kept here instead. Bounded: a session in real trouble drops
+# thousands, and this is a diagnostic, not a ledger.
+_DROP_TIME_MEMORY = 256
 
 
 def video_queue_maxsize(fps=None) -> int:
@@ -214,6 +224,14 @@ class JanusCameraSession:
         self._track_queue: asyncio.Queue = asyncio.Queue(
             maxsize=video_queue_maxsize(fps))
         self._dropped_frames = 0
+        # WHEN each dropped frame was dropped, kept only while
+        # config.HANDOVER_TRACE is on -- read live off the module attribute, like
+        # every other knob here, so it is the setting in force when the session
+        # was built. Off, this deque stays empty and the drop path does one
+        # attribute read more than it did before.
+        self._trace_drops = bool(c.HANDOVER_TRACE)
+        self._drop_times: collections.deque = collections.deque(
+            maxlen=_DROP_TIME_MEMORY)
         # Bounded for exactly the reason the video queue is: a consumer that falls
         # behind must drop and SAY SO, not grow. Only ever filled when
         # consume_audio is set; an unconsumed track still goes to _drain_track.
@@ -574,6 +592,8 @@ class JanusCameraSession:
                 # like from the outside. Logging (throttled, since a real backlog can
                 # drop many frames a second) at least makes it visible.
                 self._dropped_frames += 1
+                if self._trace_drops:
+                    self._drop_times.append(time.monotonic())
                 if self._dropped_frames == 1 or self._dropped_frames % 150 == 0:
                     log.warning("%s: dropped %d frame(s) so far -- consumer falling "
                                 "behind (queue maxsize=%d)", self.camera["id"],
@@ -675,6 +695,39 @@ class JanusCameraSession:
         total that /control/status serves -- otherwise the throttled log lines
         above were the only trace the drops ever left."""
         return self._dropped_frames
+
+    @property
+    def drop_times(self) -> tuple:
+        """Monotonic times of the frames _pump_track dropped, newest last, or an
+        empty tuple when config.HANDOVER_TRACE was off when this session was
+        built.
+
+        The counter above says how many; this says WHEN, which is the only way
+        to tell "the drops are spread through the session" from "every drop is
+        in the rotation gap" -- the distinction backlog E76 turns on, and one
+        the throttled drop log cannot make.
+        """
+        return tuple(self._drop_times)
+
+    @property
+    def video_queue_depth(self) -> int:
+        """Decoded video frames waiting for the publisher right now.
+
+        The queue is the tolerance the whole handover rides on (see
+        VIDEO_QUEUE_TARGET_MS): it is full at the instant the first frame is
+        dropped, so a depth sampled across a rotation says how much of that
+        tolerance was actually being spent.
+        """
+        return self._track_queue.qsize()
+
+    @property
+    def video_queue_limit(self) -> int:
+        """How deep that queue was sized for this session's rate.
+
+        Named `limit` rather than `maxsize` so it cannot be misread as the
+        module-level video_queue_maxsize() that computed it.
+        """
+        return self._track_queue.maxsize
 
     @property
     def dropped_audio_frames(self) -> int:

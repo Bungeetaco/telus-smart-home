@@ -706,6 +706,7 @@ environment variables:
 | `CONTROL_PORT` | `8199` | Loopback control API port (see [control-api.md](control-api.md)). |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 | `CONTROL_ACCESS_LOG` | `false` | Per-request access logging on the control endpoint; off by default (see [configuration.md](configuration.md)). |
+| `HANDOVER_TRACE` | `false` | One structured line per session rotation describing the handover window; off by default (see [the section below](#instrumenting-the-handover-window)). |
 | `HOST_SHARED_DIR` | Supervised path | Host side of the `/shared` mount. |
 | `RENDER_GID` | `992` | Host `render` group GID for `/dev/dri` access. |
 | `BRIDGE_MEM_LIMIT` / `BRIDGE_CPU_LIMIT` | `768m` / `2.0` | Container resource caps. |
@@ -752,6 +753,52 @@ per rotation, per camera):
   `audioUpStreamUrl` is present. Key names and one boolean only; never a value,
   because the same document holds the Janus token and the ICE server
   credentials.
+
+### Instrumenting the handover window
+
+`HANDOVER_TRACE` (off by default, implemented in `bridge/handover_trace.py`)
+adds **one structured line per session rotation, per camera**:
+`handover trace {...}`, where everything after the prefix is a single JSON
+object. It exists because the rotation window is where the doorbell's remaining
+frame drops live, and because the ordinary log cannot show that: the drop path
+logs the first drop of a session and then every 150th, so a session that drops
+fourteen leaves one line and no way to place it against anything.
+
+The record carries, for one rotation: when the previous session's audio pump
+actually stopped, when the frame hold took over the audio pipe and how often it
+wrote through the gap, the **muxer lead** at every step (how far the audio
+timeline runs ahead of the wallclock-stamped video, the quantity every pacing
+constant here is chosen against), when the new session's first frame arrived and
+when it was written to ffmpeg, when its pump first wrote, the video queue depth
+at each of those, and the timestamp of every dropped frame relative to the
+rotation. Each mark pairs `dt` (wall clock since the previous mark) with `adv`
+(audio actually written since it), so an interval where the timeline stopped
+advancing is visible as `adv` of zero across a long `dt`.
+
+Three properties are deliberate:
+
+- **It is off by default and costs nothing when off.** `handover_trace.begin()`
+  returns `None` and every call site is an `is not None` test on that value:
+  6.4 ns per frame against a 66.7 ms frame interval, no allocation, and nothing
+  at all inside `write_frame`. Instrumentation that perturbs a window whose
+  problem is frames going missing inside it would be worse than none.
+- **Nothing it does awaits, sleeps or writes**, and it schedules no sampler of
+  its own; marks are taken where the loop already is. On, a whole traced
+  rotation costs ~70 µs of CPU and ~1.5 kB of log.
+- **The records go to the log, not to `/control/status`.** A handover is an
+  event; `/control/status` is a snapshot contract Home Assistant polls
+  continuously and derives entities from, so a record served there would be
+  reported an arbitrary number of times or not at all depending on how the poll
+  cadence fell against the 165 s rotation, and a debug blob that is null on
+  almost every poll would cost that contract more than it buys. In the log the
+  records sit in order, next to the `proactive session rotation` and
+  `dropped N frame(s)` lines they have to be read beside.
+
+Its limits are stated where it is read: the lead is what the bridge has handed
+ffmpeg, not what ffmpeg's muxer has consumed; a stall is located between the two
+marks that bracket it and no more finely. Field-by-field, with what a healthy
+rotation and a stalled one look like:
+[troubleshooting.md](troubleshooting.md#measuring-what-a-session-rotation-costs-the-audio-timeline).
 
 ### Downstream (listen) audio
 
