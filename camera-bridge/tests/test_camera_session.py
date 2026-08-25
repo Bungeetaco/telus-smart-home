@@ -170,9 +170,26 @@ Pinned here:
                           session ends (healthy rotation and failure path
                           alike), so /control/status keeps the count across
                           rotations instead of losing it with each session.
+ 16. handover trace    -- the instrumentation for the rotation window (E76),
+                          which is only worth anything if it is honest about
+                          two opposite things. OFF (the default) it must build
+                          nothing and log nothing: it measures a window whose
+                          whole problem is that ~14 frames go missing inside
+                          it, so a diagnostic running there by default would be
+                          changing what it watches. ON, its record must say
+                          what actually happened: the marks in the order the
+                          loop really does things, the audio timeline's advance
+                          taken from the timeline rather than from time
+                          passing, a muxer lead derived from the sink's own
+                          sample counter and allowed to go NEGATIVE (which is
+                          the failure it exists to report), drops placed
+                          against the rotation rather than counted from the
+                          whole session, and a retired session snapshotted
+                          rather than held alive.
 """
 import asyncio
 import contextlib
+import gc
 import json
 import logging
 import os
@@ -181,6 +198,7 @@ import re
 import sys
 import time
 import types
+import weakref
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
@@ -189,6 +207,7 @@ os.environ.setdefault("TELUS_PASSWORD", "unused")
 from bridge import config as c              # noqa: E402
 from bridge import camera_session as cs     # noqa: E402
 from bridge import ffmpeg_sink as fs        # noqa: E402
+from bridge import handover_trace as ht     # noqa: E402
 from bridge import janus_client as jc       # noqa: E402
 from bridge.janus_client import AUDIO_TIMEOUT  # noqa: E402
 from bridge.telus_auth import RateLimited   # noqa: E402
@@ -324,6 +343,12 @@ class FakeSink:
 
     write_silence_to = fs.FfmpegSink.write_silence_to
     _silence_bytes = fs.FfmpegSink._silence_bytes
+    # The REAL properties, for the same reason write_silence_to is real: the
+    # handover record's whole claim is that the muxer lead is DERIVED from the
+    # sample counter the sink already keeps, and a fake reimplementation of that
+    # arithmetic would only ever test itself.
+    audio_timeline_s = fs.FfmpegSink.audio_timeline_s
+    audio_lead_s = fs.FfmpegSink.audio_lead_s
 
     @property
     def audio_enabled(self):
@@ -483,6 +508,14 @@ class FakeSession:
         # it down would silently put every camera back on one flat frame count.
         self.fps = fps
         self.queue_maxsize = jc.video_queue_maxsize(fps)
+        # The read-only surface the handover record samples (all properties on
+        # the real session). Depth stays 0 here because these fakes have no
+        # queue -- what the loop-level tests pin is that the record carries the
+        # fields at all; the real ones are driven in
+        # test_dropped_frames_are_timestamped_only_when_tracing.
+        self.video_queue_depth = 0
+        self.video_queue_limit = jc.video_queue_maxsize(fps)
+        self.drop_times = ()
         self.plan = CTX.next_plan()
         self.created_at = time.monotonic()
         self.closed_at = None
@@ -3850,6 +3883,389 @@ async def test_audio_drops_accumulate_separately_from_the_video_count():
 
 
 # --------------------------------------------------------------------------
+# 6d. The session-handover trace (E76)
+# --------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def handover_knob(enabled, settle=None):
+    """Set config.HANDOVER_TRACE (and optionally the settle tail) for one test.
+
+    The knob is read live off the module attribute wherever it is consulted --
+    handover_trace.begin() and JanusCameraSession's construction -- so assigning
+    it here is the same thing the env var does at process start.
+    """
+    saved = (c.HANDOVER_TRACE, c.HANDOVER_TRACE_SETTLE_S)
+    c.HANDOVER_TRACE = bool(enabled)
+    if settle is not None:
+        c.HANDOVER_TRACE_SETTLE_S = settle
+    try:
+        yield
+    finally:
+        c.HANDOVER_TRACE, c.HANDOVER_TRACE_SETTLE_S = saved
+
+
+class StubTraceSink:
+    """A publisher's audio bookkeeping as the record reads it, driven by hand.
+
+    The loop-level tests below run the real arithmetic against the real fakes;
+    this one exists so the record's own derivations -- where the audio timeline
+    stopped, and for how long -- can be asserted against numbers chosen rather
+    than raced for.
+    """
+
+    def __init__(self, timeline=0.1, lead=0.1):
+        self.fps = 15
+        self.audio_enabled = True
+        self.audio_dropped = False
+        self.timeline = timeline
+        self.lead = lead
+
+    @property
+    def audio_timeline_s(self):
+        return self.timeline
+
+    @property
+    def audio_lead_s(self):
+        return self.lead
+
+    def advanced(self, seconds, lead=None):
+        """The pipe was written to: the timeline moved with the wall clock."""
+        self.timeline += seconds
+        if lead is not None:
+            self.lead = lead
+
+    def stalled(self, seconds):
+        """Nothing wrote: the timeline stands still and the lead decays."""
+        self.lead -= seconds
+
+
+class StubTraceSession:
+    """A session's read-only diagnostic surface (all properties on the real one)."""
+
+    def __init__(self, drop_times=(), depth=0, limit=8, dropped=0):
+        self.drop_times = tuple(drop_times)
+        self.video_queue_depth = depth
+        self.video_queue_limit = limit
+        self.dropped_frames = dropped
+
+
+def _records(lines):
+    """Every handover record in a captured log, parsed."""
+    out = []
+    for line in lines:
+        if "handover trace " in line:
+            out.append(json.loads(line.split("handover trace ", 1)[1]))
+    return out
+
+
+def _mark_index(record, label):
+    for index, mark in enumerate(record["marks"]):
+        if mark["m"] == label:
+            return index
+    return -1
+
+
+async def test_the_handover_trace_is_off_by_default_and_emits_nothing():
+    """The default deployment must be indistinguishable from one with no
+    instrumentation in it at all.
+
+    That is not a preference: this measures a window whose whole problem is that
+    ~14 frames go missing inside it, so anything that runs there by default is a
+    change to the thing being measured. Off, `begin()` returns None, every call
+    site is an `is not None` test on that None, and no session remembers a drop
+    time.
+    """
+    assert c.HANDOVER_TRACE is False, (
+        "HANDOVER_TRACE must default to off -- an instrumentation flag that "
+        "ships on is instrumentation nobody chose to run")
+    with handover_knob(False):
+        assert ht.begin("cam", None, None) is None, (
+            "begin() built a record with tracing off: the guard at every call "
+            "site is `is not None` on this value, so a non-None here puts the "
+            "whole mechanism on the frame path of every deployment")
+        with consume_knob("all", request="all"):
+            with scenario([Plan(frames=steady(6, 0.02),
+                                tail=("repeat", 0.02, 1280, 720),
+                                audio_interval=0.02)],
+                          SESSION_MAX_LIFETIME_S=0.3) as ctx:
+                with capture_logs("bridge.handover_trace") as lines:
+                    start(ctx)
+                    await run_until(ctx, lambda x: len(x.sessions) >= 3,
+                                    why="3 sessions (2 rotations)")
+                    await stop(ctx)
+                emitted = list(lines)
+
+    assert not emitted, (
+        f"tracing is off and {len(emitted)} handover line(s) were logged: {emitted[:1]}")
+
+
+async def test_a_traced_rotation_emits_one_record_covering_the_whole_window():
+    """One rotation, one record, and the record spans the window end to end.
+
+    The window is the thing E76 is about: from `proactive session rotation` to
+    the new session settling. Every question it has to answer needs two events
+    that bracket it, so a record missing any of these marks cannot answer
+    anything -- and the pairs asserted below are the ones whose ORDER is
+    structural rather than raced: the hold stops the previous pump before it
+    writes its first silence, and the loop readies the publisher, starts the new
+    pump and writes the first batch strictly in that order.
+    """
+    with handover_knob(True, settle=0.05):
+        with consume_knob("all", request="all"):
+            with scenario([Plan(frames=steady(6, 0.02),
+                                tail=("repeat", 0.02, 1280, 720),
+                                audio_interval=0.02)],
+                          SESSION_MAX_LIFETIME_S=0.4) as ctx:
+                with capture_logs("bridge.handover_trace") as lines:
+                    start(ctx)
+                    await run_until(ctx, lambda x: len(_records(lines)) >= 2,
+                                    timeout=10.0, why="two handover records")
+                    await stop(ctx)
+                records = _records(lines)
+                sessions = len(ctx.sessions)
+
+    assert len(records) <= sessions - 1, (
+        f"{len(records)} records for {sessions} sessions: a record is one "
+        "ROTATION, and more of them than rotations means the window is being "
+        "opened somewhere it does not belong")
+    record = records[0]
+    assert record["reason"] == "settled", (
+        f"the first record closed as {record['reason']!r}, not on its settle "
+        "tail -- the drops being measured land just after the first batch, so a "
+        "record that closes earlier reports the window without its consequence")
+    assert record["audio"] is True and record["fps"], record
+    assert record["span_ms"] > 0 and record["audio_ms"] is not None, record
+    assert record["first_frame_ms"] is not None, (
+        "the record does not say when the new session's first frame arrived, "
+        "which is one half of the interval every drop in E76 falls inside")
+
+    for label in ("rotation", "pump_stopped", "hold_first_silence",
+                  "session_retired", "batch_collected", "hold_stopped",
+                  "publisher_ready", "pump_created", "first_write",
+                  "batch_written", "settled"):
+        assert _mark_index(record, label) >= 0, (
+            f"the record has no {label!r} mark: {[m['m'] for m in record['marks']]}")
+
+    order = [
+        ("rotation", "pump_stopped"),          # the hold's first act
+        ("pump_stopped", "hold_first_silence"),  # ...then, and only then, silence
+        ("hold_first_silence", "hold_stopped"),
+        ("session_retired", "batch_collected"),
+        ("batch_collected", "hold_stopped"),
+        ("hold_stopped", "publisher_ready"),
+        ("publisher_ready", "pump_created"),
+        ("pump_created", "first_write"),
+        ("first_write", "batch_written"),
+        ("batch_written", "settled"),
+    ]
+    for earlier, later in order:
+        assert _mark_index(record, earlier) < _mark_index(record, later), (
+            f"{earlier!r} is recorded after {later!r}; the record's ordering is "
+            "the measurement, so a mark in the wrong place is a wrong reading, "
+            f"not a cosmetic one: {[m['m'] for m in record['marks']]}")
+
+    times = [mark["t"] for mark in record["marks"]]
+    assert times == sorted(times), f"mark timestamps are not monotonic: {times}"
+    assert record["marks"][0]["m"] == "rotation" and record["marks"][0]["t"] == 0.0, (
+        "the record's clock does not start at the rotation, so every offset in "
+        "it is measured from somewhere else")
+    assert record["hold"]["silence_writes"] >= 1, (
+        f"the record says the frame hold wrote no silence during the gap: "
+        f"{record['hold']}")
+
+
+async def test_the_record_shows_where_the_audio_timeline_stopped():
+    """The measurement itself: an interval where the wall clock advanced and the
+    audio timeline did not.
+
+    This is the quantity E76's suspected mechanism is stated in. Each mark
+    carries `dt` (wall clock since the previous mark) beside `adv` (audio media
+    written since the previous mark); `worst_gap` is the largest `dt - adv` and
+    names the two marks that bracket it. A stall in the serialization window
+    therefore reads as `worst_gap.from = hold_stopped, to = pump_first_write,
+    adv = 0`, and the lead reaching zero or below is the same event seen from
+    the other side.
+
+    Driven against a hand-driven sink rather than a live one so the numbers are
+    chosen: a rig that raced for them could not tell a real stall from a slow
+    test machine.
+    """
+    with handover_knob(True):
+        sink = StubTraceSink()
+        before = time.monotonic() - 0.5      # a drop from BEFORE this rotation
+        retiring = StubTraceSession(drop_times=(before,), dropped=1)
+        trace = ht.begin("cam", sink, retiring)
+        assert trace is not None
+        # A healthy stretch: the hold is writing, so the timeline tracks the
+        # wall clock and the lead holds.
+        await asyncio.sleep(0.05)
+        sink.advanced(0.05)
+        trace.session_retired(retiring, sink)
+        # ...and the record must not be what keeps a retired session alive: it
+        # owns a decoded-frame queue of up to 8 x 3.11 MB on the doorbell, and a
+        # diagnostic holding that for the rest of the window would be changing
+        # the memory behaviour it is there to watch.
+        retiring_ref = weakref.ref(retiring)
+        del retiring
+        gc.collect()
+        assert retiring_ref() is None, (
+            "the record still references the retired session, so its "
+            "decoded-frame queue cannot be freed until the record is emitted")
+        trace.mark("hold_stopped", sink)
+        # The serialization window: nothing writes to the audio pipe at all.
+        drop_at = time.monotonic()
+        await asyncio.sleep(0.12)
+        sink.stalled(0.12)
+        session = StubTraceSession(drop_times=(drop_at,), depth=8, limit=8,
+                                   dropped=14)
+        trace.mark("pump_first_write", sink, session)
+        await asyncio.sleep(0.03)
+        sink.advanced(0.03, lead=0.1)
+        trace.emit(sink, session)
+        record = trace.record(sink, session)
+
+    gap = record["worst_gap"]
+    assert gap["from"] == "hold_stopped" and gap["to"] == "pump_first_write", (
+        f"the record blames the wrong interval: {gap}. The stall was scripted "
+        "between those two marks and nowhere else")
+    assert gap["adv"] == 0.0, (
+        f"the stalled interval is recorded as having advanced the audio "
+        f"timeline by {gap['adv']}ms; it advanced by nothing")
+    assert 110 <= gap["ms"] <= 200, (
+        f"the stall is reported as {gap['ms']}ms of uncovered wall clock, "
+        "against a scripted 120ms")
+    assert record["lead_min_at"] == "pump_first_write", (
+        f"the minimum lead is attributed to {record['lead_min_at']!r}: the "
+        "lead is at its worst at the END of a stall, which is the mark that "
+        "closes it")
+    assert -45 <= record["lead_min_ms"] <= -5, (
+        f"lead_min_ms is {record['lead_min_ms']}, against a scripted 100ms lead "
+        "decayed by a 120ms stall, i.e. about -20ms. The SIGN is the whole "
+        "point: negative means the audio no longer covers the video, which is "
+        "when ffmpeg stops reading the video pipe")
+    assert record["audio_ms"] == 80.0, (
+        f"the window wrote 0.05s + 0.03s of audio, so audio_ms must be 80.0, "
+        f"got {record['audio_ms']}")
+
+    drops = record["drops"]
+    assert drops["retiring"]["in_window"] == 0, (
+        "a drop from before the rotation was counted inside the window -- the "
+        "record would then blame the handover for the whole session's drops")
+    assert drops["retiring"]["session_total"] == 1, drops
+    assert drops["new"]["in_window"] == 1 and drops["total"] == 1, drops
+    assert 0 <= drops["new"]["at_ms"][0] <= record["span_ms"], (
+        f"the drop is placed at {drops['new']['at_ms']}ms of a "
+        f"{record['span_ms']}ms window -- outside it, which means it is being "
+        "measured from something other than the rotation")
+    assert record["marks"][-1]["q"] == 8, (
+        "the record does not carry the video queue depth, so 'the queue was "
+        "full when the frames were lost' is not checkable from it")
+
+
+async def test_the_muxer_lead_is_read_off_the_sinks_own_sample_counter():
+    """`audio_lead_s` is a DERIVATION, not a second tally.
+
+    The lead is the quantity the whole pacing design turns on (see
+    ffmpeg_sink._AUDIO_PRIME_MS), and it is already implicit in what
+    write_silence_to maintains: the audio covers `_audio_started_at +
+    samples/rate`, the video is stamped with the wall clock. A separately
+    counted "lead" could disagree with the pipe's actual contents, which is the
+    one thing a measurement of it must never do.
+
+    Pinned here: after the prime, the lead IS the prime; a stretch with nothing
+    written decays it by exactly the elapsed time and takes it NEGATIVE, which
+    is the shape of a stalled window.
+    """
+    # `scenario` only for its bookkeeping: FakeSink registers itself with it.
+    # Nothing is started, and no loop runs.
+    with scenario([Plan()]):
+        sink = FakeSink("cam")
+        assert sink.audio_lead_s is None and sink.audio_timeline_s is None, (
+            "a publisher with no audio input reported a lead; there is no audio "
+            "timeline to lead with")
+        await sink.start(1280, 720, 15, audio_format=("s16", 48000, 2))
+
+    primed_lead = sink.audio_lead_s
+    assert sink.audio_timeline_s == fs._AUDIO_PRIME_MS / 1000.0, (
+        f"the timeline reads {sink.audio_timeline_s}s after a "
+        f"{fs._AUDIO_PRIME_MS}ms prime")
+    assert 0.05 < primed_lead <= 0.1 + 1e-6, (
+        f"the lead reads {primed_lead}s immediately after the pipe was primed "
+        f"with {fs._AUDIO_PRIME_MS}ms of silence")
+
+    # Nothing written for 400ms: exactly the serialization window's shape.
+    sink._audio_started_at -= 0.4
+    stalled_lead = sink.audio_lead_s
+    assert -0.25 > stalled_lead > -0.35, (
+        f"400ms with nothing written left the lead at {stalled_lead}s, where "
+        "the 100ms prime decayed by 400ms is -0.3s. A lead that cannot go "
+        "negative cannot report the failure it exists to report")
+    assert sink.audio_timeline_s == fs._AUDIO_PRIME_MS / 1000.0, (
+        "the timeline moved without anything being written to the pipe")
+
+
+async def test_dropped_frames_are_timestamped_only_when_tracing():
+    """A dropped frame gets a TIME, and only while tracing is on.
+
+    The drop log is throttled to the first of a session and then every 150th, so
+    a session that drops fourteen leaves exactly one line: the log understates
+    the rate by design, and it cannot place a single drop against a rotation.
+    That is why the times are kept at the drop site instead. Off, the deque
+    stays empty, so the drop path is what it always was.
+
+    Driven through the REAL JanusCameraSession, filling the real queue past its
+    real depth, because the queue's own maxsize is what decides when a drop
+    happens at all.
+    """
+    gateway = ScriptedGateway()
+    with handover_knob(True):
+        traced = await _watch_once(gateway)
+    video = FakeRemoteTrack("video")
+    traced.pc.handlers["track"](video)
+    limit = traced.video_queue_limit
+    for i in range(limit + 5):
+        video.queue.put_nowait(f"frame{i}")
+    for _ in range(400):
+        if traced.dropped_frames >= 5:
+            break
+        await asyncio.sleep(0.005)
+    traced_times = traced.drop_times
+    traced_dropped = traced.dropped_frames
+    depth = traced.video_queue_depth
+    await traced.close()
+
+    gateway = ScriptedGateway()
+    with handover_knob(False):
+        untraced = await _watch_once(gateway)
+    video = FakeRemoteTrack("video")
+    untraced.pc.handlers["track"](video)
+    for i in range(untraced.video_queue_limit + 5):
+        video.queue.put_nowait(f"frame{i}")
+    for _ in range(400):
+        if untraced.dropped_frames >= 5:
+            break
+        await asyncio.sleep(0.005)
+    untraced_times = untraced.drop_times
+    untraced_dropped = untraced.dropped_frames
+    await untraced.close()
+
+    assert traced_dropped >= 5, (
+        f"the queue (maxsize {limit}) did not overflow: {traced_dropped} drops")
+    assert len(traced_times) == traced_dropped, (
+        f"{traced_dropped} frames were dropped and {len(traced_times)} times "
+        "were recorded -- a record that misses drops cannot say a rotation "
+        "carried all of them")
+    assert list(traced_times) == sorted(traced_times), (
+        "the drop times are not in order, so nothing can be placed against them")
+    assert depth == limit, (
+        f"video_queue_depth reads {depth} against a full queue of {limit}: the "
+        "depth sample is what says how much of the queue's tolerance was left")
+    assert untraced_dropped >= 5 and not untraced_times, (
+        f"tracing is off and {len(untraced_times)} drop times were kept anyway; "
+        "the drop path must be exactly what it was")
+
+
+# --------------------------------------------------------------------------
 # 7. Backoff
 # --------------------------------------------------------------------------
 
@@ -3959,6 +4375,11 @@ TESTS = [
     test_the_consume_knob_takes_the_same_three_value_forms,
     test_the_offered_audio_track_is_pumped_only_when_the_session_consumes,
     test_audio_drops_accumulate_separately_from_the_video_count,
+    test_the_handover_trace_is_off_by_default_and_emits_nothing,
+    test_a_traced_rotation_emits_one_record_covering_the_whole_window,
+    test_the_record_shows_where_the_audio_timeline_stopped,
+    test_the_muxer_lead_is_read_off_the_sinks_own_sample_counter,
+    test_dropped_frames_are_timestamped_only_when_tracing,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,
 ]

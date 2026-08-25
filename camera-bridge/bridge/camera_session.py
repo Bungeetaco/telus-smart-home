@@ -5,6 +5,7 @@ import time
 
 from . import config as c
 from . import ffmpeg_sink
+from . import handover_trace
 from . import restart_guard
 from .janus_client import AUDIO_TIMEOUT, JanusCameraSession
 from .ffmpeg_sink import FfmpegSink
@@ -461,6 +462,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         _update_status(dropped_frames=dropped_frames_total,
                        dropped_audio_frames=dropped_audio_frames_total)
         await _close_with_timeout(sess, camera_id)
+        # After the close, so the snapshot covers everything this session ever
+        # dropped -- including the frames its decoder kept queueing into a queue
+        # nobody was draining while the close ran.
+        if handover is not None:
+            handover.session_retired(sess, sink)
 
     # The ffmpeg/RTSP publisher deliberately outlives individual Janus sessions.
     # Alarm.com kills every session server-side at ~180s, forcing a rotation
@@ -490,6 +496,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     last_live = 0.0  # monotonic time a real (non-repeated) frame last arrived
     hold_task: asyncio.Task | None = None
     audio_task: asyncio.Task | None = None
+    # The record for the rotation currently in flight, or None -- which is what
+    # it always is unless config.HANDOVER_TRACE is on (see handover_trace.py).
+    # Every call below is guarded by `handover is not None`, so with tracing off
+    # this loop's whole instrumentation cost is that identity test: no
+    # allocation, no attribute reads, nothing on the audio or video write paths.
+    handover: handover_trace.HandoverTrace | None = None
 
     def _note_audio_dropped(sink_):
         # The publisher gave up on its audio input mid-session and kept
@@ -516,6 +528,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # each one costs an executor round trip on the same executor
         # write_frame's pixel copy uses -- see config.AUDIO_PUMP_MAX_BURST_S.
         unyielded_s = 0.0
+        # "this pump has not written anything yet". The moment it does is the
+        # end of the handover's audio serialization window, and the only thing
+        # the trace needs from this loop; it disarms itself at the first write,
+        # so the steady state costs one boolean test per frame and never a
+        # method call.
+        first_write = True
         try:
             while True:
                 frame = await sess.next_audio_frame(c.AUDIO_SILENCE_TOPUP_S)
@@ -534,13 +552,16 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # cadence has to stay under the ceiling as well as under the
                     # lead.
                     unyielded_s = 0.0           # this branch already waited
-                    if sink is not None and sink.audio_enabled \
-                            and not await sink.write_silence_to():
-                        _note_audio_dropped(sink)
-                        if sink.audio_dropped:
-                            return              # video-only from here; nothing to repair
-                        audio_rebuild_needed = True
-                        return
+                    if sink is not None and sink.audio_enabled:
+                        if not await sink.write_silence_to():
+                            _note_audio_dropped(sink)
+                            if sink.audio_dropped:
+                                return          # video-only from here; nothing to repair
+                            audio_rebuild_needed = True
+                            return
+                        if first_write and handover is not None:
+                            first_write = False
+                            handover.mark("pump_first_write", sink, sess)
                     continue
                 # Counted BEFORE the write: this is "a frame was decoded and
                 # reached the publisher's pump", which is the fact
@@ -562,6 +583,9 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         return                  # video-only from here; nothing to repair
                     audio_rebuild_needed = True
                     return
+                if first_write and handover is not None:
+                    first_write = False
+                    handover.mark("pump_first_write", sink, sess)
                 # Yield, do NOT pace. A backlog has to reach ffmpeg as fast as
                 # this loop can move it -- audio that lags the video is exactly
                 # what stalls the video pipe -- but it must not hold the loop (or
@@ -590,6 +614,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
             return
         task.cancel()
         await asyncio.wait({task})
+        # The first half of the handover's serialization window: from here until
+        # the hold's first silence write, nothing at all is writing to the audio
+        # pipe. Marked where the pump is REALLY finished, not where the cancel
+        # was requested -- those are different instants and the difference is
+        # part of what is being measured.
+        if handover is not None:
+            handover.mark("pump_stopped", sink)
         if not task.cancelled() and task.exception() is not None:
             log.warning("%s: audio pump ended with %r", camera["id"], task.exception())
 
@@ -650,6 +681,8 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     return
                 next_video_at = max(next_video_at + interval, now)
                 _update_status(last_publish_at=time.time())
+                if handover is not None:
+                    handover.hold_video()
             # The audio analogue of the repeated frame, and it cannot be built the
             # same way. A repeated video frame is self-describing: whenever it
             # lands, it is one frame, so asyncio.sleep jitter is invisible. A
@@ -660,18 +693,38 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
             # write_silence_to derives the count from elapsed real time instead,
             # so the gap is filled with exactly as many samples as the wall clock
             # says passed, however irregularly this loop actually ran.
-            if sink.audio_enabled and not await sink.write_silence_to():
-                _note_audio_dropped(sink)
-                if not sink.audio_dropped:
-                    return
-                # Audio is gone, video is not: keep holding the frame. Ending the
-                # hold here would black the RTSP path for the rest of the
-                # reconnect over an input that has already been given up on.
-                tick = interval
+            if sink.audio_enabled:
+                # Split out of the single `and not await ...` condition it used
+                # to be so the trace can see the write's OUTCOME. The
+                # short-circuit is unchanged: write_silence_to is still called
+                # only when audio is enabled, and still exactly once per tick.
+                wrote_silence = await sink.write_silence_to()
+                if handover is not None:
+                    handover.hold_silence(sink, wrote_silence)
+                if not wrote_silence:
+                    _note_audio_dropped(sink)
+                    if not sink.audio_dropped:
+                        return
+                    # Audio is gone, video is not: keep holding the frame. Ending
+                    # the hold here would black the RTSP path for the rest of the
+                    # reconnect over an input that has already been given up on.
+                    tick = interval
             await asyncio.sleep(tick)
         log.warning("%s: no live frames for %ss, ending frame-hold -- letting "
                     "the stream go dark until the camera recovers",
                     camera["id"], c.FRAME_HOLD_MAX_S)
+
+    def _trace_handover(sess):
+        """Open the record for the rotation now beginning, or None with tracing
+        off (config.HANDOVER_TRACE, default off).
+
+        Any record still open is emitted first rather than dropped: a lost
+        record is a rotation nobody can read afterwards, and this is the only
+        place two could overlap.
+        """
+        if handover is not None:
+            handover.emit(sink, sess, reason="superseded")
+        return handover_trace.begin(camera_id, sink, sess)
 
     def _start_hold():
         nonlocal hold_task
@@ -698,6 +751,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 log.exception("%s: frame-hold task failed; continuing with this session",
                               camera["id"])
             hold_task = None
+        # The second half of the serialization window opens here: the hold has
+        # stopped writing silence and the next session's pump does not exist yet.
+        # `session` is the INCOMING one at the only call site that matters (the
+        # rotation path calls this after connecting), so the queue sample is the
+        # depth the new session has already built up unread.
+        if handover is not None:
+            handover.mark("hold_stopped", sink, session)
         # Also here, not only inside the hold task: _start_hold declines to start
         # at all when there is no sink or no frame yet, so this is the one place
         # guaranteed to run before the next session's pump is created. Idempotent.
@@ -717,6 +777,8 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 session = JanusCameraSession(camera, vs, consume_audio=consume_audio,
                                              fps=known_fps)
                 await asyncio.wait_for(session.connect_and_watch(), timeout=c.WEBRTCUP_TIMEOUT_S + 10)
+                if handover is not None:
+                    handover.mark("connected", sink)
 
                 # Collect frames for up to ~1s (or 10 frames) to learn actual size/fps --
                 # observed to vary per camera model (e.g. 1440x1440@15fps vs 1280x720@30fps).
@@ -759,6 +821,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         f"(waited {waited:.1f}s of {float(c.FIRST_FRAME_TIMEOUT_S):.1f}s; "
                         f"webrtcup {webrtcup} before the wait)")
 
+                if handover is not None:
+                    # The new session is delivering. The mark's own `t` is when
+                    # the BATCH completed; when the first frame of it actually
+                    # arrived is recorded separately, as first_frame_ms.
+                    handover.note_first_frame(first_frames[0][0])
+                    handover.mark("batch_collected", sink, session)
                 w, h = first_frames[0][1].width, first_frames[0][1].height
                 # On a rotation, buffered frames can arrive in a near-instant burst,
                 # making elapsed-time-based fps math produce nonsense (observed: 544fps,
@@ -878,6 +946,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                              ffmpeg_sink.clamp_fps(fps))
                 rate_rebuild_needed = False
                 _update_status(rate_pending=None)
+                # Whether THIS cycle replaced the publisher. A rebuild opens a
+                # brand-new audio pipe with a brand-new prime, so a handover that
+                # includes one is not comparable with an ordinary rotation and the
+                # record has to say which it was.
+                sink_rebuilt = False
                 # `sink.proc is None` means a previous start() raised partway through
                 # (both encoders failed to survive the startup grace period -- what an
                 # RTSP ANNOUNCE to a momentarily-down MediaMTX looks like). Such a sink
@@ -931,6 +1004,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     new_sink = FfmpegSink(camera["id"])
                     await new_sink.start(w, h, fps, audio_format=desired_audio_fmt)
                     sink, sink_wh = new_sink, (w, h)
+                    sink_rebuilt = True
                     if rate_changed:
                         # Start the minimum-interval clock only once a rebuild has
                         # actually happened, so a rebuild that never took place
@@ -959,15 +1033,32 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # sessions of pure silence report "48000Hz/2ch/s16". The
                     # field is written only where a real frame is observed --
                     # the peek above and the audio pump.
+                if handover is not None:
+                    handover.sink_rebuilt = sink_rebuilt
+                    handover.mark("publisher_ready", sink, session)
                 if consume_audio and sink.audio_enabled:
                     audio_task = asyncio.ensure_future(_pump_audio(session))
+                    if handover is not None:
+                        # CREATED, not running: ensure_future only schedules it,
+                        # and the gap between this mark and pump_first_write is
+                        # the part of the serialization window that belongs to
+                        # the event loop rather than to this code.
+                        handover.mark("pump_created", sink, session)
 
-                for _, frame in first_frames:
+                for index, (_, frame) in enumerate(first_frames):
                     last_frame = frame
                     last_live = time.monotonic()
                     if not await sink.write_frame(frame):
                         _update_status(publisher_alive=sink.publisher_alive)
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
+                    if index == 0 and handover is not None:
+                        # The first frame this publisher actually TOOK. Its `dt`
+                        # is the duration of that single write, which is where a
+                        # video pipe ffmpeg has stopped reading shows up.
+                        handover.mark("first_write", sink, session)
+                if handover is not None:
+                    handover.mark("batch_written", sink, session)
+                    handover.arm()
                 backoff = c.RECONNECT_BACKOFF_INITIAL_S  # reset after any successful frame batch
                 consecutive_failures = 0
                 # sink.fps (not the local fps var) so this always reflects what's
@@ -1015,6 +1106,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     remaining_to_rotate = rotate_deadline - time.monotonic()
                     if remaining_to_rotate <= 0:
                         log.info("%s: proactive session rotation", camera["id"])
+                        handover = _trace_handover(session)
                         break
                     timeout = min(remaining_to_rotate, c.FRAME_SILENCE_TIMEOUT_S)
                     try:
@@ -1022,6 +1114,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     except asyncio.TimeoutError:
                         if time.monotonic() >= rotate_deadline:
                             log.info("%s: proactive session rotation", camera["id"])
+                            handover = _trace_handover(session)
                             break
                         raise RuntimeError(
                             f"no frame for {c.FRAME_SILENCE_TIMEOUT_S}s, treating session as dead"
@@ -1054,8 +1147,21 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         _update_status(publisher_alive=sink.publisher_alive)
                         raise RuntimeError("ffmpeg pipe broken, restarting sink")
                     _update_status(last_publish_at=time.time())
+                    # The handover record closes here, a settle tail after the
+                    # new session's first batch, so the drops that land just
+                    # after the batch are inside it. `handover` is None on every
+                    # frame of an untraced deployment and on all but ~15 frames
+                    # of a traced one, so this line is an identity test.
+                    if handover is not None and handover.due():
+                        handover.emit(sink, session)
+                        handover = None
 
             except Exception as exc:
+                if handover is not None:
+                    # A session that failed before it settled still has a record
+                    # worth reading -- more so, not less.
+                    handover.emit(sink, session, reason="session_failed")
+                    handover = None
                 rate_limited = isinstance(exc, RateLimited)
                 if not rate_limited:
                     # A Cloudflare rate-limit is an explicitly-transient server-side

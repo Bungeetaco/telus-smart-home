@@ -368,6 +368,46 @@ class FfmpegSink:
         return (self.proc is not None and self.proc.returncode is None
                 and not self.publisher_stalled)
 
+    @property
+    def audio_timeline_s(self) -> float | None:
+        """Seconds of media this publisher's audio input has been handed.
+
+        The audio input carries no -use_wallclock_as_timestamps (see start()),
+        so its PTS come from its own sample count: this IS the audio stream's
+        timeline, and it is read off the counter _write_audio_bytes already
+        keeps rather than from a second tally that could disagree with it.
+        None for a sink that was never given an audio input.
+        """
+        if self.audio_format is None or not self._audio_bytes_per_sample:
+            return None
+        rate = self.audio_format[1]
+        if not rate:
+            return None
+        return self._audio_samples_written / float(rate)
+
+    @property
+    def audio_lead_s(self) -> float | None:
+        """How far that audio timeline is AHEAD of the wall clock, in seconds.
+
+        The quantity every pacing constant in this file is chosen against, made
+        readable: the audio covers up to `_audio_started_at + timeline`, the
+        video is stamped with the wall clock (-use_wallclock_as_timestamps), and
+        the muxer can emit a video packet only while the first is past the
+        second. Positive is the lead _AUDIO_PRIME_MS establishes, zero is the
+        cliff the measured table above sits on either side of, and NEGATIVE
+        means the audio timeline stopped advancing while real time did not --
+        the shape of a video pipe ffmpeg has stopped reading.
+
+        Derived, not measured separately, and only ever read by an observer
+        (handover_trace.py): nothing in the publishing path consults it, so it
+        cannot change what it is watching. None when there is no audio input, or
+        before the pipe has been primed.
+        """
+        timeline = self.audio_timeline_s
+        if timeline is None or self._audio_started_at is None:
+            return None
+        return (self._audio_started_at + timeline) - time.monotonic()
+
     async def start(self, width: int, height: int, fps: int = 15,
                     audio_format: tuple | None = None):
         self._wh = (width, height)

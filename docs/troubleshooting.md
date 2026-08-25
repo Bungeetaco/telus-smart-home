@@ -20,6 +20,7 @@ the component READMEs.
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
 - [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
+- [Measuring what a session rotation costs the audio timeline](#measuring-what-a-session-rotation-costs-the-audio-timeline)
 - [The status says `streaming` but MediaMTX has no path](#the-status-says-streaming-but-mediamtx-has-no-path)
 - [A live view drifts further behind real time the longer it runs](#a-live-view-drifts-further-behind-real-time-the-longer-it-runs)
 - [`frame rate changed`: the publisher rebuilds and readers reconnect once](#frame-rate-changed-the-publisher-rebuilds-and-readers-reconnect-once)
@@ -394,6 +395,74 @@ per repeated frame is 167 ms on a 6 fps camera. See
 **Diagnosis.** Frames dropping on the camera that has `audio_consumed: true`
 while a video-only camera in the same process drops none is this, not encode
 contention. If both cameras drop, look at the encoder instead.
+
+**What the log does not tell you.** The drop path logs the **first** drop of a
+session and then only every 150th, while `/control/status` accumulates across
+sessions. A session that drops fourteen therefore leaves exactly one line, and
+reading the log alone suggests one drop per rotation. If the drops cluster at
+rotations rather than running through the session, the section below is the way
+to see it.
+
+---
+
+## Measuring what a session rotation costs the audio timeline
+
+**When to use this.** Frames are lost at **session rotations** rather than
+throughout a session: the drop warnings sit between `proactive session rotation`
+and the new session's first frame, and the camera has audio consuming. Measured
+on the doorbell, same camera and rate and build, switching only the audio knobs:
+**~14 dropped frames per rotation with audio against 0.8 without**, about 0.9 s
+of video once per 165 s cycle.
+
+**Turn it on.** `HANDOVER_TRACE=true` in the bridge's `.env`, then
+`docker compose up -d --build`. It is off by default. On, one rotation costs
+about 70 µs of CPU and one ~1.5 kB log line per camera; nothing it does awaits,
+sleeps or writes, so a multi-hour soak is fine. Leave the audio knobs exactly as
+they are: the point is to measure the deployment as it runs.
+
+**Read a record.** Everything after the prefix is one JSON object:
+
+```bash
+sudo docker logs telus-cam-bridge 2>&1 \
+  | grep 'handover trace' | sed 's/.*handover trace //' | jq .
+```
+
+| Field | What it answers |
+| --- | --- |
+| `marks[]` | The window, in order, from `rotation` to `settled`. Each carries `t` (ms from the rotation), `dt` (ms since the previous mark), **`adv`** (ms of audio actually written to ffmpeg since the previous mark), **`lead`** (ms the audio timeline is ahead of the wallclock-stamped video) and `q` (video frames queued for the publisher). |
+| `worst_gap` | The interval where the audio timeline fell furthest behind the wall clock, and the two marks bracketing it. `ms` is `dt - adv`: real time that interval did **not** cover with audio. A few ms is scheduling jitter. |
+| `lead_min_ms` / `lead_min_at` | The lowest lead seen, and where. **Negative means the audio no longer covers the video**, which is when ffmpeg stops reading the video pipe (`_AUDIO_PRIME_MS`). |
+| `drops` | Every dropped frame in the window, in ms from the rotation, split into the `retiring` session and the `new` one. `session_total` beside each is that session's own lifetime count. |
+| `hold` | The frame hold's work through the gap: silence writes, repeated video frames, and `max_gap_ms`, the longest interval between two silence writes. It must stay under the 100 ms lead. |
+| `audio_ms` vs `span_ms` | Audio written across the whole window against wall time across the whole window. **These two should match.** |
+| `first_frame_ms` | When the new session's first frame arrived, as opposed to when the loop noticed it. |
+| `sink_rebuilt` | Whether this rotation also rebuilt the publisher. A rebuild opens a new audio pipe with a fresh 100 ms prime, so such a record is not comparable with an ordinary rotation. |
+
+The marks worth knowing by name: `pump_stopped` (the previous session's audio
+pump has really finished), `hold_first_silence` (the frame hold has taken over
+the pipe), `hold_stopped` (the hold has let go and the next pump does not exist
+yet), `pump_created` (the new pump is scheduled, not yet running),
+`pump_first_write` (it has actually written). `hold_stopped` to
+`pump_first_write` is the serialization window: the two writers to the audio
+pipe are mutually exclusive by design, and if the audio timeline stops advancing
+anywhere in there, that is where it happens.
+
+**What a healthy rotation looks like:** `adv` tracking `dt` at every mark,
+`lead` staying positive, `worst_gap.ms` in the low tens of ms, `drops.total` 0
+or 1.
+
+**What the suspected fault looks like:** `worst_gap.from = hold_stopped`,
+`worst_gap.to = pump_first_write` with `adv: 0`, `lead_min_ms` negative, and
+`drops.new.at_ms` landing inside that same interval.
+
+**The limits of the measurement**, so a reading is not over-claimed: the lead is
+what the *bridge* has handed ffmpeg, not what ffmpeg's muxer has consumed (the
+muxer's own state is not observable from this process); a stall is located
+between the two marks that bracket it and no more finely; and nothing schedules
+a sample of its own, because a sampler running on the event loop during the very
+window being measured would perturb it. The records are in the **log only**, not
+in `/control/status`: a handover is an event, and a snapshot endpoint polled
+continuously would report each one an arbitrary number of times or not at all.
 
 ---
 

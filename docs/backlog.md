@@ -40,14 +40,27 @@ and evidence. Grouped by whether anything can actually be done about them.
   a real resolution change live. A five-minute operator check; the procedure,
   now fully readable from `/control/status`, is in the entry.
 
+- **E77** (open, minor) - four recorded limits of E76's handover
+  instrumentation: it traces proactive rotations only, a record open at camera
+  shutdown is dropped, drop timestamps are bounded per session, and the records
+  are log-only (with the case for `/control/status` argued and declined).
+
 - **E75** (open, minor) - the stack watcher is now versioned at
   `ops/stack-watch.sh` but is untested shell that has already produced three
   false positives; its cron entry is not captured in the repo.
 
 - **E76** (open) - the doorbell's residual drops are the audio path stalling at
   each session rotation: 14 per rotation with audio against 0.8 without,
-  measured by A/B on the same camera. Instrument the handover before changing
-  anything.
+  measured by A/B on the same camera. The handover window is now instrumented
+  (`HANDOVER_TRACE`, off by default): one structured line per rotation carrying
+  the audio timeline's advance, the muxer lead and every drop's timing. What is
+  left is to run it on the live doorbell and read the records; the suspected
+  mechanism stays unconfirmed until then, and no fix is to be attempted before.
+
+- **E78** (open, needs the provider) - the living room camera HAS a microphone,
+  switched off upstream (`areMicrophoneAndSpeakerOn=False`); not exposed in the
+  app or the portal, so it is a TELUS call. `hasBuiltInMicrophone` is `False`
+  for both cameras and is meaningless here.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -2051,10 +2064,60 @@ entries are the mechanism that keeps it under review
   ffmpeg stops reading video, and the queue's 533 ms of tolerance at 15 fps
   overflows. That is E60's mechanism confined to the handover.
 
-  **Do not guess at a fix.** The next step is instrumentation, not a change:
-  timestamp `_stop_audio_pump` returning, the hold's first silence write, the
-  new session's first video write, and the queue depth across that window. If
-  the lead does collapse there, the numbers will say so.
+  **Do not guess at a fix.** The next step is instrumentation, not a change. It
+  is now built and is the state of this entry.
+
+  **The window is measurable, from data, one line per rotation.**
+  `HANDOVER_TRACE=true` in the bridge's `.env` (off by default, see
+  `handover_trace.py`) makes every proactive rotation emit
+  `handover trace {...}`, everything after the prefix being one JSON object.
+  Read them with
+
+  ```
+  docker logs telus-cam-bridge 2>&1 | grep 'handover trace' \
+    | sed 's/.*handover trace //' | jq .
+  ```
+
+  Each record carries the window as an ordered list of marks -- `rotation`,
+  `pump_stopped`, `hold_first_silence`, `session_retired`, `batch_collected`,
+  `hold_stopped`, `publisher_ready`, `pump_created`, `first_write`,
+  `batch_written`, `pump_first_write`, `settled` -- and on each of them `dt`
+  (wall clock since the previous mark) beside `adv` (audio actually written to
+  ffmpeg since it), the muxer `lead`, and the video queue depth. `worst_gap`
+  names the interval where the timeline fell furthest behind and by how much;
+  `lead_min_ms`/`lead_min_at` say whether the lead reached zero and where;
+  `drops` lists every dropped frame in ms from the rotation, split between the
+  retiring session and the new one. The serialization window this entry is about
+  is `hold_stopped` to `pump_first_write`.
+
+  So the hypothesis is now falsifiable from a record: it predicts
+  `worst_gap.from = hold_stopped`, `worst_gap.to = pump_first_write` with
+  `adv: 0`, a negative `lead_min_ms`, and `drops.new.at_ms` inside that same
+  interval. A record showing the timeline tracking the wall clock all the way
+  through, with the drops somewhere else, **refutes** it, and the marks say where
+  to look instead. Field-by-field reading in
+  `docs/troubleshooting.md`.
+
+  **What it costs.** Off (the default), the whole mechanism is one `is not None`
+  test per frame: 6.4 ns against a 66.7 ms frame interval, no allocation, and
+  nothing inside `write_frame`. On, a traced rotation costs ~70 microseconds of
+  CPU and ~1.5 kB of log, once per 165 s per camera. Nothing it does awaits,
+  sleeps or writes, and it schedules no sampler of its own, deliberately: a
+  sampler running on the event loop during the very window being measured would
+  perturb it.
+
+  **What it still cannot see, so a reading is not over-claimed.** The lead is
+  what the BRIDGE has handed ffmpeg, not what ffmpeg's muxer has consumed; the
+  muxer's own state is not observable from this process (the same limit E68
+  records for the pacing measurements). A stall is located between the two marks
+  that bracket it and no more finely. And a rotation that also rebuilds the
+  publisher gets a fresh audio pipe with a fresh 100 ms prime, so those records
+  (`sink_rebuilt: true`) are not comparable with ordinary ones.
+
+  **Not yet run against the live doorbell.** The instrumentation is exercised by
+  `test_camera_session.py` against the offline fakes; no record from the real
+  camera has been read yet. Doing that, with audio consuming and against an
+  audio-off control on the same camera, is what closes this entry.
 
   **Severity, honestly.** 0.57 percent against a 0.05 percent floor, bounded, not
   growing over six hours, and invisible to viewers because the frame hold keeps
@@ -2068,3 +2131,87 @@ entries are the mechanism that keeps it under review
   per rotation. And the living room camera's zero drops are not health, they are
   slowness: at 5 fps the 4-frame queue floor holds 800 ms where the doorbell's
   8-frame ceiling holds 533 ms, so it absorbs a handover the doorbell cannot.
+
+- **E77 (open, minor) What the handover instrumentation does not cover.** Four
+  deliberate limits of E76's `HANDOVER_TRACE`, recorded so they are choices
+  rather than surprises. None of them blocks reading a live record; each is a
+  small, separable improvement if a reading turns out to need it.
+
+  **It traces PROACTIVE rotations only.** A session that fails and reconnects
+  goes through the same handover -- the same frame hold, the same audio-pump
+  swap -- and gets no record, because the trace opens at the two `proactive
+  session rotation` breaks. Failures are rare on a healthy camera and already
+  log a reason, so this keeps a record meaning exactly one thing; if a failure's
+  handover ever needs measuring, opening a trace on the failure path too is a
+  two-line change.
+
+  **A record open when the camera task is cancelled is dropped**, not emitted.
+  The final teardown stops the hold and the pump without closing the record. A
+  camera being deactivated mid-rotation has louder news in the log, and emitting
+  from inside a `CancelledError` unwind is not something to add for a
+  diagnostic's sake.
+
+  **Drop timestamps are bounded** at `_DROP_TIME_MEMORY` (256) per session. Past
+  that the record's `in_window` count is a floor rather than the count. The
+  `session_total` beside it is exact, so the two together always say when the
+  list has been cut.
+
+  **It is log-only, and that is argued rather than assumed.** The case for also
+  serving the last record from `/control/status` is real: an operator (and Home
+  Assistant) could see it without shell access, which is how E71's procedure was
+  made checkable. It loses on three points. A rotation is an EVENT and a status
+  poll is a snapshot, so with 165 s rotations against a much faster poll each
+  record would be served many times over and a reader would have to diff `at` to
+  tell repeats from news. The per-camera status dict is a documented contract the
+  integration parses on every poll and derives entities from, and a ~1.5 kB
+  nested blob that is null whenever the flag is off costs that contract more than
+  it buys. And a record is only interpretable NEXT TO the `proactive session
+  rotation` and `dropped N frame(s)` lines it belongs with, which exist only in
+  the log. If the live reading does show a need for it, the right shape is a
+  small summary (the last rotation's `worst_gap.ms`, `lead_min_ms` and drop
+  count) rather than the whole record.
+
+- **E78 (open, needs the provider) The living room camera has a microphone and
+  it is switched off upstream.** This entry exists because the previous claim
+  was wrong and was repeated in several places: that the ADC-V522IR "cannot take
+  audio". What was actually observed is that requesting audio on it produces
+  zero video frames and a first-frame timeout. That shows the session dies, not
+  that the hardware lacks a microphone.
+
+  Its settings say otherwise. Living room (ADC-V522IR, fw `IP8168-ALAM-0100g4`)
+  reports `areMicrophoneAndSpeakerOn = False`, `isAudioRecordingOn = False`,
+  `canToggleAudioRecording = False`, `supports_call_volume = False`. The doorbell
+  (ADC-VDB750) reports `True`, `True`, `True` and `callVolumeFeatureSupport = 2`.
+  So audio is disabled for that device at the account level. A camera whose
+  microphone is off being asked for an audio-enabled offer, and failing the whole
+  session, fits the observation at least as well as missing hardware.
+
+  **Trap, and the reason this entry leads with it: `hasBuiltInMicrophone` is
+  `False` for BOTH cameras**, including the doorbell whose microphone is
+  streaming AAC into the RTSP path continuously. The field is not populated
+  meaningfully on this account. Do not use it as evidence in either direction.
+
+  Not switchable from here. `microphoneAndSpeakerFeatureSupport` is `0` on both
+  cameras, and the operator confirmed on 2026-08-25 that no audio control exists
+  in either the TELUS app or the alarm.com portal for this camera. A capability
+  that is enabled on one device while its own feature-support flag reads "not
+  exposed" is provisioned by the provider, not set by the customer. The account
+  already reports `hasCustomerAcceptedAudioAgreement = True`, so consent is not
+  the blocker.
+
+  **Next step is a support call, not code:** ask TELUS to enable microphone and
+  audio on the ADC-V522IR, noting the ADC-VDB750 on the same account already has
+  it, so this is per-device provisioning. Be ready for "not offered on that
+  model", which is a real answer and would close this.
+
+  Deliberately NOT attempted: writing `mic_and_speaker_on` through the API to see
+  if the server accepts it. That is a write to a live account for a question a
+  phone call answers, and the operator chose to proceed video-only on
+  2026-08-25. If it is ever tried, expect the camera to go dark and revert
+  immediately. One avenue is also unfinished: reading the portal's JS bundles to
+  see what gates the microphone control would say whether it is dealer-only, and
+  the asset path 404s on the obvious URL.
+
+  Consequence today: the living room records video only. If audio is ever
+  enabled it is a Frigate config change plus a renegotiation, not a rebuild, and
+  recordings already on disk stay valid.

@@ -550,6 +550,35 @@ AUDIO_SILENCE_TOPUP_S = 0.05
 # fed audio at twice real time showed no video stall at all.
 AUDIO_PUMP_MAX_BURST_S = 0.1
 
+# --- Instrumentation for the session handover window (backlog E76) -----------
+# OFF by default. With it on, every proactive session rotation emits ONE
+# structured line -- `handover trace {...}`, JSON after the prefix -- carrying
+# the timestamps, the muxer lead and the frame drops across the window between
+# the rotation and the new session settling (see handover_trace.py for the
+# record's shape and for what each field answers).
+#
+# It exists because the doorbell's residual drops are not spread through a
+# session: with audio consuming it loses ~14 frames per rotation against 0.8
+# with audio off, and every one of them falls between `proactive session
+# rotation` and the new session's first frame. What that window does to the
+# audio timeline is not knowable from the ordinary log: the drop path logs the
+# first drop of a session and then only every 150th, so a session that drops
+# fourteen leaves exactly one line and no way to place it against anything.
+#
+# Safe to leave on: nothing here awaits, sleeps or writes, one line per 165s per
+# camera is a few kB a day against Docker's 10MB x 3 window, and with it off the
+# whole mechanism is an `is not None` test on a value that is always None.
+HANDOVER_TRACE = os.environ.get("HANDOVER_TRACE", "false").strip().lower() in (
+    "1", "true", "yes", "on")
+# How long past the new session's first batch of frames a record waits before it
+# is emitted. It is a TAIL, not a delay for its own sake: the drops being
+# measured land around the first writes of the new session, so a record closed
+# at the batch itself would report the window without its own consequence. One
+# second is ~15 frames at the doorbell's rate, comfortably past the ~0.9s of
+# video a rotation loses, and short enough that the line still sits next to the
+# rotation it belongs to in the log.
+HANDOVER_TRACE_SETTLE_S = 1.0
+
 # How often to re-poll TELUS for the camera list after startup, so a camera
 # added to the account later gets picked up (and streaming started
 # automatically) without a container restart. Existing camera tasks are never
