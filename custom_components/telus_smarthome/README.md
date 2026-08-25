@@ -42,9 +42,9 @@ Alarm.com's normal login flow. The domain is `telus_smarthome`.
   notification; plus the Recent Events activity-feed sensor, the talkdown
   status/failure sensors, the bridge-served per-camera diagnostic
   (signal / battery / status) and solar-panel sensors, and the per-camera
-  stream-health sensors (stream state / dropped frames, off the bridge's
-  `/control/status`) — see `docs/ha-integration.md` for the full entity
-  list.
+  stream-health sensors (stream state / dropped frames / audio state, off
+  the bridge's `/control/status`) — see `docs/ha-integration.md` for the full
+  entity list.
 - `alarm_control_panel.py`, `lock.py`, `binary_sensor.py`, `cover.py`,
   `light.py`, and `climate.py` mirror the upstream integration's entity
   platforms, built on the shared `base_device.py` base classes;

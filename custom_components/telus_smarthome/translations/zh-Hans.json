@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "丢帧数"
+            },
+            "camera_audio_state": {
+                "name": "音频状态",
+                "state": {
+                    "not_consuming": "未接收音频",
+                    "no_audio_yet": "尚无音频",
+                    "flowing": "正在接收音频",
+                    "stalled": "音频已中断"
+                }
             }
         },
         "binary_sensor": {

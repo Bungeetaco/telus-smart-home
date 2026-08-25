@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "ड्रॉप किए गए फ़्रेम"
+            },
+            "camera_audio_state": {
+                "name": "ऑडियो स्थिति",
+                "state": {
+                    "not_consuming": "ऑडियो नहीं लिया जा रहा",
+                    "no_audio_yet": "अभी तक कोई ऑडियो नहीं",
+                    "flowing": "ऑडियो आ रहा है",
+                    "stalled": "ऑडियो रुक गया"
+                }
             }
         },
         "binary_sensor": {

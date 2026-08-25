@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "الإطارات المفقودة"
+            },
+            "camera_audio_state": {
+                "name": "حالة الصوت",
+                "state": {
+                    "not_consuming": "لا يتم استقبال الصوت",
+                    "no_audio_yet": "لا يوجد صوت بعد",
+                    "flowing": "الصوت متدفق",
+                    "stalled": "توقف الصوت"
+                }
             }
         },
         "binary_sensor": {

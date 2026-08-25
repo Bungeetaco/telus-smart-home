@@ -137,6 +137,15 @@
       },
       "camera_dropped_frames": {
         "name": "Dropped frames"
+      },
+      "camera_audio_state": {
+        "name": "Audio state",
+        "state": {
+          "not_consuming": "Not consuming audio",
+          "no_audio_yet": "No audio yet",
+          "flowing": "Flowing",
+          "stalled": "Stalled"
+        }
       }
     },
     "binary_sensor": {

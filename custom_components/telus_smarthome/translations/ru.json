@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "Пропущенные кадры"
+            },
+            "camera_audio_state": {
+                "name": "Состояние звука",
+                "state": {
+                    "not_consuming": "Звук не обрабатывается",
+                    "no_audio_yet": "Звука ещё не было",
+                    "flowing": "Звук поступает",
+                    "stalled": "Звук прекратился"
+                }
             }
         },
         "binary_sensor": {

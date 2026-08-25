@@ -21,35 +21,44 @@ evidence), **BLOCKED** (needs hardware/access this account does not have),
 ## Open items at a glance
 
 Everything not listed here is settled; each entry below carries its own status
-and evidence.
+and evidence. Grouped by whether anything can actually be done about them.
 
-- **E13** — validate the webrtc/srtp fallback path; blocked on hardware this
-  account does not have.
-- **E20** — the audio-conditioning chain is tuned for the VDB750's speaker;
-  another device may want different cutoffs/levels.
-- **E33** (one point) — whether `shouldDisplayBatteryLevel` is reliable on an
-  actual battery camera.
+**Blocking, and actionable now**
+
+- **E62** — audio consumption took the doorbell off the air after ~14 minutes,
+  and `/control/status` reported `streaming` throughout. Both audio knobs are
+  off. Two defects: the starved video path (E60), and a bridge that cannot tell
+  "publishing" from "publishing to nowhere".
+- **E60** — root cause found: the 0.5 s audio silence burst stalls the video
+  pipe 165–330 ms against 267 ms of queue tolerance. Pacing to 100 ms removes it
+  entirely. A symptom of E62's audio path, not its cause.
+- **E64** (open) — the frame rate is latched for the life of a process, but it
+  is a *device setting* that can change at any time (the resolution select is
+  already an HA entity). Measured 7 vs 15 on the same camera across restarts;
+  `-framerate` then bakes the wrong one in. Must become adaptive, rebuilding the
+  sink on a material change the way a frame-size change already does.
+- **E65** (open, minor) — the MediaMTX publish password is passed on ffmpeg's
+  argv, so it shows in `docker top`. Loopback-scoped, but avoidable.
+- **E63** (open) — the integration has no test harness at all, so logic like
+  E61's audio-state derivation can only be pinned by throwaway scripts. A
+  minimal suite stubbing `homeassistant.helpers.update_coordinator` would let
+  it run in CI the way the bridge's suites do.
+
+**Blocked on hardware or a device this account does not have**
+
+- **E13** — validate the webrtc/srtp fallback path; needs an ADC camera that
+  offers those endpoints.
+- **E20** — the audio-conditioning chain is tuned by ear for the VDB750's
+  speaker; only matters once a different speaker exists.
+- **E33** (one point) — whether `shouldDisplayBatteryLevel` is reliable; needs a
+  battery-powered camera.
 - **E41** (two questions) — whether panel-wide pairing off makes the per-device
-  toggle inert, and the uncaptured `bluetoothDisarmingSettings` write shape.
-- **E53** (follow-up) — downstream audio is offered, but negotiating it broke
-  one camera; the knob is global and would need to be per-camera before any
-  supervised retry.
-- **E54** (follow-up) — audio consumption works and MediaMTX accepts it, but no
-  real camera has been through it end to end, and the frame-silence watchdog is
-  video-only, so audio can die while a camera still reports `streaming`.
-- **E62** (BLOCKING) — audio consumption took the doorbell off the air after
-  ~14 minutes and the bridge still reported `streaming`; both audio knobs are
-  off. Blocked on E60.
-- **E60** (open) — `dropped ... consumer falling behind` runs at ~300 frames
-  per session (~12%) on the doorbell. Whether the CFR-25 re-rate E58 fixed was
-  the cause is unproven; re-measure now that it publishes at its real rate.
-- **E59** — DONE and confirmed live; the rejected packet turned out to be G.711
-  µ-law on the Opus payload type. Why the gateway emits it is unverified.
-- **E61** — silent audio is invisible from Home Assistant; the fields that
-  expose it live only on `/control/status`.
-- **E56** — the doorbell button press is not a first-class event, which blocks
-  every ring-triggered automation.
-- **E57** (watch-only) — `pyalarmdotcomajax` maintenance is paused upstream.
+  toggle inert, and the never-captured `bluetoothDisarmingSettings` write shape.
+
+**Watch-only, no action by design**
+
+- **E57** — `pyalarmdotcomajax` maintenance is paused upstream. Pinning is why
+  nothing needs doing; the entry lists the triggers that would reopen it.
 
 ## High value
 _Implemented since live testing:_ **E-COND audio conditioning (with per-request
@@ -1308,13 +1317,158 @@ when it ships.
   device-native frame before its Opus transcode is running; that remains
   **unverified**. It costs a few milliseconds of audio per session.
 
-- **E61 (open) Silent audio is invisible from Home Assistant.** The integration
-  surfaces only `state` and `dropped_frames` from `/control/status`, so the two
-  fields that would have exposed E59 — `audio_format` and the new
-  `decoded_audio_frames` — are reachable only by curling the bridge. A camera
-  whose audio decoder dies looks perfectly healthy in HA. A diagnostic sensor
-  per audio-consuming camera would close that gap; it is small, and the value is
-  precisely that nobody had to notice eleven silent sessions by hand.
+- **E61 (DONE) Audio health is visible from Home Assistant.** Each camera gets a
+  `Audio state` ENUM diagnostic sensor on its own device, fed by the existing
+  shared `StreamHealthCoordinator` (no second poller): `not_consuming`,
+  `no_audio_yet`, `flowing`, `stalled`. The raw `decoded_audio_frames`, the
+  per-poll delta, `audio_format`, `dropped_audio_frames` and `last_audio_at`
+  ride as attributes.
+
+  **An enum rather than a counter, deliberately.** Home Assistant has no "this
+  number stopped changing" trigger, so a `total_increasing` frame count would
+  have left the exact failure it exists to catch — decoder dies, counter
+  freezes, `state` stays `streaming`, `last_frame_at` stays fresh — as something
+  a human must notice on a graph. That is precisely how eleven silent doorbell
+  sessions went unnoticed. Comparing the counter between polls turns *stopped*
+  into a state you can automate on.
+
+  Every camera gets one, including cameras with audio switched off (they read
+  `not_consuming`): entity creation is sticky, so one that appears and vanishes
+  with a bridge env var would break any automation naming it, and "no audio
+  entity at all" reads as "fine" — the very gap being closed. A stall is never
+  reported for an unanswered poll, a failed poll, a counter reset (bridge
+  restart), or the first poll of a camera that already has frames.
+
+  **Deferred, recorded rather than lost:** there is no graphable recorder series
+  for `decoded_audio_frames` (attribute only — a companion `total_increasing`
+  sensor would give one at the cost of a series per camera); the `stalled`
+  threshold is one 30 s poll window and is not configurable, so a genuinely
+  bursty source needs the automation's `for:` instead; `last_audio_at` is
+  observed by the poller so it resets on an HA restart and is only accurate to
+  30 s, because the bridge exposes no last-audio-frame timestamp; and the
+  derivation is covered only by a throwaway AST-exec harness, since the
+  integration still has no test suite of its own. **This makes dead audio
+  visible; it does not recover it** — that is E60/E62.
+
+- **E62 (open, BLOCKING audio consumption) Audio consumption took the doorbell
+  off the air, and the bridge reported `streaming` throughout.** Enabled on the
+  doorbell it ran correctly for about fourteen minutes — real decoded audio,
+  measured — and then collapsed. The sequence, from the container log:
+
+  ```
+  22:11:24  ffmpeg publishing 960x960@15fps ... audio aac mono from 48000Hz/2ch/s16
+  22:12:54  ffmpeg: More than 1000 frames duplicated
+  22:25:57  ffmpeg has stopped reading the audio pipe (636928 bytes queued); restarting the encoder
+  22:25:58  ffmpeg: More than 10000 frames duplicated   +  a second pipe stall
+  23:14-17  dropped 600 ... 2550 frame(s) -- consumer falling behind (queue maxsize=4)
+  23:17:06  session marked dead: track ended: MediaStreamError()
+  thereafter  MediaMTX: "no stream is available on path telus_...-2048"
+  ```
+
+  **The `-framerate` fix (E58) did not eliminate the pipe stall — it delayed
+  it.** The underlying condition is E60: the per-frame pixel copy cannot keep up
+  at 1440x1440, so `janus_client` drops frames before they reach ffmpeg, ffmpeg
+  starves and pads to CFR (10,000+ duplicated frames), and the audio timeline —
+  which really is wallclock — outruns the starved video until the interleaver
+  stops accepting audio. The encoder restarts that follow eventually left the
+  camera with **no publisher at all**.
+
+  **The worst part is the reporting.** Throughout the outage `/control/status`
+  said `state: streaming`, `consecutive_failures: 0`, with a fresh
+  `last_frame_at` — while MediaMTX had no path and every reader was being
+  refused. The frame-silence watchdog watches frames arriving from Janus, not
+  whether the publisher still exists, so a dead publisher is invisible. That is
+  its own defect and arguably the more dangerous one: **the bridge cannot
+  currently tell "publishing" from "publishing to nowhere."**
+
+  So: **audio consumption stays off until E60 is fixed**, and both knobs are
+  back to `false` on the live deployment. Fixing the ordering does not help —
+  the fix is to stop starving the video path. Add a publisher-liveness check
+  that actually asks whether the RTSP path exists, rather than inferring it.
+
+- **E60 (root cause found; fix in progress) The doorbell's frame drops are
+  caused by the audio silence top-up, not by the pixel copy.** Both earlier
+  hypotheses are disproven by measurement inside the container, and so is the
+  measurement that appeared to disprove the first one.
+
+  **What actually happens:** the bridge hands ffmpeg's audio input **0.5 s of
+  PCM in a single burst** (the quiet-audio path — `_pump_audio` waits
+  `AUDIO_SILENCE_TOPUP_S` for a decoded frame and on timeout pushes the whole
+  wallclock deficit at once), and each burst makes ffmpeg **stop reading the
+  video pipe for 165–330 ms**. The video queue holds 4 frames = 267 ms of
+  tolerance, so frames drop. One video stall per audio write, lasting roughly
+  0.35–0.75× the audio time handed over at once:
+
+  | audio write cadence | `write_frame` p90 | frames >66.7 ms of 900 |
+  |---|---|---|
+  | video-only (control) | 2.69 ms | 1 |
+  | every 20 ms | 2.51 ms | 1 |
+  | every 100 ms | 2.46 ms | 1 |
+  | **every 500 ms (shipped)** | **166 ms** | **120 (13.3%)** |
+  | every 1000 ms | p99 730 ms | 61 |
+
+  `-thread_queue_size` and `-max_interleave_delta` change nothing, and splitting
+  one 500 ms burst into 25 back-to-back writes changes nothing — it is temporal
+  pacing that matters, not chunking. A doorbell is quiet most of the time, so
+  the quiet path is the normal path.
+
+  **Disproven:** the per-frame pixel copy costs **0.24 ms of a 66.7 ms frame
+  interval** (0.36%), against a machine that does 28 GB/s of memcpy; and
+  pre-scaling the feed to 960x960 changes the stall count by **exactly zero**
+  (it halves p50 and nothing else). The old note's "roughly 6 MB of copying per
+  second" was wrong twice: it is 3.11 MB *per frame*, ~47 MB/s each way, and
+  neither figure is load-bearing. CPU is not the constraint either — 0.016% of
+  periods throttled, 11% of the 2-core cap used.
+
+  **A measurement error of mine, corrected.** This entry previously said the
+  hypothesis was disproven because "46 warnings and 5,455 dropped frames in the
+  first twelve minutes — no better than before". That was **not an audio-off
+  control**: it was the first twelve minutes of the audio-*enabled* E62 run. The
+  real control is the current audio-off deployment: **2 drops in 21 minutes
+  across both cameras**, both at ffmpeg startup. The conclusion drawn from the
+  bad control ("the re-rate was not the cause, look at the pixel copy") sent the
+  next round of work at the wrong target.
+
+  **Severity was also understated.** Not "~300 per session": the incident log
+  shows **1,650–2,550 dropped per ~165 s session, around 70% of frames** — and
+  only on the camera with audio enabled. The audio-off camera in the same
+  process, same event loop, same host, dropped 1.
+
+  **E60 is a symptom of E62's audio path, not its cause.** The causal claim in
+  both entries ran backwards.
+
+- **E61 (DONE) Audio health is visible from Home Assistant.** Each camera gets a
+  `Audio state` ENUM diagnostic sensor on its own device, fed by the existing
+  shared `StreamHealthCoordinator` (no second poller): `not_consuming`,
+  `no_audio_yet`, `flowing`, `stalled`. The raw `decoded_audio_frames`, the
+  per-poll delta, `audio_format`, `dropped_audio_frames` and `last_audio_at`
+  ride as attributes.
+
+  **An enum rather than a counter, deliberately.** Home Assistant has no "this
+  number stopped changing" trigger, so a `total_increasing` frame count would
+  have left the exact failure it exists to catch — decoder dies, counter
+  freezes, `state` stays `streaming`, `last_frame_at` stays fresh — as something
+  a human must notice on a graph. That is precisely how eleven silent doorbell
+  sessions went unnoticed. Comparing the counter between polls turns *stopped*
+  into a state you can automate on.
+
+  Every camera gets one, including cameras with audio switched off (they read
+  `not_consuming`): entity creation is sticky, so one that appears and vanishes
+  with a bridge env var would break any automation naming it, and "no audio
+  entity at all" reads as "fine" — the very gap being closed. A stall is never
+  reported for an unanswered poll, a failed poll, a counter reset (bridge
+  restart), or the first poll of a camera that already has frames.
+
+  **Deferred, recorded rather than lost:** there is no graphable recorder series
+  for `decoded_audio_frames` (attribute only — a companion `total_increasing`
+  sensor would give one at the cost of a series per camera); the `stalled`
+  threshold is one 30 s poll window and is not configurable, so a genuinely
+  bursty source needs the automation's `for:` instead; `last_audio_at` is
+  observed by the poller so it resets on an HA restart and is only accurate to
+  30 s, because the bridge exposes no last-audio-frame timestamp; and the
+  derivation is covered only by a throwaway AST-exec harness, since the
+  integration still has no test suite of its own. **This makes dead audio
+  visible; it does not recover it** — that is E60/E62.
 
 - **E62 (open, BLOCKING audio consumption) Audio consumption took the doorbell
   off the air, and the bridge reported `streaming` throughout.** Enabled on the
@@ -1420,3 +1574,63 @@ survived. Restored here with their current status rather than as they were.
   answer** when one fires — three internals are already monkeypatched precisely
   because they cannot be changed in place, and vendoring would turn those into
   ordinary edits and delete the guard machinery with them.
+
+- **E63 (open) The integration has no test harness.** The bridge has thirteen
+  suites run by CI on every PR; `custom_components/` has none, so the ceiling
+  for integration work is `py_compile` plus careful reading. That has already
+  cost something concrete: E61's audio-state derivation — which has real edge
+  cases (first poll, counter reset on a bridge restart, an unanswered poll, a
+  camera dropped from the payload) — could only be checked by pulling the
+  function out with `ast` and exec'ing it against a stand-in coordinator in a
+  throwaway script. The logic is right today and nothing pins it tomorrow.
+
+  Home Assistant itself is not importable here, which is the reason it has
+  never been done. But most of the logic worth pinning does not need HA: a
+  minimal harness stubbing just `homeassistant.helpers.update_coordinator` (and
+  whatever else a given module touches) would let derivations, dedup rules and
+  status parsing run in CI on the same terms as the bridge's suites — plain
+  scripts ending in `RESULT: PASS`, picked up by the existing glob if placed
+  where CI looks, or by widening that glob.
+
+- **E64 (open) The measured fps is unstable across restarts, and `-framerate`
+  bakes it in.** The same indoor camera has been observed locking
+  `known_fps = 7` for one process lifetime and `15` for another, with no change
+  to the camera. It currently delivers about **13.4 fps** measured from ffmpeg's
+  stdin throughput, so `-framerate 15` makes ffmpeg duplicate roughly 11% of
+  frames, and `-framerate 7` would have made it drop half of them.
+
+  The measurement is a median of frame deltas taken from the first batch of a
+  session, with a plausibility lock so a burst cannot overwrite a real value —
+  but a burst at the *start*, before anything is locked, sets the value for the
+  whole process. It matters more now than it used to: with `-r` the declared
+  rate only shaped the (broken) timeline, whereas `-framerate` makes it the
+  output's constant frame rate and the basis for `-g`.
+
+  **The frame rate must be treated as adaptive, not as a constant discovered
+  once.** It is a *device setting* — the live-video resolution select already
+  ships as an HA entity (E34), and changing it changes what the bridge receives.
+  So the rate can legitimately change mid-deployment, from the TELUS app, from
+  Home Assistant, or from the portal, with no restart and no signal to the
+  bridge. Anything that latches a rate for the life of a process is therefore
+  wrong by construction, not merely imprecise: it was already wrong for one
+  process (7 vs 15 on the same camera), and it will be wrong again the first
+  time somebody changes the resolution while the bridge is running.
+
+  `-framerate` makes this sharper than `-r` did. The declared rate is now the
+  output's constant frame rate and the basis for `-g`, so a stale value means
+  ffmpeg duplicates or drops frames for as long as the process lives.
+
+  The fix should re-measure after the stream settles and **rebuild the sink when
+  the rate has moved materially**, exactly as it already does on a frame-size
+  change — that mechanism exists and is the precedent to follow (`sink_wh`).
+  Treat a resolution/rate change as the same class of event as a size change,
+  because on this platform it literally is one.
+
+- **E65 (open, minor) The MediaMTX publish password is visible in process
+  arguments.** The RTSP publish URL, credentials included, is passed on
+  ffmpeg's command line, so it appears in `docker top` and in any host-visible
+  process listing. It is loopback-scoped (`127.0.0.1/32`), regenerated by
+  `entrypoint.sh`, and only grants publish/read on the local MediaMTX, so the
+  exposure is small — but a credential on an argv is avoidable: ffmpeg accepts
+  the same values through the environment or a config file. Log lines already
+  redact it (`_redact_url`); this is the one place it stays in the clear.
