@@ -183,7 +183,13 @@ invariant on purpose and say so.
 assertion nobody has checked. For each invariant a new test claims to pin, break
 that invariant in the source, confirm the suite reports the failure, then revert,
 and treat a test that stays green against deliberately broken code as
-*worthless until strengthened*, not as a curiosity. Both integration suites and
+*worthless until strengthened*, not as a curiosity. The first thing that check
+catches is the cheapest mistake: a new test that was never added to its file's
+`TESTS` list "passes" by never running at all, and the deliberate-break run is
+what exposes it (it has happened here). Also clear `__pycache__` around these
+experiments: CPython validates bytecode by size and mtime, so reverting to a
+file of identical size within the same second can silently run the broken
+version's cached module. Both integration suites and
 `test_camera_session.py` were validated this way, and it has repeatedly found
 tests that only looked strict; it also documents which halves of a condition are
 genuinely load-bearing (in `_classify`, the French *person* needle is redundant

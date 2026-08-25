@@ -150,6 +150,118 @@ Each of these looks like something to clean up and is not. See
   `tests/test_opus_decoder_patch.py`. Delete it only when upstream fixes this: the
   guard fires if upstream grows its own handler, which is what that would look like.
 
+## Settled dead ends -- do not reopen
+
+Each of these was investigated to a conclusion, at real cost. Re-investigating
+them has already burned sessions. The evidence lives where the pointer says;
+read it before deciding the conclusion no longer applies.
+
+- **Device-direct listen audio from the doorbell.** The doorbell runs no RTSP
+  server: its media port answers RTSP with an HTTP 400 from lighttpd, and the
+  published `rtsp://` URLs are consumed as HTTPS `GET /api/GetStream`. Listen
+  audio comes over the website/Janus path. Backlog E55; reopen only if the
+  Janus path is abandoned.
+- **L16 audio on the talkdown PUT path.** Tested against the live device in
+  both byte orders; both decode as noise, because this doorbell model decodes
+  the PUT body as G.711 mu-law regardless of Content-Type. A per-model limit,
+  not project-wide. Backlog E4.
+- **"Fixing" the ~6-minute push-websocket drop.** It is a server-side token
+  lifetime. Mirroring a browser's websocket URL params was tested and rejected
+  by the server. The reconnect logic is the design.
+- **A gapless RTSP publisher handoff at rotation.** MediaMTX rejects a second
+  concurrent publisher on the same path (upstream discussion linked from
+  `config.py`). The one-publisher-plus-frame-hold design is the answer, not a
+  workaround.
+- **`-r` before `-i` on the video input, or declaring no rate at all.**
+  Measured three ways in-container (the table in `ffmpeg_sink.py`): `-r`
+  overrides `-use_wallclock_as_timestamps` and publishes less media than wall
+  time; no declaration re-rates everything to the rawvideo demuxer's 25 fps
+  default. `-framerate` is the only correct form, and this is not an
+  ffmpeg-version quirk (reproduced identically on 7.1.5 and n9.0.1).
+- **Topping the audio pipe up at or above the 100 ms muxer lead.** The lead is
+  the mechanism, not the burst size: a 0.1 s cadence measured WORSE than the
+  0.5 s defect it replaced (162 vs 120 stalled frames of 900). The shipped
+  cadence is half the lead. Backlog E60 carries both measurement tables and
+  their reconciliation.
+- **The per-frame pixel copy as the frame-drop cause.** It costs 0.24 ms of a
+  66.7 ms frame interval, and pre-scaling the feed changed the stall count by
+  exactly zero. Backlog E60 records the disproof.
+- **Matching activity events on description text.** The feed renders text in
+  the account's language (both French and English observed on one account for
+  the same event kinds). Match `event_type_name`, the untranslated enum.
+- **Latching the frame rate once per process.** It is a device setting; the
+  rate is adaptive (backlog E64), and a delivered rate that swings with no
+  setting change is real and handled by the flap guard (E73). Do not
+  "simplify" either back out.
+
+## Measurement discipline
+
+The repository's own record includes a measurement error that sent a full
+round of work at the wrong target (backlog E60: a reading recorded as a
+control was actually taken with the treatment enabled). The rules that would
+have prevented it:
+
+- **Name the control.** Before reading a comparison, state what the control
+  run is and verify from the log what configuration it actually ran under.
+  "It was probably off" is how the E60 error happened.
+- **A rig earns trust by reproducing the known defect.** When two rigs
+  disagree, the one that reproduces the already-measured failure to the frame
+  is the one to believe. Two rigs disagreeing exactly at a cliff edge is
+  expected, not alarming.
+- **Quote one run.** Never blend numbers from different runs into one table;
+  if a second run exists, record that it agreed on the load-bearing figure and
+  which run the quoted percentiles came from. (The tables in this repo drifted
+  apart once exactly this way.)
+- **Measure before reasoning** for anything about timing, throughput or
+  latency; reasoning first is for logic invariants, and those get pinned by a
+  test instead.
+- **Pin measured constants as values** where a wrong value is self-defeating,
+  the way the audio-pacing constants are pinned against the muxer lead.
+  Backlog E72 tracks the constants that are still pinned as logic only.
+- **Beware stale bytecode when swapping files of identical size.** CPython's
+  pyc check is size+mtime; a reverted file that matches both runs the OLD
+  compiled module. Clear `__pycache__` around fail-first experiments.
+
+## Recording findings
+
+- Findings live in `docs/backlog.md` as `E<n>` entries: status in the header
+  parenthetical, evidence in the body. **The header must agree with the
+  body**; they drifted apart once (a body saying "confirmed live" under a
+  header saying "unconfirmed") and the contradiction survived several commits.
+- **A disproven hypothesis is knowledge, not history.** Inside a backlog
+  entry, "X was the suspected mechanism and is disproven by <measurement>" is
+  the limit-of-knowledge record that stops the next session re-deriving it,
+  and it stays. Everywhere else in `docs/`, the wrong claim is deleted and the
+  page states the current truth (see the docs rules above).
+- **Never edit backlog entries by line index or broad splice.** Entry bodies
+  have been silently deleted that way and the loss went unnoticed for several
+  commits. Use exact-string edits, and verify the entry count before and after
+  (`grep -cE '^- \*\*E[0-9]+ ' docs/backlog.md`).
+- A correction to a previous session's wrong claim gets the same treatment as
+  any other change: every doc it touches, in the same commit.
+
+## The working loop
+
+1. **Orient.** The checkout you are editing may be a staging copy with no
+   `.git`; git runs where the deployment lives. Confirm which you are in
+   before assuming anything about state, and diff staging against the
+   deployment checkout before assuming it is clean.
+2. **Read before touching** the files the cautions above name in full.
+3. **Change, then prove.** Run the affected suite before proposing anything.
+   A new or changed test is proven able to fail: break the invariant, watch
+   the suite go red with the message you intended, revert. **A new test must
+   also be added to its file's `TESTS` list** -- a test that is not in the
+   list passes by never running, and that has happened.
+4. **Docs and backlog ride in the same commit**, per the table above.
+   Version bump per the versioning rule; the tag matches `manifest.json`.
+5. **Deploy deliberately.** Bridge code is baked into the image (rebuild, not
+   restart); integration code needs a full Home Assistant restart. Never
+   deploy mid-edit, and tell the operator before restarting anything that
+   serves a live camera.
+6. **Verify live, before and after.** `/control/status` fields, the container
+   log lines the docs name, and whatever whole-stack watcher the deployment
+   runs. A deploy that was not watched is not verified.
+
 ## Where to read more
 
 Start at [`docs/README.md`](docs/README.md). For a change in a given area: `docs/ha-integration.md`, `docs/camera-bridge.md`, `docs/control-api.md`, `docs/alarm-com-api.md`, `docs/configuration.md`, `docs/troubleshooting.md`. Each component also has its own README (`custom_components/telus_smarthome/README.md`, `camera-bridge/README.md`).
