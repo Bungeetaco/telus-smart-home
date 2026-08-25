@@ -2659,7 +2659,19 @@ entries are the mechanism that keeps it under review
   frame, which is the right order for a retained `av.AudioFrame`.
 
   Audio consumption is **off** on the live deployment as a result. Both cameras
-  publish video and the container sits at about 40 percent.
+  publish video.
+
+  **The control, stated precisely, because a first reading of it was wrong.**
+  With audio off the container is NOT flat: over fourteen minutes it went 343 MB
+  to 391 MB, about **3.7 MB per minute**, which is the ordinary warm-up toward
+  the plateau E74 measured. With audio on it went 496 MB to 651 MB, about
+  **12 MB per minute**, and did not plateau. So audio roughly triples the growth
+  rate and removes the ceiling; it does not introduce growth where there was
+  none. An earlier note in this entry called the audio-off case flat on the
+  strength of four samples spanning four minutes. It was not, and the same
+  short-window error produced two other wrong readings in the two days before
+  this. **Take a control over at least one full plateau, and say how long the
+  window was.**
 
   **Do not assume the sniff's held frames are the cause.** That list is bounded
   at 20 packets, which is roughly 120 kB per session, two orders of magnitude
