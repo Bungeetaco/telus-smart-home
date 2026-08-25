@@ -45,13 +45,19 @@ A bridge-only change still rides in the same integration version bump — note i
 
 ## Tests
 
-`camera-bridge/tests/` holds the bridge's regression suites. CI runs **every**
-`tests/test_*.py` on each pull request; run one locally exactly the way CI does:
+There are two suites, one per component, run by two separate CI jobs on every
+pull request. Both follow the same conventions and neither needs a test runner
+installed.
 
-```bash
-cd camera-bridge
-TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py
-```
+| Where | Covers | Run it |
+|---|---|---|
+| `camera-bridge/tests/` | the bridge | `cd camera-bridge && TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py` |
+| `tests/` (repo root) | the Home Assistant integration | `python3 tests/test_stream_health_sensors.py`, from the repo root |
+
+CI runs **every** `test_*.py` in each directory, so a new file is picked up with
+no list to update.
+
+### The bridge suites
 
 Conventions every suite follows:
 
@@ -62,7 +68,7 @@ Conventions every suite follows:
 - **Each file is a plain script**, not a pytest module: it prints one line per
   test and ends in `RESULT: PASS` or `RESULT: FAIL (n)`, exiting non-zero on
   failure. There is no test runner to install.
-- **Fixtures are captured, not invented.** `tests/fixtures/` holds anonymized
+- **Fixtures are captured, not invented.** `camera-bridge/tests/fixtures/` holds anonymized
   request/response bodies taken from real HAR captures, and a guard test fails if
   an account identifier ever lands in one.
 - **Every suite's docstring names the invisible failure it exists to catch.**
@@ -87,8 +93,68 @@ Conventions every suite follows:
 | `test_metrics.py` | The talkdown metrics counters. |
 | `test_opus_decoder_patch.py` | `bridge/aiortc_opus_patch.py`, against the real aiortc and the real libopus: that a packet libopus rejects is dropped rather than fatal and the SAME decoder still decodes the next packet; that aiortc's own `decoder_worker` thread survives it and keeps delivering frames (the actual outage — the thread dies once and the published track is silence for the life of the session, while every health signal still says `streaming`); that the drop is logged once per decoder, i.e. once per session, carrying the packet's length and first 16 bytes, since what those bytes are is still unverified; and that the import-time compatibility guard fires on every incompatible upstream shape — class or method moved, module executed twice, upstream grown its own exception handling — while still patching an aiortc shaped like the pin. |
 
-The integration (`custom_components/`) has no suite of its own; verify it by
-reading the code, compiling it, and checking Home Assistant's logs.
+### The integration suites
+
+`tests/` at the repository root covers `custom_components/telus_smarthome/`.
+Same conventions as the bridge's — plain scripts, one line per test, ending in
+`RESULT: PASS` / `RESULT: FAIL (n)` and exiting non-zero — and the same
+requirement that each suite's docstring names the invisible failure it exists to
+catch. Run one from the repo root:
+
+```bash
+python3 tests/test_stream_health_sensors.py
+```
+
+The only third-party package needed is **aiohttp**, which is what CI installs.
+
+**Home Assistant is deliberately not installed; it is stubbed.** The integration
+imports `homeassistant.*` at module scope, so something has to answer to that
+name. `tests/ha_stubs.py` registers a small package tree in `sys.modules` before
+the integration is imported, so the **real** integration modules load and the
+real derivations run against stand-in base classes. The reasoning, in full:
+
+- `pip install homeassistant` does resolve on the interpreter CI pins, but pulls
+  in the order of a hundred transitive packages — grpcio, boto3, pillow,
+  cryptography, bleak/dbus-fast, zeroconf, SQLAlchemy, and PyRIC, which has no
+  wheel and builds from source — to supply a handful of base classes.
+- Exercising entity behaviour for real on top of that needs
+  `pytest-homeassistant-custom-component`, which pins one exact Home Assistant
+  version. That is a version-lock treadmill this repo gets nothing back from, and
+  a second test framework alongside the bridge's plain scripts.
+- The logic worth pinning is pure — a counter compared across polls, a string
+  classifier, an id-set dedup. None of it needs an event loop, an entity
+  registry or a state machine.
+
+**The limit of that choice, stated so nobody mistakes it for coverage it isn't:
+the stubs assert nothing about Home Assistant's real API.** If upstream changes
+what `CoordinatorEntity` promises, these suites stay green. They pin *our*
+derivations, not our compatibility with Home Assistant. Two things narrow the
+gap deliberately, and both must be preserved when the stubs are extended:
+
+- Each stub reproduces the upstream behaviour the integration actually leans on
+  and nothing else — `CoordinatorEntity.available` really is
+  `coordinator.last_update_success`, and `EventEntity._trigger_event` really does
+  reject a type outside `event_types`.
+- Nothing in the stub tree is auto-magic: no `MagicMock`, no `__getattr__` that
+  invents attributes. An integration module that starts using a name the stubs
+  do not define fails loudly rather than exercising a fiction. The same applies
+  to the three-attribute `pyalarmdotcomajax` stub. (`controller.py` is stubbed
+  wholesale, because importing it applies the websocket monkeypatch and needs the
+  real library; that patch is guarded at import time and exercised by CI's
+  `check_patch.py` job instead.)
+
+| Suite | What it pins |
+|---|---|
+| `test_stream_health_sensors.py` | The bridge-fed stream-health sensors. Above all `CameraAudioStateSensor`'s derivation: the four states, and the four ways a false `stalled` could be fabricated — an unanswered poll (both the `last_poll_ok` flag and the identical payload object it hands back), a failed poll, a counter reset on a bridge restart, and the first poll of the entity's life. Also the per-poll delta (suppressed rather than negative across a reset), that `not_consuming` drops the remembered count so re-enabling audio starts a fresh comparison, that a bridge too old to report `audio_consumed` reads unknown rather than a fabricated `not_consuming`, and that every derivable state is inside `_attr_options` (an ENUM sensor whose state falls outside its options errors on every update). Plus `CameraStreamStateSensor`'s payload mapping and its degradation of an unknown bridge state to unknown-with-`raw_state`, `CameraDroppedFramesSensor`'s mapping and `total_increasing` class, and the coordinator's two failure flags — an unanswered `/control/status` keeps the previous payload rather than flapping every entity to unavailable, a transport failure raises `UpdateFailed`, and both record `last_poll_ok = False`. |
+| `test_event_entities.py` | The Activity-feed event entities. The doorbell matcher keys on TELUS's untranslated `event_type_name` enum: a French-described press fires, and an entry whose *description* says "Button Push" while its enum says otherwise does not — this account's feed has been observed in both French and English for the same event kinds, and a text match would simply stop firing the day the account locale changed. Also the per-page id-set dedup: a restart baselines on the current page and replays nothing, two presses sharing one timestamp both fire (a high-water mark would suppress the siblings forever), an empty page is a failed poll that neither becomes nor clears the baseline, and two presses in one poll fire oldest-first with one state write each. Plus `_classify` across both locales and the containment of its output in `EVENT_TYPES`, `_event_time` ordering across the two timestamp formats TELUS emits (a string sort gets them backwards), `_is_doorbell`'s any-one-of-three chime capabilities, and `TelusActivityEvent`'s single extra fire when TELUS attaches a clip a poll or two after the entry. |
+
+**Not covered by these suites** — verify these by reading the code, compiling it,
+and checking Home Assistant's logs, and see `docs/backlog.md` (E66):
+`config_flow.py`, the service handlers (`speak_service.py`, `bypass_service.py`,
+`unpair_service.py`), the settings-backed platforms (`switch.py`, `select.py`,
+`number.py`, `button.py`), `binary_sensor.py`, `clip_view.py`'s request handling
+(only the link minting is exercised), `arming_devices_coordinator.py`, and every
+setup/teardown path in `__init__.py`.
 
 ### Keeping the tests current
 
@@ -113,9 +179,20 @@ narrowing a scenario until the interesting case is gone. A red test is
 information. The only two honest responses are to fix the code, or to change the
 invariant on purpose and say so.
 
-Two practical notes. A new `tests/test_*.py` is picked up by CI automatically —
-there is no list to add it to, which is why the table above is the thing that
-goes stale and has to be updated by hand. And a test asserting on timing needs
+**Prove a new test can actually fail.** A test that has never been red is an
+assertion nobody has checked. For each invariant a new test claims to pin, break
+that invariant in the source, confirm the suite reports the failure, then revert
+— and treat a test that stays green against deliberately broken code as
+*worthless until strengthened*, not as a curiosity. Both integration suites and
+`test_camera_session.py` were validated this way, and it has repeatedly found
+tests that only looked strict; it also documents which halves of a condition are
+genuinely load-bearing (in `_classify`, the French *person* needle is redundant
+because `"personne"` contains `"person"`, while the *vehicle* needles are not —
+that is recorded in the test itself so nobody re-derives it).
+
+Two practical notes. A new `test_*.py` in either tests directory is picked up by
+CI automatically — there is no list to add it to, which is why the tables above
+are the thing that goes stale and has to be updated by hand. And a test asserting on timing needs
 enough margin to survive a loaded CI runner while still failing loudly on the
 regression it targets; prefer a scenario where the right and wrong answers are
 far apart over a tight numeric bound that merely looks precise.

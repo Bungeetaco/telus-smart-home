@@ -18,6 +18,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 | `custom_components/telus_smarthome/` | HA integration. Entry: `__init__.py`. Auth patch: `telus_auth_patch.py`. Platforms: `alarm_control_panel.py`, `binary_sensor.py`, `lock.py`, `camera.py`, `event.py`, etc. Bridge client: `bridge_client.py`. Talk service: `speak_service.py`. |
 | `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. aiortc patch: `aiortc_opus_patch.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Control API: `control_server.py`. Config: `config.py`. |
 | `camera-bridge/{Dockerfile,docker-compose.yml,mediamtx.yml,entrypoint.sh}` | Build + runtime. |
+| `tests/` (repo root) | Integration regression suites + `ha_stubs.py`, the `homeassistant.*` stand-in tree that lets them run without Home Assistant installed. |
 | `install.sh` (repo root) | Interactive installer for both components. |
 | `docs/` | Full documentation set — see `docs/README.md`. |
 
@@ -26,8 +27,8 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 - **Bridge:** `cd camera-bridge && docker compose up -d --build`. Code is baked into the image, so **any code change needs a rebuild** (`--build`), not just a restart. Health check: `curl -s http://127.0.0.1:8199/control/health` → `{"status":"ok"}`. Requires `--network host` and (for hardware encode) a GPU render node.
 - **Integration:** copy `custom_components/telus_smarthome/` into HA's `config/custom_components/`; **integration code changes require a full Home Assistant restart** to load (a config-entry reload does not re-import modules).
 - **Syntax check** Python before proposing changes: `python3 -m py_compile <file>`.
-- **CI** (`.github/workflows/ci.yml`) runs on PRs: it imports `telus_auth_patch.py` to prove the pyalarmdotcomajax monkeypatch still applies (a compatibility guard fails loudly if an upstream internal moved), installs the bridge deps wheels-only, and runs **every** `camera-bridge/tests/test_*.py`.
-- **Tests** use local fakes only — no network, no account, no hardware — so run them before proposing a bridge change: `cd camera-bridge && TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py` (each file is a script and ends in `RESULT: PASS`). They cover the bridge; the integration has none, so verify it by reading the code, compiling, and checking HA logs. New behaviour in a covered module gets a test in the same change — the suites exist for failures that are otherwise silent. See `docs/development.md`.
+- **CI** (`.github/workflows/ci.yml`) runs on PRs: it imports `telus_auth_patch.py` to prove the pyalarmdotcomajax monkeypatch still applies (a compatibility guard fails loudly if an upstream internal moved), installs the bridge deps wheels-only, and runs **every** `camera-bridge/tests/test_*.py` and **every** `tests/test_*.py`.
+- **Tests** use local fakes only — no network, no account, no hardware — so run them before proposing a change: `cd camera-bridge && TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py` for the bridge, and `python3 tests/test_stream_health_sensors.py` from the repo root for the integration (each file is a script and ends in `RESULT: PASS`). The integration suites stub `homeassistant.*` rather than installing Home Assistant — see `tests/ha_stubs.py` for why and for the limits of that. They cover the stream-health sensor derivations and the Activity-feed event entities; everything else in `custom_components/` is still verified by reading the code, compiling, and checking HA logs. New behaviour in a covered module gets a test in the same change, and a new test is not trusted until it has been proven to fail against deliberately broken source — the suites exist for failures that are otherwise silent. See `docs/development.md`.
 
 ## Conventions you MUST follow
 
@@ -71,13 +72,15 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   hardware this account does not have". That is not history; it is the current
   state of the evidence, and it is what stops the next person trusting a guess or
   re-deriving a settled question.
-- **Tests are part of the change too, on the same terms as the docs.** The bridge
-  has a real regression suite (`camera-bridge/tests/`, thirteen files, run in full by
-  CI) covering behaviour that fails *silently* in production — a camera that
-  freezes instead of erroring, a setting that reads back a value it never wrote,
-  an audio stream that drifts. **Run it before proposing a bridge change**, and
-  when the change touches something a suite covers, update the suite in the SAME
-  commit:
+- **Tests are part of the change too, on the same terms as the docs.** There are
+  two regression suites, both run in full by CI: `camera-bridge/tests/`
+  (thirteen files) for the bridge, and `tests/` at the repo root for the
+  integration. Both cover behaviour that fails *silently* in production — a
+  camera that freezes instead of erroring, a setting that reads back a value it
+  never wrote, an audio stream that drifts, a doorbell event that quietly stops
+  firing when the account locale changes. **Run the relevant one before
+  proposing a change**, and when the change touches something a suite covers,
+  update the suite in the SAME commit:
 
   | Situation | What the change must include |
   | --- | --- |
@@ -93,13 +96,21 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   only honest responses are to fix the code or to change the invariant on
   purpose and say so.
 
+  **A new test is not trusted until it has been proven to fail.** Break the
+  invariant it claims to pin, watch the suite go red, revert. A test that stays
+  green against deliberately broken code is worthless until strengthened — say
+  so rather than counting it.
+
   Conventions: no network, no account, no hardware (local aiohttp fakes or
   scripted stand-in classes); each file is a plain script ending in
   `RESULT: PASS` / `RESULT: FAIL (n)` and exiting non-zero; fixtures are captured
   and anonymized, never invented; and **each suite's docstring names the
   invisible failure it exists to catch**, because "what does this look like in
   production" is the part that is expensive to rediscover. A new suite is picked
-  up by CI automatically (it globs `tests/test_*.py`).
+  up by CI automatically (both jobs glob `tests/test_*.py`). The integration
+  suites additionally **stub `homeassistant.*` rather than installing Home
+  Assistant** — `tests/ha_stubs.py` carries the reasoning and the rule that
+  nothing in that tree may be auto-magic.
 - **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes** — fixes, tuning, tests, docs, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes** — a new capability, a changed default, anything a user would notice or react to. Bias towards patch. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)

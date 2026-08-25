@@ -163,8 +163,9 @@ These are covered in detail under [The update model](#the-update-model) and
     The talk route's `codec` field is deliberately **not** exposed: only
     mu-law works on the reference doorbell, and a one-option selector would
     only invite a broken value. The passthrough is verified by `py_compile`
-    and code reading only — it has not been fired against a live doorbell,
-    and the integration has no test suite.
+    and code reading only — it has not been fired against a live doorbell, and
+    `speak_service.py` is outside what the integration's test suites cover
+    (see [development.md](development.md#the-integration-suites)).
 13. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
     or un-bypasses named sensors on the alarm partition. **A bypassed zone does
     not trigger the alarm until it is put back**, which is why this is a service
@@ -769,8 +770,11 @@ account property, so a text match is a latent failure that would surface as the
 doorbell simply never firing again — no error, no log line. `event_type_name` is
 a server-side enum and is not translated. The bridge already carries it through
 `/control/history` (see [control-api.md](control-api.md#get-controlhistory)); the
-entity reads it straight off the coordinator, and
-`camera-bridge/tests/test_history_events.py` pins the rename it depends on.
+entity reads it straight off the coordinator.
+`camera-bridge/tests/test_history_events.py` pins the rename it depends on, and
+`tests/test_event_entities.py` pins the matcher itself from both sides — a
+French-described press fires, and an entry whose description says `Button Push`
+while its enum says otherwise does not.
 
 **Which cameras get one.** `_is_doorbell()` gates on the chime capability flags
 in the camera's `/settings` `audio` section — `supports_indoor_chime`,
@@ -1375,7 +1379,9 @@ the bridge: an unanswered poll leaves the coordinator holding the previous
 payload, and comparing that identical data against itself would read as "the
 counter did not move". The comparison also treats a counter that went *down* as
 a bridge restart (every number in `/control/status` resets with the process),
-not a stall.
+not a stall. All four ways a false `stalled` could be produced — an unanswered
+poll, a failed poll, a counter reset, and the first poll of the entity's life —
+are pinned by `tests/test_stream_health_sensors.py`.
 
 **Camera bridge** reports whether the local bridge container is answering its
 control API at all: **off** means the container is down, mid-restart, or its

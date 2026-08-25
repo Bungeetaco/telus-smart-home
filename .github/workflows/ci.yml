@@ -27,6 +27,37 @@ jobs:
       - name: Assert the monkeypatch still applies (fails loudly if upstream moved an internal)
         run: python .github/scripts/check_patch.py
 
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # Must MIRROR the runtime image (camera-bridge/Dockerfile's FROM
+          # python:<ver>-slim), for the same reason as every other job here.
+          # Renovate groups the two under the dep name "python" -- never change
+          # one alone.
+          python-version: "3.14"
+      - name: Install aiohttp
+        # The ONLY third-party import in the modules these suites exercise.
+        # Home Assistant itself is deliberately NOT installed: it is stubbed in
+        # tests/ha_stubs.py, which explains the trade-off and its limits.
+        # pyalarmdotcomajax is stubbed there too -- the job above installs the
+        # real one and runs the monkeypatch guard against it.
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp
+      - name: Run tests
+        # Same shape as the bridge job below: each file is a plain script that
+        # ends in RESULT: PASS and exits non-zero on failure, so a new
+        # tests/test_*.py is picked up here with no list to update.
+        run: |
+          for t in tests/test_*.py; do
+            echo "== $t"
+            python "$t"
+          done
+
   bridge-deps-smoke:
     name: Bridge deps install from wheels only
     runs-on: ubuntu-latest
