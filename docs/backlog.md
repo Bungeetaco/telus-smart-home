@@ -25,13 +25,14 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 **Blocking, and actionable now**
 
-- **E62** — audio consumption took the doorbell off the air after ~14 minutes,
-  and `/control/status` reported `streaming` throughout. Both audio knobs are
-  off. Two defects: the starved video path (E60), and a bridge that cannot tell
-  "publishing" from "publishing to nowhere".
-- **E60** — root cause found: the 0.5 s audio silence burst stalls the video
-  pipe 165–330 ms against 267 ms of queue tolerance. Pacing to 100 ms removes it
-  entirely. A symptom of E62's audio path, not its cause.
+- **E62 / E60** — fixed in the bridge, **awaiting live validation**. Audio
+  consumption took the doorbell off the air after ~14 minutes while
+  `/control/status` reported `streaming` throughout. Four changes shipped: audio
+  pacing at half the muxer lead, a time-based video queue, a wedged audio pipe
+  degrading to video-only, and a bounded video drain that makes "publishing to
+  nowhere" detectable. **Both audio knobs stay `false` until a multi-session run
+  on the doorbell confirms it** — re-enable on the doorbell only, and watch the
+  four signals listed at the end of E62.
 - **E64** (open) — the frame rate is latched for the life of a process, but it
   is a *device setting* that can change at any time (the resolution select is
   already an HA entity). Measured 7 vs 15 on the same camera across restarts;
@@ -43,6 +44,11 @@ and evidence. Grouped by whether anything can actually be done about them.
   two modules. The config flow, the three services, the settings-backed
   platforms and every setup/teardown path are still verified by reading and
   `py_compile` alone.
+- **E67** (open, minor) — the HA Audio state sensor reads `stalled` without the
+  cause; the bridge now knows it (`audio_dropped_reason`) but the integration
+  does not read it.
+- **E68** (open) — the E60/E62 pacing fix was measured against `-f null -`, so
+  the RTSP-muxer side of it is inferred rather than captured.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -1346,9 +1352,10 @@ when it ships.
   threshold is one 30 s poll window and is not configurable, so a genuinely
   bursty source needs the automation's `for:` instead; `last_audio_at` is
   observed by the poller so it resets on an HA restart and is only accurate to
-  30 s, because the bridge exposes no last-audio-frame timestamp; and the
-  derivation is covered only by a throwaway AST-exec harness, since the
-  integration still has no test suite of its own. **This makes dead audio
+  30 s, because the bridge exposes no last-audio-frame timestamp. The
+  derivation is now pinned by `tests/test_stream_health_sensors.py` (E63),
+  including all four cases where `stalled` must never be reported. **This makes
+  dead audio
   visible; it does not recover it** — that is E60/E62.
 
 - **E62 (open, BLOCKING audio consumption) Audio consumption took the doorbell
@@ -1367,12 +1374,15 @@ when it ships.
   ```
 
   **The `-framerate` fix (E58) did not eliminate the pipe stall — it delayed
-  it.** The underlying condition is E60: the per-frame pixel copy cannot keep up
-  at 1440x1440, so `janus_client` drops frames before they reach ffmpeg, ffmpeg
-  starves and pads to CFR (10,000+ duplicated frames), and the audio timeline —
-  which really is wallclock — outruns the starved video until the interleaver
-  stops accepting audio. The encoder restarts that follow eventually left the
-  camera with **no publisher at all**.
+  it.** The underlying condition is E60. The mechanism written here originally —
+  "the per-frame pixel copy cannot keep up at 1440x1440" — is **wrong and was
+  disproven by measurement**; the copy costs 0.24 ms of a 66.7 ms interval. What
+  actually starves the video path is the bursty audio silence top-up. The rest
+  of the chain held: `janus_client` drops frames before they reach ffmpeg,
+  ffmpeg starves and pads to CFR (10,000+ duplicated frames), and the audio
+  timeline outruns the starved video until the interleaver stops accepting
+  audio. The encoder restarts that follow eventually left the camera with **no
+  publisher at all**.
 
   **The worst part is the reporting.** Throughout the outage `/control/status`
   said `state: streaming`, `consecutive_failures: 0`, with a fresh
@@ -1382,10 +1392,58 @@ when it ships.
   its own defect and arguably the more dangerous one: **the bridge cannot
   currently tell "publishing" from "publishing to nowhere."**
 
-  So: **audio consumption stays off until E60 is fixed**, and both knobs are
-  back to `false` on the live deployment. Fixing the ordering does not help —
-  the fix is to stop starving the video path. Add a publisher-liveness check
-  that actually asks whether the RTSP path exists, rather than inferring it.
+  **Four changes shipped in response. Both knobs stay `false` until a live
+  multi-session run confirms them.**
+
+  1. **Audio pacing.** `AUDIO_SILENCE_TOPUP_S` 0.5 → 0.05 (half the muxer lead —
+     see E60 for why 0.1 measured *worse* than the defect), per-write ceiling
+     `_AUDIO_SILENCE_MAX_BURST_S` 2.0 → 0.1, and a new `AUDIO_PUMP_MAX_BURST_S`
+     bounding the pump's drain with a yield rather than a real-time pace —
+     audio *lagging* the video is the stall condition, so a backlog must be
+     delivered as fast as the loop allows. The frame hold also ticks at
+     `min(1/fps, TOPUP)`: at 6 fps it was topping up every 167 ms, past the
+     lead, so the fix would otherwise have been half-applied on that camera.
+  2. **A time-based video queue.** `round(fps × 500 ms)` clamped to 4–8 instead
+     of a flat `maxsize=4`. 15 fps → 8 (533 ms), 6 fps → 4 (667 ms, the floor).
+     Ceiling arithmetic: 1440×1440 yuv420p is 3.11 MB, so 8 frames is 24.9 MB
+     per camera against a 768 MiB limit. Above ~16 fps the memory ceiling binds
+     before the time target. This is defence in depth only — a deeper queue
+     converts drops into latency, it does not remove a stall.
+  3. **A wedged audio pipe degrades to video-only.** `FfmpegSink._drop_audio()`
+     closes the audio transport, latches `audio_dropped` /
+     `audio_dropped_reason`, and keeps video publishing instead of asking for a
+     rebuild. Verified in-container: closing the write end mid-run left video
+     consumed normally for a further 435 frames at p50 1.87 ms, zero stalls.
+     `audio_consumed` keeps its existing meaning, "configured to".
+  4. **Publisher liveness.** `write_frame`'s `stdin.drain()` is bounded by
+     `_VIDEO_DRAIN_TIMEOUT_S = 5.0`. A 3 MB raw frame against a 64 kB pipe
+     buffer means the drain can only resolve because ffmpeg *read* it, so
+     completing is direct evidence of consumption; timing out latches
+     `publisher_stalled` → `publisher_alive` false → rebuild. **Unbounded, as it
+     was, that await parks the camera's entire loop forever with the status
+     frozen on `streaming`** — plausibly the E62 mechanism itself. `/control/status`
+     gains `publisher_alive` and `last_publish_at`; the gap between
+     `last_publish_at` and `last_frame_at` *is* "streaming" vs "streaming to
+     nowhere". Chosen over querying MediaMTX because `mediamtx.yml` disables
+     every listener but RTSP and the container is `--network host`, so enabling
+     its API to health-check ourselves would open a real host port. **Stated
+     limit:** this proves ffmpeg reads its input, not that MediaMTX accepts what
+     ffmpeg writes.
+
+  **What to watch when audio is re-enabled (doorbell only, one camera at a
+  time):** that camera's `dropped_frames` delta per ~165 s rotation, which
+  should fall from 1,650–2,550 to near the audio-off camera's ~1; whether
+  `audio_dropped` fires at all (if it does, something *else* is still starving
+  the video timeline — check `dropped_frames` first); the gap between
+  `last_publish_at` and `last_frame_at` on every poll; and
+  `decoded_audio_frames` still climbing.
+
+  **Two gaps recorded rather than dropped:** the integration does not surface
+  `audio_dropped_reason`, so the HA **Audio state** sensor reads `stalled`
+  without the cause — an attribute addition in `sensor.py`, tracked as **E67**.
+  And every container measurement behind these four changes output to
+  `-f null -`, never a live RTSP publish into MediaMTX, so the muxer-target side
+  of the pacing is **inferred, not captured** — tracked as **E68**.
 
 - **E60 (root cause found; fix in progress) The doorbell's frame drops are
   caused by the audio silence top-up, not by the pixel copy.** Both earlier
@@ -1438,92 +1496,44 @@ when it ships.
   **E60 is a symptom of E62's audio path, not its cause.** The causal claim in
   both entries ran backwards.
 
-- **E61 (DONE) Audio health is visible from Home Assistant.** Each camera gets a
-  `Audio state` ENUM diagnostic sensor on its own device, fed by the existing
-  shared `StreamHealthCoordinator` (no second poller): `not_consuming`,
-  `no_audio_yet`, `flowing`, `stalled`. The raw `decoded_audio_frames`, the
-  per-poll delta, `audio_format`, `dropped_audio_frames` and `last_audio_at`
-  ride as attributes.
+  **The mechanism is the LEAD, not the burst size — a second measurement
+  corrected the first.** Building the fix started from the table above and its
+  reading that "pacing to 100 ms removes the stall entirely". A more faithful
+  rig — one reproducing `write_silence_to`'s actual arithmetic (deficit against
+  wallclock, the 100 ms prime, the per-call ceiling) rather than writing on a
+  fixed cadence — **did not reproduce that row**. It measured 100 ms at **162 of
+  900 frames (19.4%), twice**, i.e. *worse* than the 500 ms defect it was meant
+  to fix. The same rig reproduced the shipped defect exactly (120 of 900,
+  matching the first table to the frame), which is what makes it the more
+  trustworthy of the two:
 
-  **An enum rather than a counter, deliberately.** Home Assistant has no "this
-  number stopped changing" trigger, so a `total_increasing` frame count would
-  have left the exact failure it exists to catch — decoder dies, counter
-  freezes, `state` stays `streaming`, `last_frame_at` stays fresh — as something
-  a human must notice on a graph. That is precisely how eleven silent doorbell
-  sessions went unnoticed. Comparing the counter between polls turns *stopped*
-  into a state you can automate on.
+  | top-up cadence / ceiling | `write_frame` p50/p90/p99 | frames >66.7 ms of 900 |
+  |---|---|---|
+  | video-only (control) | 1.81 / 1.94 / 2.87 ms | 0 |
+  | **0.5 s / 2.0 s (the defect)** | 1.80 / 231.6 / 297.1 ms | **120 (13.4%)** |
+  | 0.1 s / 0.1 s | 1.87 / 295.1 / 395.0 ms | 162 (19.4%) |
+  | 0.08 s / 0.1 s | 1.81 / 1.97 / 2.27 ms | 0 |
+  | **0.05 s / 0.1 s (shipped)** | 1.81 / 2.08 / 2.83 ms | **0** |
+  | 0.025 s / 0.1 s | 1.80 / 2.04 / 3.44 ms | 0 |
 
-  Every camera gets one, including cameras with audio switched off (they read
-  `not_consuming`): entity creation is sticky, so one that appears and vanishes
-  with a bridge env var would break any automation naming it, and "no audio
-  entity at all" reads as "fine" — the very gap being closed. A stall is never
-  reported for an unanswered poll, a failed poll, a counter reset (bridge
-  restart), or the first poll of a camera that already has frames.
+  `_AUDIO_PRIME_MS` (100 ms) puts the sample-counted audio timeline *ahead* of
+  the wallclock-stamped video, and the muxer can only emit a video packet once
+  it holds audio covering that timestamp. That lead decays by elapsed time
+  between top-ups, so **the cliff sits exactly at the prime**: a 0.1 s cadence
+  hands ffmpeg a fifth as much per write as 0.5 s and stalls *more* frames,
+  because it spends the instant before every write at zero lead. Running ahead
+  is harmless — it only lengthens the lead. Both tables agree wherever the
+  cadence is comfortably under the prime (20–50 ms) and at the 500 ms defect;
+  they disagree only at 100 ms, which is the cliff edge itself, and a cliff edge
+  is exactly where two rigs should be expected to disagree.
 
-  **Deferred, recorded rather than lost:** there is no graphable recorder series
-  for `decoded_audio_frames` (attribute only — a companion `total_increasing`
-  sensor would give one at the cost of a series per camera); the `stalled`
-  threshold is one 30 s poll window and is not configurable, so a genuinely
-  bursty source needs the automation's `for:` instead; `last_audio_at` is
-  observed by the poller so it resets on an HA restart and is only accurate to
-  30 s, because the bridge exposes no last-audio-frame timestamp; and the
-  derivation is covered only by a throwaway AST-exec harness, since the
-  integration still has no test suite of its own. **This makes dead audio
-  visible; it does not recover it** — that is E60/E62.
+  So the shipped value is `AUDIO_SILENCE_TOPUP_S = 0.05`, **half** the lead, not
+  the 0.1 that the first reading implied. 0.1 would also have made the cadence
+  equal the ceiling, so a clipped deficit could never be repaid — a permanent,
+  accumulating A/V offset that the old 2.0 s ceiling did not have.
 
-- **E62 (open, BLOCKING audio consumption) Audio consumption took the doorbell
-  off the air, and the bridge reported `streaming` throughout.** Enabled on the
-  doorbell it ran correctly for about fourteen minutes — real decoded audio,
-  measured — and then collapsed. The sequence, from the container log:
-
-  ```
-  22:11:24  ffmpeg publishing 960x960@15fps ... audio aac mono from 48000Hz/2ch/s16
-  22:12:54  ffmpeg: More than 1000 frames duplicated
-  22:25:57  ffmpeg has stopped reading the audio pipe (636928 bytes queued); restarting the encoder
-  22:25:58  ffmpeg: More than 10000 frames duplicated   +  a second pipe stall
-  23:14-17  dropped 600 ... 2550 frame(s) -- consumer falling behind (queue maxsize=4)
-  23:17:06  session marked dead: track ended: MediaStreamError()
-  thereafter  MediaMTX: "no stream is available on path telus_...-2048"
-  ```
-
-  **The `-framerate` fix (E58) did not eliminate the pipe stall — it delayed
-  it.** The underlying condition is E60: the per-frame pixel copy cannot keep up
-  at 1440x1440, so `janus_client` drops frames before they reach ffmpeg, ffmpeg
-  starves and pads to CFR (10,000+ duplicated frames), and the audio timeline —
-  which really is wallclock — outruns the starved video until the interleaver
-  stops accepting audio. The encoder restarts that follow eventually left the
-  camera with **no publisher at all**.
-
-  **The worst part is the reporting.** Throughout the outage `/control/status`
-  said `state: streaming`, `consecutive_failures: 0`, with a fresh
-  `last_frame_at` — while MediaMTX had no path and every reader was being
-  refused. The frame-silence watchdog watches frames arriving from Janus, not
-  whether the publisher still exists, so a dead publisher is invisible. That is
-  its own defect and arguably the more dangerous one: **the bridge cannot
-  currently tell "publishing" from "publishing to nowhere."**
-
-  So: **audio consumption stays off until E60 is fixed**, and both knobs are
-  back to `false` on the live deployment. Fixing the ordering does not help —
-  the fix is to stop starving the video path. Add a publisher-liveness check
-  that actually asks whether the RTSP path exists, rather than inferring it.
-
-- **E60 (open) The doorbell drops ~12% of its frames to "consumer falling
-  behind".** `dropped ... frame(s) -- consumer falling behind` climbs to roughly
-  300 per session on the doorbell, every rotation. It was noticed while
-  measuring E58, and one plausible cause was the CFR-25 re-rate that E58 fixed:
-  the publisher was encoding about 67% more frames than the source produced, so
-  the consumer had correspondingly more work.
-
-  **That hypothesis is now disproven.** Measured after the `-framerate` fix put
-  the doorbell back on its real 15 fps: 46 `consumer falling behind` warnings and
-  5,455 dropped frames in the first twelve minutes — no better than before. So
-  the CFR-25 re-rate was not the cause, and the remaining candidates are the
-  per-frame pixel copy (`frame.to_ndarray` runs in an executor for every frame,
-  at 1440x1440) and the source resolution itself. The bounded queue is
-  `maxsize=4`, so a consumer that stalls for four frames' worth of wall time
-  drops; at 1440x1440 that is roughly 6 MB of copying per second before the
-  encoder sees anything. Worth measuring where the time actually goes before
-  changing anything.
+  **Fixed in the bridge (pending live validation with audio re-enabled).** See
+  E62 for the other three changes that shipped alongside.
 
 ## Entries restored after an editing slip
 
@@ -1707,3 +1717,34 @@ survived. Restored here with their current status rather than as they were.
   *imports* the integration's platform modules against the real base classes,
   the way `bridge-import-smoke` does for the bridge. Not done, and not obviously
   worth it yet.
+
+- **E67 (open, minor) The Audio state sensor cannot say *why* audio stopped.**
+  The bridge now distinguishes "the audio pipe wedged and was deliberately
+  dropped so video could keep publishing" from "audio simply stopped arriving",
+  via `audio_dropped` and `audio_dropped_reason` in `/control/status` (E62). The
+  integration reads neither. `CameraAudioStateSensor` reports `stalled` in both
+  cases — correct, because the pump does stop feeding audio once the pipe is
+  dropped, but it leaves the operator to go read container logs for the cause.
+
+  Surfacing both as attributes on the existing sensor is a small change in
+  `sensor.py` and needs no new poller. Deliberately *not* a fifth enum state:
+  `stalled` is what an automation should act on either way, and splitting it
+  would break any automation already keyed on it. Whether a dropped pipe also
+  deserves its own binary sensor is a separate question — probably not, since it
+  should be rare and is visible in the attribute.
+
+- **E68 (open) The pacing fix was measured against `-f null -`, never a live
+  RTSP publish.** Every container measurement behind E60/E62 — the cadence
+  table, the queue sizing, the drop-to-video-only check — used a real ffmpeg
+  command line with `-f null -` as the output. That exercises the demuxers, the
+  encoder and the interleaver, which is where the stall lives, but it does not
+  exercise the RTSP muxer or MediaMTX's consumption of it.
+
+  So the muxer-target side of the pacing is **inferred, not captured**. This is
+  not a reason to doubt the fix — the defect reproduced exactly under the rig
+  (120 of 900 frames, matching the production table to the frame), which is the
+  strongest evidence available that the rig models the right thing. It is a
+  reason not to claim more than was tested. Re-running the cadence sweep with
+  `-f rtsp` into a scratch MediaMTX path would settle it; the obstacle is that
+  publishing to a real path means either racing the live publisher or standing
+  up a second MediaMTX, so it was not done under the live deployment.

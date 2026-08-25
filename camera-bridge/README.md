@@ -200,11 +200,15 @@ GET http://127.0.0.1:8199/control/health   -- no auth, {"status": "ok"}
 The same listener serves the rest of the control API (see
 `docs/control-api.md`), including `GET /control/status` -- per-camera
 `state`, `consecutive_failures`, `last_frame_at`, `fps`, `hardware_encode`,
-`dropped_frames`, `last_error`, same bearer auth as every other endpoint.
+`dropped_frames`, `last_error`, `publisher_alive`, `last_publish_at`, the audio
+fields, same bearer auth as every other endpoint.
 `camera_session.py`'s `run_camera_forever` updates its own entry directly;
 the control server just reflects it. `dropped_frames` is the camera's
 lifetime consumer-fell-behind drop total since process start, accumulated as
-each video session ends.
+each video session ends. `last_frame_at` says a frame arrived *from the camera*
+and `last_publish_at` says ffmpeg *took* it -- the gap between them is the
+difference between "streaming" and "streaming to nowhere", which nothing in this
+response could express before.
 
 Credentials are swapped in by reassigning the module attributes
 `config.TELUS_EMAIL` / `config.TELUS_PASSWORD` -- `telus_auth.py`'s

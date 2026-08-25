@@ -177,9 +177,42 @@ the same path, so instead the one publisher is held and the gap bridged with
 repeated frames.
 
 The sink is only actually replaced when it has genuinely died
-(`sink.proc is None`, or the process exited) or the camera's frame size changed —
-otherwise the same RTSP session carries straight through the rotation and readers
-never notice.
+(`sink.proc is None`, the process exited, or it is no longer **consuming** —
+see below) or the camera's frame size or raw audio shape changed — otherwise the
+same RTSP session carries straight through the rotation and readers never notice.
+
+### Publisher liveness: "publishing" vs "publishing to nowhere"
+
+The ffmpeg process being alive is necessary but **not sufficient** evidence that
+anything is being published. A camera can report `state: "streaming"`,
+`consecutive_failures: 0` and a fresh `last_frame_at` while MediaMTX has no path
+at all and every reader is refused: the frame-silence watchdog watches frames
+*arriving from Janus*, and the repair check above used to ask only whether the
+process had exited.
+
+What is checkable from inside the bridge is whether ffmpeg is still **consuming
+what it is fed**. `FfmpegSink.write_frame` bounds `stdin.drain()` with
+`_VIDEO_DRAIN_TIMEOUT_S` (5 s): a whole raw frame is ~3 MB against a 64 kB pipe
+buffer, so the drain resolving means ffmpeg read it, and the drain *not* resolving
+for 5 s means it has stopped. That latches `publisher_stalled`, so
+`sink.publisher_alive` goes false, the session fails, and the repair check
+rebuilds the publisher. Unbounded — which is what it was — that same await parks
+the camera's whole loop forever, with no timeout, no failure and no reconnect, and
+the status frozen on its last good values.
+
+`/control/status` carries both halves: `last_frame_at` (a frame arrived *from the
+camera*) and `last_publish_at` (ffmpeg *took* it), plus `publisher_alive`. The gap
+between those two timestamps is the distinction the bridge previously could not
+make.
+
+MediaMTX's own API would answer the question more directly and is deliberately
+not used: `mediamtx.yml` disables every listener except RTSP (`api: no`,
+`metrics: no`, `hls: no`, …, each with its reasoning), and the container runs with
+`--network host`, so enabling the API to health-check ourselves would open a real
+host port. The consumption check costs nothing per frame and needs no listener.
+Its limit, stated plainly: it proves ffmpeg is reading its input, not that
+MediaMTX still accepts what ffmpeg writes. An ffmpeg happily encoding into a
+socket that goes nowhere would still look alive.
 
 > If you touch `camera_session.py` or `janus_client.py`, read them in full first.
 > Do not change `SESSION_MAX_LIFETIME_S` without re-verifying Alarm.com's actual
@@ -205,8 +238,24 @@ byte-for-byte against a captured session:
    (aiortc embeds its own candidates in the SDP; no outbound trickle needed).
 6. `start`, then wait for `webrtcup` (`WEBRTCUP_TIMEOUT_S = 20`).
 
-Decoded video frames flow through a small bounded queue (`maxsize=4`). When the
-consumer falls behind, the **oldest** queued frame is dropped rather than
+Decoded video frames flow through a small bounded queue whose depth is expressed
+in **time, not frames**: `janus_client.video_queue_maxsize(fps)` returns
+`round(fps × VIDEO_QUEUE_TARGET_MS / 1000)` clamped to 4–8 frames, so ~500 ms of
+tolerance means the same thing on every camera (a flat 4 frames is 267 ms at
+15 fps and 667 ms at 6 fps — one number meaning two different things). The rate
+comes from the camera's own measurement, which `camera_session` remembers across
+rotations and passes into each new session; the first session of a camera, before
+anything has been measured, takes the same 15 fps assumption the fps fallback
+does. The 8-frame ceiling is memory: a decoded 1440×1440 yuv420p frame is
+3.11 MB, so 8 frames is 24.9 MB per camera against the container's 768 MiB limit
+(~435 MiB in use), and 16 would be 49.8 MB for a queue that is not meant to fill.
+Above ~16 fps that ceiling binds before the time target does, deliberately.
+
+The depth is **defence in depth, not a fix for a stalled consumer**: a deeper
+queue does not remove a stall, it converts dropped frames into latency, because
+every frame it holds is a frame the viewer sees late.
+
+When the consumer falls behind, the **oldest** queued frame is dropped rather than
 blocking the decoder — a live view cares about latency, not completeness — and
 the drop count is logged (throttled) so a backlog is visible rather than silent.
 Each session exposes its own count as the read-only
@@ -632,7 +681,57 @@ sample rate the decoded frames actually carry — never an assumed one. AAC is
 forced by the consumers, not chosen for quality: HA's HLS stream worker accepts
 only aac/mp3, and Frigate's `-c copy` recording preset needs an mp4-legal codec.
 
-Three properties of that path are load-bearing:
+Five properties of that path are load-bearing:
+
+- **The audio input paces the whole publisher, and it must stay AHEAD of the
+  video.** ffmpeg's muxer can only emit a video packet once it holds audio
+  covering that packet's timestamp. The audio pipe is primed with
+  `_AUDIO_PRIME_MS` (100 ms) of silence the instant it opens, which is both what
+  lets `avformat_find_stream_info` complete and the **lead** the audio keeps over
+  the wallclock-stamped video. That lead decays by elapsed real time between
+  top-ups, so `AUDIO_SILENCE_TOPUP_S` (0.05 s) must stay comfortably under it —
+  and a single write may never exceed it either
+  (`_AUDIO_SILENCE_MAX_BURST_S` = 0.1 s).
+
+  Getting this wrong is **invisible from the audio side**: the published audio is
+  correct and the published video is correct, and the only symptom is video
+  frames going missing a layer away, as `dropped N frame(s) — consumer falling
+  behind`. Measured in the deployed container (ffmpeg 7.1.5, h264_vaapi,
+  1440×1440 → 960×960 at 15 fps, 900 frames per 60 s run, timing the write that
+  feeds the video pipe). **The limit of this evidence:** the runs drive the real
+  command line with a synthetic feed and output to `-f null -`, not a live RTSP
+  publish into MediaMTX, so they measure the demux/interleave behaviour and not
+  whatever a real muxer target adds. The shipped 0.5 s row reproduces the live
+  defect's drop rate to the frame, which is the reason to trust the rest:
+
+  | Silence top-up cadence | write_frame p50/p90/p99 (ms) | Frames stalled past one frame interval |
+  | --- | --- | --- |
+  | video-only (control) | 1.81 / 1.94 / 2.87 | 0 of 900 |
+  | 0.5 s | 1.80 / 231.6 / 297.1 | 120 of 900 (13%) |
+  | 0.1 s (= the lead) | 1.90 / 202.8 / 297.1 | 162 of 900 (19%) |
+  | 0.08 s | 1.81 / 1.97 / 2.27 | 0 of 900 |
+  | 0.05 s (shipped) | 1.84 / 2.03 / 3.56 | 0 of 900 |
+  | 0.025 s | 1.80 / 2.04 / 3.44 | 0 of 900 |
+
+  The cliff is at the lead, not at any particular write size: a 0.1 s cadence
+  hands ffmpeg a fifth as much per write as 0.5 s and stalls *more* frames.
+  Handing over more than is owed is harmless by comparison — the same rig fed at
+  twice real time showed no video stall at all, but 10.9 MB of audio backed up in
+  the bridge because ffmpeg stopped reading a pipe running a minute ahead, which
+  is what the per-call ceiling and `_AUDIO_PIPE_MAX_BUFFER` bound. Real decoded
+  audio arrives in ~20 ms frames and is written as it arrives, so it satisfies
+  the cadence on its own; the top-up only has to cover the quiet, which on a
+  doorbell is nearly all of the time.
+- **An audio input that goes bad degrades the sink to video-only.** ffmpeg
+  backing up past `_AUDIO_PIPE_MAX_BUFFER` (512 kB, ~2.7 s of un-read audio), or
+  the pipe closing under the sink, drops the audio input and leaves the video
+  publish untouched (`FfmpegSink._drop_audio`) — the same judgement `start()`
+  already makes for an unsupported sample format. Rebuilding the publisher
+  instead destroys the MediaMTX path, kicks every RTSP reader and puts a
+  discontinuity in front of every HLS viewer, which trades a working video feed
+  for an audio input that has already gone. The degradation is latched for the
+  life of that publisher (ffmpeg cannot reopen an input) and is reported as
+  `audio_dropped` / `audio_dropped_reason` in `/control/status`.
 
 - **One publisher, two inputs — the audio fd outlives every session.** The
   ffmpeg process deliberately survives the ~165 s rotations (see the rotation
@@ -655,7 +754,12 @@ Three properties of that path are load-bearing:
   from elapsed real time rather than from counting loop iterations: a repeated
   video frame is one frame whenever it lands, so `asyncio.sleep` jitter is
   invisible there, but a sample stream's duration *is* its length, so the same
-  jitter accumulates as real drift. It rides the existing frame-hold lifecycle,
+  jitter accumulates as real drift. What the per-call ceiling clips is still
+  owed; the next call recomputes it against the wall clock and keeps repaying,
+  so nothing is lost and A/V sync is unaffected. The hold ticks at whichever is
+  shorter — the camera's frame interval or the top-up cadence — and writes video
+  on its own schedule, because one top-up per repeated frame is 167 ms on the
+  6 fps camera, well past the lead. It rides the existing frame-hold lifecycle,
   which also guarantees the previous session's audio pump has stopped before the
   fill starts — one writer on the pipe at a time. A camera that is offered audio
   and then sends none gets the same top-up from the pump itself, so the muxer
@@ -687,14 +791,16 @@ built from, so a hardware path that publishes audio while the software fallback
 silently does not is not expressible.
 
 `/control/status` reports `audio_consumed`, `audio_format`,
-`decoded_audio_frames` and `dropped_audio_frames` per camera (see
+`decoded_audio_frames`, `dropped_audio_frames`, `audio_dropped` and
+`audio_dropped_reason` per camera (see
 [control-api.md](control-api.md)). `audio_format` is the shape of a frame that
 was actually **decoded**, and is `null` until one has been — never the shape the
 publisher was launched with, which is a guess until the first frame arrives.
 `decoded_audio_frames` is what makes flow checkable at a glance: consumption on
-and that counter stuck at `0` is a silent stream. Note that the frame-silence
-watchdog is **video-only**: audio can stop while a camera still reports
-`streaming`.
+and that counter stuck at `0` is a silent stream. `audio_consumed` keeps saying
+what the camera is **configured** to do; `audio_dropped` is what says the
+publisher stopped doing it. Note that the frame-silence watchdog is
+**video-only**: audio can stop while a camera still reports `streaming`.
 
 #### aiortc's Opus decoder is patched to survive a bad packet
 

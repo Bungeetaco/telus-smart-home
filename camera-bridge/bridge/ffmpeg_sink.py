@@ -75,6 +75,16 @@ config.JANUS_CONSUME_AUDIO):
   common_in). `-af aresample=async=1` (fill-and-trim only, no stretching) absorbs
   what is left.
 
+  Sharing one clock also means the audio input must stay AHEAD of the video,
+  continuously, or ffmpeg stops reading the VIDEO pipe and the camera drops
+  frames -- the audio input paces the whole publisher. _AUDIO_PRIME_MS
+  establishes that lead and config.AUDIO_SILENCE_TOPUP_S maintains it; both
+  carry the measurements.
+
+  An audio input that goes bad mid-session is DROPPED, not repaired: video is
+  worth more than audio, so the sink degrades to video-only (see _drop_audio)
+  rather than failing and taking every RTSP reader down with it.
+
   The encoder is AAC, and that is not a free choice: Home Assistant's HLS stream
   worker accepts only aac/mp3 for audio, and Frigate's `-c copy` recording preset
   needs a codec that is legal in an mp4 container. AAC is the only codec that
@@ -118,10 +128,11 @@ _PCM_PIPE_FORMAT = {
     "dbl": ("f64le", 8), "dblp": ("f64le", 8),
 }
 
-# How much unwritten audio the pipe transport may hold before the sink calls
-# itself broken. ffmpeg drains this pipe continuously; a backlog this large means
+# How much unwritten audio the pipe transport may hold before the sink stops
+# feeding audio. ffmpeg drains this pipe continuously; a backlog this large means
 # it has stopped reading input 1 entirely, and buffering audio in this process
-# forever would hide that instead of rebuilding the publisher.
+# forever would hide that. It is NOT a reason to rebuild the publisher -- see
+# _drop_audio.
 _AUDIO_PIPE_MAX_BUFFER = 512 * 1024
 # Silence written into the pipe the instant it is opened. ffmpeg's
 # avformat_find_stream_info runs on input 1 before any camera frame exists, and a
@@ -129,11 +140,61 @@ _AUDIO_PIPE_MAX_BUFFER = 512 * 1024
 # find. It is also why the audio input carries -analyzeduration 0 -probesize 32:
 # raw PCM's parameters are fully described by -f/-ar/-ac, so there is nothing to
 # probe for and no reason to let ffmpeg wait for more.
+#
+# It is ALSO the audio stream's standing LEAD over the video, and that is the
+# load-bearing half. The video input is stamped with the wallclock
+# (-use_wallclock_as_timestamps), while the audio timeline is its own sample
+# count topped up to the wallclock (write_silence_to) -- so from the moment the
+# pipe is primed, the audio covers timestamps this far past what the video has
+# reached. The muxer's interleaver can only emit a video packet once it holds
+# audio covering that packet's timestamp; while the lead is positive it always
+# does, and ffmpeg keeps reading the video pipe. When the lead reaches zero,
+# ffmpeg stops reading the video pipe until the next audio write arrives -- the
+# frame-dropping stall measured below. Every top-up cadence in this file is
+# therefore chosen against THIS number: config.AUDIO_SILENCE_TOPUP_S must stay
+# comfortably under it.
 _AUDIO_PRIME_MS = 100
 # Ceiling on a single silence top-up, so a long stall cannot dump minutes of
-# silence into the pipe in one write. The deficit is not lost -- the next call
-# recomputes it against the wallclock and keeps catching up.
-_AUDIO_SILENCE_MAX_BURST_S = 2.0
+# silence into the pipe in one write. The deficit is not lost and A/V sync is
+# unaffected: write_silence_to derives its sample count from ELAPSED WALLCLOCK
+# rather than from how many times it has been called, so the next call simply
+# recomputes what is still owed and keeps catching up -- at up to this much per
+# call, and callers top up more often than this (config.AUDIO_SILENCE_TOPUP_S is
+# half of it), so an ordinary top-up is never clipped at all.
+#
+# Measured in the deployed container (ffmpeg 7.1.5, h264_vaapi, 1440x1440 ->
+# 960x960 at 15fps, synthetic feed, 900 frames per 60s run, timing write_frame;
+# the audio writer runs write_silence_to's exact arithmetic). The runs output to
+# `-f null -` rather than publishing into the live MediaMTX, so they measure the
+# demux/interleave side and not whatever a real muxer target adds; the shipped
+# 0.5s row reproduces the live defect's drop rate to the frame:
+#
+#   top-up cadence / ceiling      write_frame p50/p90/p99 (ms)   frames >66.7ms
+#   video-only (control)                1.81 / 1.94 / 2.87        0 of 900
+#   every 500ms, ceiling 2.0s           1.80 / 231.6 / 297.1    120 of 900 (13%)
+#   every 100ms, ceiling 0.1s           1.90 / 202.8 / 297.1    162 of 900 (19%)
+#   every  80ms, ceiling 0.1s           1.81 / 1.97 / 2.27        0 of 900
+#   every  50ms, ceiling 0.1s           1.84 / 2.03 / 3.56        0 of 900
+#   every  25ms, ceiling 0.1s           1.80 / 2.04 / 3.44        0 of 900
+#
+# The cliff sits exactly at _AUDIO_PRIME_MS, which is what identifies the lead
+# (not the size of any one write) as the mechanism: a 100ms cadence spends the
+# instant before each write with a lead of zero, and 19% of frames stall behind
+# it. The shipped 500ms cadence is the same fault with 400ms of the cycle spent
+# BEHIND the video -- one video stall per audio write, ~0.35-0.75x the audio
+# owed. Handing over MORE than is owed is harmless by comparison (it just
+# lengthens the lead): the same rig fed 2x real time showed no video stall at
+# all, but 10.9MB of audio backed up in this process because ffmpeg stopped
+# reading a pipe running a minute ahead -- which is what _AUDIO_PIPE_MAX_BUFFER
+# and this ceiling together bound.
+_AUDIO_SILENCE_MAX_BURST_S = 0.1
+# How long a single frame may sit unread in the video pipe before the publisher
+# is treated as gone (see write_frame). stdin.drain() returns once the transport
+# has handed the frame to ffmpeg, so it completing is direct evidence that ffmpeg
+# is still consuming; it having NOT completed for this long is not slowness --
+# a healthy write is ~2ms (measurements above) and a whole frame is ~3MB against
+# a 64KB pipe buffer, so 5s is ~75 frames' worth of not being read.
+_VIDEO_DRAIN_TIMEOUT_S = 5.0
 
 
 def _redact_url(url: str) -> str:
@@ -218,10 +279,44 @@ class FfmpegSink:
         self._audio_bytes_per_sample: int = 0   # across ALL channels
         self._audio_samples_written: int = 0
         self._audio_started_at: float | None = None
+        # Set by _drop_audio when a live audio input had to be abandoned
+        # mid-session. Distinct from "this sink never had audio": the caller has
+        # to be able to tell "video-only by configuration" from "video-only
+        # because the audio pipe wedged", and /control/status has to say so.
+        self.audio_dropped: bool = False
+        self.audio_dropped_reason: str | None = None
+        # --- publisher liveness ---
+        # ffmpeg's process being alive is necessary but NOT sufficient evidence
+        # that anything is being published: throughout the E62 outage the process
+        # was up, /control/status said "streaming", and MediaMTX had no path at
+        # all. What is actually checkable from here is whether ffmpeg is still
+        # CONSUMING what it is fed -- see write_frame.
+        self.publisher_stalled: bool = False
+        self.last_video_accepted_at: float | None = None   # monotonic
 
     @property
     def audio_enabled(self) -> bool:
+        """Whether audio can still be written to this publisher.
+
+        False both for a sink built without audio and for one whose audio input
+        was dropped mid-session (audio_dropped) -- callers must stop writing in
+        either case, and the video half is unaffected by the difference.
+        """
         return self._audio_transport is not None
+
+    @property
+    def publisher_alive(self) -> bool:
+        """Whether this sink still has a publisher that is demonstrably taking
+        frames.
+
+        Three things have to be true, and the first two alone are what made the
+        E62 outage invisible: the process exists, it has not exited, and it has
+        not stopped reading the video pipe (write_frame's bounded drain). A
+        caller that sees False must rebuild the sink -- there is no way back from
+        here, since ffmpeg cannot be told to reopen an input or an output.
+        """
+        return (self.proc is not None and self.proc.returncode is None
+                and not self.publisher_stalled)
 
     async def start(self, width: int, height: int, fps: int = 15,
                     audio_format: tuple | None = None):
@@ -544,6 +639,11 @@ class FfmpegSink:
         # inside the frame-hold task, propagates into an unrelated later session.
         if self.proc is None or self.proc.stdin is None:
             return False
+        # Already known not to be reading (below). Answer from the latch rather
+        # than spending another _VIDEO_DRAIN_TIMEOUT_S -- and another whole raw
+        # frame of memory -- proving it again on every later call.
+        if self.publisher_stalled:
+            return False
         # ffmpeg was launched with a fixed `-s WxH` raw input size. A frame of any
         # other size writes the wrong number of bytes into the pipe, permanently
         # desynchronising the raw stream so every subsequent frame is decoded from
@@ -568,20 +668,82 @@ class FfmpegSink:
         data = await loop.run_in_executor(None, lambda: frame.to_ndarray(format="yuv420p").tobytes())
         try:
             self.proc.stdin.write(data)
-            await self.proc.stdin.drain()
+            # BOUNDED, and that bound is the publisher-liveness check itself.
+            # drain() resolves once the transport has handed this frame over, and
+            # a whole raw frame is far larger than the pipe buffer, so it only
+            # resolves because ffmpeg read it: completing is direct evidence the
+            # publisher is still consuming. Unbounded (what this was), an ffmpeg
+            # that stops reading -- blocked on its own RTSP output, or alive with
+            # nowhere to publish -- parks this await forever, and the loop above
+            # simply never comes back: no timeout, no failure, no reconnect, and
+            # /control/status frozen on its last good values. That is the shape
+            # of the E62 outage, where the process stayed up and the status kept
+            # saying "streaming" while MediaMTX had no path at all.
+            await asyncio.wait_for(self.proc.stdin.drain(),
+                                   timeout=_VIDEO_DRAIN_TIMEOUT_S)
+            self.last_video_accepted_at = time.monotonic()
             return True
+        except asyncio.TimeoutError:
+            # Latched: a publisher that stopped reading its input does not
+            # recover, and ffmpeg has no way to be re-pointed at an output. The
+            # caller rebuilds the sink (publisher_alive is now False).
+            self.publisher_stalled = True
+            log.error("%s: ffmpeg has not read a frame from the video pipe in "
+                      "%.0fs -- the process is alive but is publishing nowhere; "
+                      "rebuilding the encoder", self.camera_id, _VIDEO_DRAIN_TIMEOUT_S)
+            return False
         except (BrokenPipeError, ConnectionResetError):
             return False
 
+    def _drop_audio(self, reason: str):
+        """Give up on this sink's audio input and keep publishing video.
+
+        The same principle start() already applies to an unrecognised sample
+        format, applied to a pipe that went bad mid-session: VIDEO IS WORTH MORE
+        THAN AUDIO. This used to return "rebuild the sink" instead, which fails
+        the session, tears the publisher down and kicks every RTSP reader off the
+        path -- trading a working video feed for an audio input that was already
+        gone. ffmpeg simply sees input 1 end (measured in the deployed container
+        against `-f null -`, not a live publish: closing the write end mid-run,
+        the video half kept being consumed at its usual ~1.9ms per frame for the
+        remaining 435 frames, with no stall).
+
+        Latched and one-way for this sink: ffmpeg cannot reopen an input, so the
+        only way audio comes back is the next publisher rebuild, which happens on
+        its own schedule (a frame-size change, a dead process, a format change).
+        """
+        if self.audio_dropped:
+            return
+        self.audio_dropped = True
+        self.audio_dropped_reason = reason
+        log.error("%s: %s -- dropping audio and publishing VIDEO ONLY from this "
+                  "encoder (a rebuild would kick every RTSP reader)",
+                  self.camera_id, reason)
+        transport, self._audio_transport = self._audio_transport, None
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        self._audio_pipe_file = None
+
     def _write_audio_bytes(self, data: bytes, samples: int) -> bool:
-        """Push raw PCM at the pipe. False means the pipe is unusable."""
+        """Push raw PCM at the pipe.
+
+        False means "nothing more will be written to this audio input". It is
+        NOT a request to rebuild the publisher: every path here that fails calls
+        _drop_audio first, so `audio_dropped` is set and the video half carries
+        on. The one failure that DOES need a rebuild is a changed PCM shape,
+        which write_audio detects before reaching this.
+        """
         transport = self._audio_transport
-        if transport is None or self._audio_protocol.lost or transport.is_closing():
+        if transport is None:
+            return False
+        if self._audio_protocol.lost or transport.is_closing():
+            self._drop_audio("the audio pipe was closed by the far end")
             return False
         if transport.get_write_buffer_size() > _AUDIO_PIPE_MAX_BUFFER:
-            log.warning("%s: ffmpeg has stopped reading the audio pipe (%d bytes "
-                        "queued); restarting the encoder", self.camera_id,
-                        transport.get_write_buffer_size())
+            self._drop_audio(
+                f"ffmpeg has stopped reading the audio pipe "
+                f"({transport.get_write_buffer_size()} bytes queued)")
             return False
         transport.write(data)
         self._audio_samples_written += samples
@@ -590,8 +752,11 @@ class FfmpegSink:
     async def write_audio(self, frame) -> bool:
         """Feed one decoded av.AudioFrame to ffmpeg's audio input.
 
-        Returns False if the caller should rebuild the sink -- a broken pipe, or a
-        frame whose PCM shape no longer matches what ffmpeg was launched with.
+        Returns False when this frame did not reach ffmpeg. Two different
+        situations produce that, and the caller tells them apart by reading
+        `audio_dropped`: a frame whose PCM shape no longer matches what ffmpeg
+        was launched with needs a REBUILD (below), while a pipe that has gone bad
+        has already been dropped and leaves the video publish untouched.
 
         The format check is the exact audio analogue of write_frame's frame-size
         check, and exists for the identical reason: ffmpeg was told the input's
@@ -636,7 +801,15 @@ class FfmpegSink:
         frames (a frame is a frame whenever it lands) but is real, accumulating
         A/V drift on audio, because a sample stream's duration IS its length.
 
-        Returns False on a broken pipe, like write_audio.
+        CALL IT OFTEN. A single call can only ever close the gap up to
+        _AUDIO_SILENCE_MAX_BURST_S, and -- far more importantly -- the audio has
+        to stay AHEAD of the video for ffmpeg to keep reading the video pipe at
+        all (see _AUDIO_PRIME_MS for the mechanism and the measurements). Every
+        caller here tops up at config.AUDIO_SILENCE_TOPUP_S, which is half the
+        lead the prime establishes.
+
+        Returns False if nothing was written because the audio input is gone,
+        like write_audio -- and, like write_audio, that never means "rebuild".
         """
         if self._audio_transport is None or self._audio_started_at is None:
             return False

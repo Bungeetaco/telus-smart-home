@@ -426,11 +426,53 @@ AUDIO_QUEUE_MAXSIZE = 50
 # How long the per-session audio pump waits for a decoded frame before topping the
 # publisher up with silence. This is NOT a failure timeout -- nothing is declared
 # dead, no session is failed. It exists because the ffmpeg mux has two inputs and
-# one output: a stream that stops producing packets makes the muxer hold the other
-# stream's packets back until max_interleave_delta expires, so a camera that was
-# offered audio and then never sends any would add latency and jitter to the
-# VIDEO. Topping up keeps packets flowing on both inputs.
-AUDIO_SILENCE_TOPUP_S = 0.5
+# one output: the muxer can only emit a video packet once it holds audio covering
+# that packet's timestamp, so the audio input has to stay AHEAD of the video or
+# ffmpeg stops reading the video pipe altogether and the camera drops frames.
+#
+# This is therefore paced against ffmpeg_sink._AUDIO_PRIME_MS (100 ms), which is
+# the lead the pipe is primed with: the lead decays by elapsed real time between
+# top-ups, so the cadence must stay comfortably UNDER it. Half of it leaves ~50 ms
+# of lead in hand for scheduling jitter.
+#
+# It shipped at 0.5, which is five times the lead, and that is the whole of E60:
+# for 400 ms of every 500 ms cycle the audio covered nothing past the video, and
+# ffmpeg stopped reading the video pipe until the next top-up arrived. Measured in
+# the deployed container (900 frames per 60s run at 15fps, 1440x1440 -> 960x960,
+# h264_vaapi, timing the write_frame that feeds the video pipe):
+#
+#   cadence      write_frame p50/p90/p99 (ms)     frames dropped behind a stall
+#   video-only         1.81 / 1.94 / 2.87                 0 of 900
+#   0.5  (shipped)     1.80 / 231.6 / 297.1             120 of 900 (13%)
+#   0.1  (= the lead)  1.90 / 202.8 / 297.1             162 of 900 (19%)
+#   0.08               1.81 / 1.97 / 2.27                 0 of 900
+#   0.05 (this)        1.84 / 2.03 / 3.56                 0 of 900
+#   0.025              1.80 / 2.04 / 3.44                 0 of 900
+#
+# The cliff is at the lead, not at any particular write size -- 0.1 hands ffmpeg
+# a fifth as much per write as 0.5 and stalls MORE frames, because it is the
+# moment the lead reaches zero that stops the video pipe. Below the lead the
+# stalls disappear entirely, and going further down (0.025) buys nothing but
+# wakeups. Real decoded audio arrives in ~20 ms frames and is written as it
+# arrives, so it satisfies this on its own; the top-up only has to cover the
+# quiet, which on a doorbell is nearly all of the time.
+AUDIO_SILENCE_TOPUP_S = 0.05
+# How much audio the per-session pump may write in one uninterrupted pass before
+# it yields to the event loop.
+#
+# The pump drains a queue that holds up to AUDIO_QUEUE_MAXSIZE frames (~1s), and
+# every frame costs an executor round trip to convert to PCM -- the SAME default
+# executor write_frame's per-frame pixel copy uses. Draining a backlog in one
+# unbroken run therefore lands a burst of executor work in front of the video
+# path at exactly the moment it is already behind. Yielding every ~100 ms of
+# audio bounds that.
+#
+# It is a YIELD, not a real-time pace, and the difference is measured: audio that
+# runs BEHIND the video is what stalls the video pipe (see AUDIO_SILENCE_TOPUP_S
+# above), so a backlog must be drained as fast as the loop allows, not spoon-fed
+# at real time. Audio that runs AHEAD is harmless by comparison -- the same rig
+# fed audio at twice real time showed no video stall at all.
+AUDIO_PUMP_MAX_BURST_S = 0.1
 
 # How often to re-poll TELUS for the camera list after startup, so a camera
 # added to the account later gets picked up (and streaming started

@@ -116,6 +116,35 @@ Pinned here:
                           without it is the bug class this suite keeps catching.
                           CONSUME without REQUEST is a misconfiguration, not a
                           smaller feature: it degrades to off and says so once.
+ 14. audio pacing      -- the audio input PACES THE WHOLE PUBLISHER, and the
+                          only trace of getting it wrong is video frames going
+                          missing somewhere else. ffmpeg's muxer can only emit a
+                          video packet once it holds audio covering that
+                          packet's timestamp, so the audio has to stay ahead of
+                          the video; the pipe is primed with a 100ms lead and
+                          every top-up cadence has to stay under it. Pinned:
+                          the fill's sample count comes from elapsed wallclock
+                          (exactly, against a scripted clock), no single write
+                          hands ffmpeg more than that lead, a large deficit is
+                          repaid across bounded calls rather than in one burst,
+                          a quiet camera is topped up under the lead, and the
+                          frame hold tops up on the AUDIO deadline rather than
+                          once per repeated video frame (which is 167ms on the
+                          6fps camera). Measured in the deployed container: the
+                          0.5s cadence that shipped stalled 120 of 900 frames
+                          per 60s run, 0.1s stalled 162, 0.05s stalled none.
+ 15. publisher liveness -- "publishing" and "publishing to nowhere" have to be
+                          distinguishable. The queue between decoder and
+                          publisher is sized in TIME (~500ms) rather than in a
+                          flat frame count that meant 267ms on one camera and
+                          667ms on another; an audio pipe ffmpeg has stopped
+                          reading degrades the sink to VIDEO-ONLY instead of
+                          rebuilding the publisher and kicking every RTSP
+                          reader; and write_frame's drain is bounded, because
+                          an ffmpeg that stops reading its input parks the
+                          camera's loop forever with the status frozen on
+                          "streaming" -- which is exactly what E62 looked like
+                          from outside.
  11. dropped frames    -- each session's drop counter is folded into a
                           per-camera lifetime total in the status dict when the
                           session ends (healthy rotation and failure path
@@ -140,6 +169,7 @@ os.environ.setdefault("TELUS_PASSWORD", "unused")
 from bridge import config as c              # noqa: E402
 from bridge import camera_session as cs     # noqa: E402
 from bridge import ffmpeg_sink as fs        # noqa: E402
+from bridge import janus_client as jc       # noqa: E402
 from bridge.janus_client import AUDIO_TIMEOUT  # noqa: E402
 from bridge.telus_auth import RateLimited   # noqa: E402
 
@@ -222,14 +252,20 @@ class FakeAudioFrame:
 
 class FakeSink:
     """FfmpegSink's surface as camera_session.py uses it: proc, fps,
-    hardware_encode, audio_format/audio_enabled, start(), write_frame() -> bool,
-    write_audio() -> bool, write_silence_to() -> bool, stop().
+    hardware_encode, audio_format/audio_enabled, publisher_alive, start(),
+    write_frame() -> bool, write_audio() -> bool, write_silence_to() -> bool,
+    stop().
 
     write_silence_to is the REAL FfmpegSink method, bound to this object. That is
     deliberate: the invariant under test is the arithmetic that turns elapsed
     wallclock into a sample count, and a fake reimplementation of it would only
     ever test itself. Everything it needs is modelled below -- the accounting
     fields and a _write_audio_bytes that records instead of writing to a pipe.
+
+    The audio-drop path is modelled the same way: `drop_audio_after` makes the
+    fake pipe go bad after N writes, and the response mirrors the real
+    _drop_audio -- audio off, `audio_dropped` set, VIDEO UNTOUCHED. A fake that
+    failed the whole sink instead would test the opposite of the invariant.
     """
 
     def __init__(self, camera_id):
@@ -243,7 +279,18 @@ class FakeSink:
         self.stopped = 0
         self.write_result = True
         self.write_error = None
+        # --- publisher liveness ---
+        # The real sink latches this when ffmpeg stops reading the video pipe
+        # (its drain times out); a test sets it directly, since there is no pipe
+        # here to wedge.
+        self.publisher_stalled = False
+        self.last_video_accepted_at = None
         # --- audio ---
+        self.audio_dropped = False
+        self.audio_dropped_reason = None
+        # After this many successful PCM writes, the fake audio pipe goes bad.
+        # None = never.
+        self.drop_audio_after = None
         self.audio_format = None
         self.audio_writes = []    # (monotonic, samples) -- REAL decoded audio only
         self.pcm_writes = []      # (monotonic, samples) -- everything, silence included
@@ -258,6 +305,20 @@ class FakeSink:
     @property
     def audio_enabled(self):
         return self._audio_transport is not None
+
+    @property
+    def publisher_alive(self):
+        return (self.proc is not None and self.proc.returncode is None
+                and not self.publisher_stalled)
+
+    def _drop_audio(self, reason):
+        """The real sink's degradation, modelled exactly: the audio input goes
+        away and the video half is not touched."""
+        if self.audio_dropped:
+            return
+        self.audio_dropped = True
+        self.audio_dropped_reason = reason
+        self._audio_transport = None
 
     async def start(self, width, height, fps=15, audio_format=None):
         self.start_calls.append((width, height, fps, audio_format))
@@ -277,6 +338,13 @@ class FakeSink:
 
     def _write_audio_bytes(self, data, samples):
         if self.proc is None or self.proc.returncode is not None:
+            return False
+        if self._audio_transport is None:
+            return False
+        if self.drop_audio_after is not None \
+                and len(self.pcm_writes) >= self.drop_audio_after:
+            self._drop_audio("ffmpeg has stopped reading the audio pipe "
+                             "(636928 bytes queued)")
             return False
         self.pcm_writes.append((time.monotonic(), samples))
         self._audio_samples_written += samples
@@ -298,9 +366,13 @@ class FakeSink:
         # A sink whose start() raised, or whose process has exited, reports a
         # broken pipe rather than accepting the frame -- exactly what the real
         # FfmpegSink does, and the reason a poisoned sink cannot quietly look
-        # healthy to this loop.
-        if self.proc is None or self.proc.returncode is not None:
+        # healthy to this loop. A publisher that has stopped READING is the third
+        # shape of the same thing (the real sink latches it when its bounded
+        # drain times out) and reports the same way.
+        if self.proc is None or self.proc.returncode is not None \
+                or self.publisher_stalled:
             return False
+        self.last_video_accepted_at = time.monotonic()
         self.writes.append((time.monotonic(), frame.seq))
         if CTX.write_frame_hook is not None:
             await CTX.write_frame_hook(self)
@@ -367,8 +439,14 @@ class Plan:
 
 
 class FakeSession:
-    def __init__(self, camera, video_source, consume_audio=False):
+    def __init__(self, camera, video_source, consume_audio=False, fps=None):
         self.camera, self.video_source = camera, video_source
+        # What the loop believed this camera's rate to be when it built the
+        # session. The real JanusCameraSession sizes its decoded-frame queue from
+        # it (janus_client.video_queue_maxsize), so a loop that stopped passing
+        # it down would silently put every camera back on one flat frame count.
+        self.fps = fps
+        self.queue_maxsize = jc.video_queue_maxsize(fps)
         self.plan = CTX.next_plan()
         self.created_at = time.monotonic()
         self.closed_at = None
@@ -2073,57 +2151,170 @@ async def test_audio_status_reports_only_what_was_actually_decoded():
     assert flowing.get("decoded_audio_frames") >= 3, flowing
 
 
-async def test_the_rotation_gap_is_filled_with_wallclock_derived_silence():
-    """The audio counterpart of the frame hold, and it cannot be built the same way.
+def _silence_rig(rate=48000, channels=2, prime_ms=None):
+    """The REAL FfmpegSink.write_silence_to, wired to a recording transport.
 
+    Everything below the transport is real: the deficit arithmetic, the per-call
+    ceiling, the sample accounting. `now` is passed in by the caller, so the
+    scripted clock is the only fake in it.
+    """
+    sink = fs.FfmpegSink("cam")
+    writes = []
+    sink._audio_transport = types.SimpleNamespace(
+        is_closing=lambda: False, get_write_buffer_size=lambda: 0,
+        write=lambda data: writes.append(len(data)))
+    sink._audio_protocol = types.SimpleNamespace(lost=False)
+    sink.audio_format = ("s16", rate, channels)
+    sink._audio_bytes_per_sample = 2 * channels
+    sink._audio_started_at = 1000.0
+    primed = int(rate * (fs._AUDIO_PRIME_MS if prime_ms is None else prime_ms) / 1000)
+    sink._audio_samples_written = primed
+    return sink, writes, primed
+
+
+async def test_the_silence_fill_tracks_the_wallclock_and_never_bursts():
+    """The two halves of the silence top-up, on the REAL sink with a scripted clock.
+
+    HALF ONE -- the count comes from ELAPSED REAL TIME, never from counting calls.
     A repeated video frame is self-describing: whenever it lands it is one frame,
-    so the hold loop's sleep jitter is invisible. A sample stream's duration IS
-    its length, so filling a gap by writing "one interval's worth of samples per
-    iteration" makes every bit of that jitter a permanent, accumulating A/V
-    offset -- and on a single-output RTSP mux there is no separate audio timeline
-    to absorb it. The count has to come from elapsed real time.
+    so the caller's sleep jitter is invisible. A sample stream's duration IS its
+    length, so filling a gap by writing "one interval's worth of samples per
+    call" makes every bit of that jitter a permanent, accumulating A/V offset --
+    and on a single-output RTSP mux there is no separate audio timeline to absorb
+    it. The calls below are deliberately spaced irregularly and the total written
+    is asserted to equal the wall clock EXACTLY; no fixed-per-call implementation
+    can satisfy that.
 
-    The scenario forces the two answers far apart rather than relying on a tight
-    numeric bound: every hold iteration is slowed to roughly four times its
-    nominal interval, so a sleep-counting implementation writes about a quarter
-    of the samples the wall clock calls for. That gap is wide enough that a
-    loaded CI runner cannot turn a pass into a fail.
+    HALF TWO -- no single write may hand ffmpeg more than
+    _AUDIO_SILENCE_MAX_BURST_S of audio, and that is the invariant this whole
+    change exists for. It is invisible in production: a 0.5s burst publishes
+    perfectly good audio and perfectly good video, and merely makes ffmpeg stop
+    reading the VIDEO pipe for 165-330ms each time, which surfaces a layer away
+    as "dropped N frame(s) -- consumer falling behind" (measured in the deployed
+    container: 120 of 900 frames per 60s run, against 0 when the same audio is
+    delivered under the pipe's lead). Nothing in the audio path complains at all.
+
+    The ceiling is a CEILING, not a budget: what it clips is still owed, and
+    successive calls keep repaying it against the wall clock until the stream is
+    whole again.
+    """
+    rate = 48000
+    sink, writes, primed = _silence_rig(rate=rate)
+    started = sink._audio_started_at
+    cap_samples = int(rate * fs._AUDIO_SILENCE_MAX_BURST_S)
+
+    # Inside the primed lead there is nothing owed yet -- the pipe already covers
+    # further than the wall clock has reached.
+    assert await sink.write_silence_to(now=started + 0.05) is True
+    assert writes == [], (
+        f"silence was written while the audio still led the wallclock: {writes}")
+
+    # Irregular spacing, and the TOTAL must land exactly on the wall clock every
+    # time -- not on a multiple of anything this loop counted.
+    for elapsed in (0.15, 0.19, 0.27, 0.33, 0.36, 0.44):
+        now = started + elapsed
+        assert await sink.write_silence_to(now=now) is True
+        # `now - started` is not exactly `elapsed` in binary floating point, so
+        # the expected count is derived the same way the code derives it and
+        # compared exactly. This is not slack: a per-call implementation is out
+        # by hundreds of samples here, not by one.
+        assert sink._audio_samples_written == int((now - started) * rate), (
+            f"after {elapsed:.2f}s the stream holds {sink._audio_samples_written} "
+            f"samples, not the {int((now - started) * rate)} elapsed real time "
+            "calls for -- the fill is counting its own calls, not the wall clock")
+    assert max(writes) <= cap_samples * sink._audio_bytes_per_sample, (
+        f"a single top-up handed over {max(writes)} bytes, past the "
+        f"{fs._AUDIO_SILENCE_MAX_BURST_S}s ceiling -- this is the burst that "
+        "stops ffmpeg reading the video pipe")
+
+    # A long stall: 3s owed at once. It is repaid over successive calls, each
+    # bounded, and never in one burst -- and nothing is lost in the process.
+    writes.clear()
+    calls = 0
+    while sink._audio_samples_written < int(3.0 * rate) and calls < 200:
+        assert await sink.write_silence_to(now=started + 3.0) is True
+        calls += 1
+    assert calls > 1, (
+        "a 3s deficit was repaid in one write -- the per-call ceiling is not "
+        "being applied")
+    assert max(writes) == cap_samples * sink._audio_bytes_per_sample, (
+        f"the largest catch-up write was {max(writes)} bytes, not the "
+        f"{fs._AUDIO_SILENCE_MAX_BURST_S}s ceiling")
+    assert sink._audio_samples_written == int(3.0 * rate), (
+        f"the clipped deficit was lost: the stream holds "
+        f"{sink._audio_samples_written} samples where 3.0s is {int(3.0 * rate)}")
+    # ...and once whole, it stops: no overrun past the wall clock.
+    writes.clear()
+    assert await sink.write_silence_to(now=started + 3.0) is True
+    assert writes == [], f"the fill overran the wall clock: {writes}"
+
+    # The cadence every caller of this method is paced at has to stay under the
+    # lead the pipe is primed with, or the audio stops covering the next video
+    # packet and ffmpeg stops reading the video pipe (0.1s cadence measured: 162
+    # of 900 frames stalled; 0.05s: 0 of 900).
+    assert c.AUDIO_SILENCE_TOPUP_S < fs._AUDIO_PRIME_MS / 1000.0, (
+        f"the silence top-up runs every {c.AUDIO_SILENCE_TOPUP_S}s against a "
+        f"{fs._AUDIO_PRIME_MS}ms lead -- the audio input falls behind the video "
+        "between top-ups, which is what makes ffmpeg stop reading the video pipe")
+    assert fs._AUDIO_SILENCE_MAX_BURST_S <= fs._AUDIO_PRIME_MS / 1000.0, (
+        "a single top-up may hand over more audio than the pipe's whole lead")
+
+
+async def test_the_rotation_gap_is_filled_with_wallclock_derived_silence():
+    """The audio counterpart of the frame hold, in the loop, on a SLOW camera.
+
+    The hold repeats the last video frame at the camera's own frame interval,
+    because that is the rate ffmpeg was told to expect. The audio top-up has a
+    completely different deadline: it must keep the audio input ahead of the
+    video or ffmpeg stops reading the video pipe (see
+    ffmpeg_sink._AUDIO_PRIME_MS). Those two coincide well enough at 15fps (67ms)
+    and are quietly wrong at 5-6fps -- one camera on this account runs at 6 --
+    where one top-up per repeated frame is 167ms apart against a 100ms lead. So
+    the hold ticks at whichever of the two is shorter, and this drives a 5fps
+    camera to pin it.
+
+    The wallclock derivation itself is pinned directly, against a scripted clock
+    and exact sample counts, in
+    test_the_silence_fill_tracks_the_wallclock_and_never_bursts -- it used to be
+    inferred here from a hold artificially slowed to four times its nominal
+    interval, which cannot separate the two implementations any more now that a
+    single write is bounded (a slowed hold legitimately under-fills, and the
+    catch-up is spread over later calls rather than landing in one).
     """
     gap = {}
 
     async def very_slow_second_attempt(idx):
         if idx == 1:
             gap["start"] = time.monotonic()
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
             gap["end"] = time.monotonic()
 
-    async def slow_writes(sink):
-        # Each hold iteration now takes ~0.25s + the nominal 1/15s interval.
-        await asyncio.sleep(0.25)
-
     with consume_knob("all", request="all"):
-        with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.02, 1280, 720),
+        # 0.2s between frames: a 5fps camera, whose frame interval is twice the
+        # lead the audio pipe runs on.
+        with scenario([Plan(frames=steady(8, 0.2), tail=("repeat", 0.2, 1280, 720),
                             audio_interval=0.02)],
-                      SESSION_MAX_LIFETIME_S=0.3, FRAME_SILENCE_TIMEOUT_S=5.0,
-                      FRAME_HOLD_MAX_S=5.0, AUDIO_SILENCE_TOPUP_S=0.1) as ctx:
+                      SESSION_MAX_LIFETIME_S=1.6, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      FRAME_HOLD_MAX_S=5.0) as ctx:
             ctx.gvs_hook = very_slow_second_attempt
-            ctx.write_frame_hook = slow_writes
             start(ctx)
-            await run_until(ctx, lambda x: "end" in gap, timeout=12.0,
+            await run_until(ctx, lambda x: "end" in gap, timeout=15.0,
                             why="the reconnect gap")
             sink = ctx.sink
             rate = sink.audio_format[1]
+            fps = sink.fps
             # The window starts a beat after the gap is recorded. The instant the
             # gap begins is the same event-loop tick on which the previous
             # session's audio pump is being torn down, so a single in-flight write
             # can land exactly on the boundary. A pump that was genuinely still
             # running alongside the hold would write every 20ms for the whole
-            # 1.5s gap, so nothing interesting is excluded.
+            # gap, so nothing interesting is excluded.
             began = gap["start"] + 0.2
             in_gap = [(t, n) for t, n in sink.pcm_writes if began <= t <= gap["end"]]
             audio_in_gap = [t for t, _ in sink.audio_writes if began <= t <= gap["end"]]
             await stop(ctx)
 
+    assert 4 <= fps <= 6, f"the scenario did not produce a slow camera: {fps}fps"
     assert len(in_gap) >= 3, (
         f"only {len(in_gap)} audio writes during a {gap['end'] - gap['start']:.2f}s "
         "rotation gap -- the audio input went silent while video kept advancing, "
@@ -2132,19 +2323,338 @@ async def test_the_rotation_gap_is_filled_with_wallclock_derived_silence():
         "real decoded audio was written during the gap -- the previous session's "
         "pump was still running alongside the hold, so two writers shared the pipe")
 
+    lead_s = fs._AUDIO_PRIME_MS / 1000.0
+    spacings = [b - a for (a, _), (b, _) in zip(in_gap, in_gap[1:])]
+    assert max(spacings) < lead_s, (
+        f"the hold left {max(spacings):.3f}s between audio top-ups on a {fps}fps "
+        f"camera, against the {lead_s:.3f}s lead the pipe runs on -- the audio "
+        "stops covering the video and ffmpeg stops reading the video pipe. This "
+        "is what ticking the hold at 1/fps does to a slow camera")
+    biggest = max(n for _, n in in_gap)
+    assert biggest <= fs._AUDIO_SILENCE_MAX_BURST_S * rate * 1.05, (
+        f"a single top-up wrote {biggest} samples ({biggest / rate:.2f}s) past the "
+        f"{fs._AUDIO_SILENCE_MAX_BURST_S}s ceiling")
+
     covered = sum(n for _, n in in_gap)
     spanned = in_gap[-1][0] - in_gap[0][0]
     expected = spanned * rate
-    # A sleep-counting fill writes ~1/4 of this (the write hook above makes each
-    # iteration ~4x its nominal interval); the wallclock-derived one writes ~all
-    # of it. The bound sits in the middle of that gulf, nowhere near either.
-    assert covered >= 0.6 * expected, (
+    assert covered >= 0.8 * expected, (
         f"{covered} samples cover {spanned:.2f}s of gap at {rate}Hz, where elapsed "
-        f"real time calls for ~{expected:.0f} -- the fill is counting its own "
-        "iterations, not the wall clock")
-    assert covered <= 1.6 * expected, (
+        f"real time calls for ~{expected:.0f} -- the fill is falling behind the "
+        "wall clock, which is exactly when ffmpeg stops reading the video pipe")
+    assert covered <= 1.2 * expected, (
         f"{covered} samples for {spanned:.2f}s at {rate}Hz is far more than elapsed "
         f"real time (~{expected:.0f}) -- the fill overruns the wall clock")
+
+
+async def test_a_quiet_camera_is_topped_up_under_the_lead_and_never_in_bursts():
+    """The defect that took the doorbell off the air, pinned end to end.
+
+    A doorbell is quiet nearly all the time, so nearly every pass of the audio
+    pump takes the TIMEOUT branch and fills with silence -- and that fill was
+    paced at AUDIO_SILENCE_TOPUP_S=0.5 against a pipe primed with a 100ms lead.
+    For 400ms of every cycle the audio input covered nothing past the video, so
+    the muxer had nothing to interleave the next video packet against and ffmpeg
+    stopped reading the video pipe. Measured in the deployed container, 900
+    frames per 60s run at 15fps: 120 frames (13%) stalled past a whole frame
+    interval, against 0 for a video-only publisher. That surfaced a layer away as
+    janus_client's "dropped N frame(s) -- consumer falling behind" and, once the
+    starved video timeline had fallen far enough behind the audio, as the audio
+    pipe backing up until the sink declared itself broken.
+
+    Nothing in the audio path can see it: the audio published is correct, the
+    video published is correct, and the only trace is frames going missing
+    somewhere else. So the invariant is asserted directly, on the writes
+    themselves -- cadence UNDER the lead, and no single write larger than the
+    lead either.
+    """
+    lead_s = fs._AUDIO_PRIME_MS / 1000.0
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(10, 0.066), tail=("repeat", 0.066, 1440, 1440),
+                            audio_interval=None)],   # offered audio, none arriving
+                      SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                            timeout=8.0, why="a streaming session")
+            await run_until(ctx, lambda x: x.sink is not None
+                            and len(x.sink.pcm_writes) >= 12,
+                            timeout=8.0, why="a run of silence top-ups")
+            sink = ctx.sink
+            rate = sink.audio_format[1]
+            writes = list(sink.pcm_writes)
+            await stop(ctx)
+
+    # Skip the prime and the first top-up: the pump's first pass starts whenever
+    # the session does, so only the steady cadence is under test.
+    steady_writes = writes[2:]
+    spacings = [b - a for (a, _), (b, _) in zip(steady_writes, steady_writes[1:])]
+    biggest = max(n for _, n in steady_writes)
+
+    assert biggest <= lead_s * rate * 1.05, (
+        f"a single audio write handed ffmpeg {biggest / rate:.2f}s of PCM, past "
+        f"the {lead_s:.2f}s the pipe leads the video by -- one video stall of "
+        f"~0.35-0.75x that follows every such write")
+    assert max(spacings) < lead_s, (
+        f"the longest gap between audio writes was {max(spacings):.3f}s against a "
+        f"{lead_s:.3f}s lead -- the audio input runs dry before the next write "
+        "arrives, and ffmpeg stops reading the VIDEO pipe until it does")
+    # ...and the stream really is being kept whole, not merely written to often:
+    # what was written covers the wall clock it spans.
+    covered = sum(n for _, n in steady_writes)
+    spanned = steady_writes[-1][0] - steady_writes[0][0]
+    assert covered >= 0.8 * spanned * rate, (
+        f"{covered} samples for {spanned:.2f}s of quiet at {rate}Hz -- the audio "
+        "timeline is falling behind the video's")
+
+
+async def test_the_frame_queue_is_sized_in_time_not_in_frames():
+    """The decoded-video queue holds a fixed number of MILLISECONDS, not a fixed
+    number of frames.
+
+    It was a flat maxsize=4, which is 267ms of tolerance on the 15fps doorbell
+    and 667ms on the 6fps camera beside it -- one number meaning two different
+    things, and neither of them chosen. Sized in time it means the same thing on
+    every camera, and the camera's own measured rate (remembered across
+    rotations) is what drives it.
+
+    This is DEFENCE IN DEPTH and is deliberately not sized to hide a stall: a
+    deeper queue does not remove one, it converts dropped frames into latency,
+    since every frame held is a frame the viewer sees late. The ceiling is
+    memory: a decoded 1440x1440 yuv420p frame is 3.11MB, so 8 frames is 24.9MB
+    per camera against the container's 768MiB limit (~435MiB in use), and 16
+    would be 49.8MB for a queue that is not supposed to fill.
+    """
+    depths = {fps: jc.video_queue_maxsize(fps) for fps in (5, 6, 10, 15, 20, 30)}
+    for fps, depth in depths.items():
+        held_ms = 1000.0 * depth / fps
+        wanted = round(fps * jc.VIDEO_QUEUE_TARGET_MS / 1000.0)
+        if wanted > jc.VIDEO_QUEUE_MAX_FRAMES:
+            # Above ~16fps the memory ceiling binds before the time target does,
+            # and that is a deliberate choice rather than an oversight: 8 frames
+            # is 24.9MB at 1440x1440 and the target would ask for 15 at 30fps.
+            # Even there it is twice the flat 4 this replaces.
+            assert depth == jc.VIDEO_QUEUE_MAX_FRAMES, (fps, depths)
+            assert held_ms >= 250, (fps, held_ms)
+        else:
+            assert 400 <= held_ms <= 900, (
+                f"{fps}fps gets {depth} frames = {held_ms:.0f}ms of tolerance, "
+                f"which is not the ~{jc.VIDEO_QUEUE_TARGET_MS}ms this is supposed "
+                f"to mean on every camera: {depths}")
+    assert depths[15] == 8 and depths[6] == 4, depths
+    assert min(depths.values()) >= 4, (
+        f"some camera got a shallower queue than the flat 4 that shipped: {depths}")
+    assert jc.video_queue_maxsize(None) == jc.video_queue_maxsize(15), (
+        "a camera whose rate has not been measured yet must get the same 15fps "
+        "assumption the fps fallback uses")
+    # Memory, in the units that matter: the doorbell's own frame size.
+    frame_mb = 1440 * 1440 * 1.5 / (1024 * 1024)
+    assert max(depths.values()) * frame_mb <= 25.0, (
+        f"{max(depths.values())} frames of 1440x1440 is "
+        f"{max(depths.values()) * frame_mb:.1f}MB per camera")
+
+    # ...and the loop actually hands the rate down. The first session of a camera
+    # has nothing to hand down; the ones after it carry the measured rate, which
+    # is the entire point of remembering it across rotations.
+    with scenario([Plan(frames=steady(10, 0.2), tail=("repeat", 0.2, 1280, 720))],
+                  SESSION_MAX_LIFETIME_S=0.5, FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+        start(ctx)
+        await run_until(ctx, lambda x: len(x.sessions) >= 2, timeout=12.0,
+                        why="a second session")
+        first, second = ctx.sessions[0], ctx.sessions[1]
+        await stop(ctx)
+
+    assert first.fps is None, (
+        f"the first session was given an fps nothing had measured yet: {first.fps}")
+    assert 4 <= (second.fps or 0) <= 6, (
+        f"the measured rate was not handed to the next session: {second.fps}")
+    assert second.queue_maxsize == jc.video_queue_maxsize(second.fps), (
+        f"the session's queue was not sized from the rate it was given: "
+        f"{second.queue_maxsize}")
+
+
+async def test_a_wedged_audio_pipe_degrades_to_video_only():
+    """An audio input that goes bad mid-session must cost the audio, not the camera.
+
+    ffmpeg stopping reading the audio pipe used to mean "restart the encoder":
+    the sink refused the write, the pump raised the rebuild flag, the session
+    failed, and the publisher was torn down and relaunched -- which destroys the
+    MediaMTX path, kicks every RTSP reader off it and puts a discontinuity in
+    front of every HLS viewer. That trades a WORKING VIDEO FEED for an audio
+    input that has already gone. During E62 it happened repeatedly and the camera
+    ended with no publisher at all.
+
+    Video is worth more than audio -- the same judgement start() already makes
+    for an unsupported sample format. So the audio is dropped, the same publisher
+    keeps going, and /control/status says so out loud, because a bridge quietly
+    publishing silence is the failure mode this whole status block exists to
+    prevent.
+    """
+    # 1. The REAL sink: a transport ffmpeg has stopped draining.
+    real = fs.FfmpegSink("cam")
+    closed = []
+    real.proc = types.SimpleNamespace(returncode=None, stdin=object())
+    real._audio_transport = types.SimpleNamespace(
+        is_closing=lambda: False,
+        get_write_buffer_size=lambda: fs._AUDIO_PIPE_MAX_BUFFER + 1,
+        write=lambda data: None, close=lambda: closed.append(True))
+    real._audio_protocol = types.SimpleNamespace(lost=False)
+    real.audio_format = ("s16", 48000, 2)
+    real._audio_bytes_per_sample = 4
+    real._audio_started_at = time.monotonic() - 1.0
+    real._audio_samples_written = 4800
+
+    assert await real.write_silence_to() is False
+    assert real.audio_dropped is True, (
+        "a wedged audio pipe did not mark the sink audio-dead, so the caller has "
+        "no way to tell it from a frame that simply needs a rebuild")
+    assert real.audio_enabled is False, "the sink kept offering a dead audio input"
+    assert closed, "the wedged audio pipe was left open"
+    assert str(fs._AUDIO_PIPE_MAX_BUFFER + 1) in (real.audio_dropped_reason or ""), (
+        f"the reason does not say what was observed: {real.audio_dropped_reason!r}")
+    assert real.publisher_alive is True, (
+        "losing the audio input took the VIDEO publisher down with it -- that is "
+        "the trade this test exists to prevent")
+
+    # 2. In the loop: the same publisher keeps publishing video, is never
+    #    rebuilt, and the status carries the degradation.
+    with consume_knob("all", request="all"):
+        with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                            audio_interval=0.02)],
+                      SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+            def wedge_the_audio_pipe(sink, width, height, fps):
+                sink.drop_audio_after = 5
+            ctx.sink_start_hook = wedge_the_audio_pipe
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("audio_dropped") is True,
+                            timeout=10.0, why="the audio input to be dropped")
+            writes_at_drop = len(ctx.sink.writes)
+            state_at_drop = dict(ctx.state)
+            await run_until(ctx, lambda x: len(x.sink.writes) > writes_at_drop + 10,
+                            timeout=10.0, why="video to keep publishing")
+            sinks, sink = len(ctx.sinks), ctx.sink
+            stops, audio_writes = sink.stopped, len(sink.audio_writes)
+            state = dict(ctx.state)
+            await stop(ctx)
+
+    assert sinks == 1 and stops == 0, (
+        f"the publisher was rebuilt over a dead audio input ({sinks} sinks, "
+        f"{stops} stops) -- every RTSP reader on this path was just kicked off it")
+    assert state.get("state") == "streaming", (
+        f"losing audio failed the session: {state}")
+    assert state.get("consecutive_failures") == 0, (
+        f"a dropped audio input counted toward the container-restart escape "
+        f"hatch: {state}")
+    assert state_at_drop.get("audio_dropped_reason"), (
+        f"the status says audio was dropped but not why: {state_at_drop}")
+    assert state.get("audio_consumed") is True, (
+        "audio_consumed must keep saying what this camera is CONFIGURED to do -- "
+        "audio_dropped is what says the publisher stopped doing it")
+    # Nothing more was written into the dead pipe.
+    assert len(sink.audio_writes) == audio_writes, sink.audio_writes
+
+
+async def test_a_publisher_that_stopped_reading_is_detected_and_rebuilt():
+    """"Publishing" and "publishing to nowhere" have to be distinguishable.
+
+    Throughout the E62 outage /control/status reported `state: streaming`,
+    `consecutive_failures: 0` and a fresh `last_frame_at` while MediaMTX had no
+    path at all and every reader was refused. Nothing in the bridge asked whether
+    the publisher still existed: the frame-silence watchdog watches frames
+    ARRIVING from Janus, and the sink-repair check only asked whether the ffmpeg
+    process had exited -- which it had not.
+
+    The evidence available here is whether ffmpeg is still CONSUMING what it is
+    fed. stdin.drain() resolves only once the transport has handed a whole raw
+    frame (~3MB against a 64KB pipe buffer) to the process, so it completing is
+    direct evidence and it failing to complete is direct evidence of the
+    opposite. Unbounded -- which is what it was -- that same await simply parks
+    the camera's loop forever, with no timeout, no failure and no reconnect, and
+    the status frozen on its last good values.
+
+    MediaMTX's own API would answer the question more directly and is
+    deliberately not used: mediamtx.yml disables every listener except RTSP (the
+    file says so, listener by listener), and this container runs with
+    --network host, so turning the API on to health-check ourselves would open a
+    real host port. This costs nothing per frame and needs no listener.
+    """
+    # 1. The REAL sink: a drain that never completes must be bounded, must latch,
+    #    and must report -- not park the caller.
+    class NeverReads:
+        def __init__(self):
+            self.written = 0
+
+        def write(self, data):
+            self.written += len(data)
+
+        async def drain(self):
+            await asyncio.Event().wait()
+
+    class TinyFrame:
+        width = height = 2
+
+        def to_ndarray(self, format=None):
+            return types.SimpleNamespace(tobytes=lambda: b"\0" * 6)
+
+    saved = fs._VIDEO_DRAIN_TIMEOUT_S
+    fs._VIDEO_DRAIN_TIMEOUT_S = 0.2
+    try:
+        real = fs.FfmpegSink("cam")
+        real._wh = (2, 2)
+        real.proc = types.SimpleNamespace(returncode=None, stdin=NeverReads())
+        assert real.publisher_alive is True, "a fresh publisher reads as dead"
+        began = time.monotonic()
+        # The bound is the point: without it this await never returns, so the
+        # outer wait_for must produce a FAILURE rather than hanging the suite.
+        try:
+            accepted = await asyncio.wait_for(real.write_frame(TinyFrame()), timeout=5.0)
+        except asyncio.TimeoutError:
+            raise AssertionError(
+                "write_frame parked forever on an ffmpeg that stopped reading its "
+                "video pipe -- this is the camera loop wedging with the status "
+                "frozen on 'streaming'")
+        elapsed = time.monotonic() - began
+        assert accepted is False, "a frame ffmpeg never read was reported as published"
+        assert elapsed < 2.0, f"the drain bound was not honoured ({elapsed:.2f}s)"
+        assert real.publisher_stalled is True and real.publisher_alive is False, (
+            "the publisher was not marked gone, so the repair check would leave "
+            "this ffmpeg in place forever")
+    finally:
+        fs._VIDEO_DRAIN_TIMEOUT_S = saved
+
+    # 2. In the loop: a publisher that has stopped consuming is REPLACED, and the
+    #    status stops claiming it is publishing.
+    def wedge_the_publisher(idx):
+        if idx == 12 and CTX.sinks:
+            CTX.sinks[0].publisher_stalled = True
+
+    with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                        on_frame=wedge_the_publisher)],
+                  SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0,
+                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+        start(ctx)
+        await run_until(ctx, lambda x: x.state.get("publisher_alive") is False,
+                        timeout=10.0, why="the publisher to be reported gone")
+        while_stalled = dict(ctx.state)
+        await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].writes,
+                        timeout=10.0, why="a replacement publisher")
+        first_stopped = ctx.sinks[0].stopped
+        recovered = dict(ctx.state)
+        await stop(ctx)
+
+    assert while_stalled.get("last_frame_at") is not None
+    assert (while_stalled.get("last_publish_at") or 0) < while_stalled["last_frame_at"], (
+        f"last_publish_at kept up with last_frame_at while nothing was reaching "
+        f"the publisher: {while_stalled} -- these two being the same number is "
+        "exactly how 'streaming' and 'streaming to nowhere' became "
+        "indistinguishable")
+    assert first_stopped == 1, (
+        "the wedged publisher was left running -- the process was alive, so the "
+        "repair check that only asks about the process saw nothing wrong")
+    assert recovered.get("publisher_alive") is True, recovered
+    assert recovered.get("last_publish_at") >= while_stalled["last_frame_at"], (
+        f"the replacement publisher is not being credited with the frames it "
+        f"takes: {recovered}")
 
 
 async def test_an_audio_format_change_forces_a_publisher_rebuild():
@@ -2604,7 +3114,12 @@ TESTS = [
     test_audio_consumption_is_off_by_default_and_changes_no_wire_behaviour,
     test_a_consume_enabled_camera_publishes_its_audio,
     test_audio_status_reports_only_what_was_actually_decoded,
+    test_the_silence_fill_tracks_the_wallclock_and_never_bursts,
     test_the_rotation_gap_is_filled_with_wallclock_derived_silence,
+    test_a_quiet_camera_is_topped_up_under_the_lead_and_never_in_bursts,
+    test_the_frame_queue_is_sized_in_time_not_in_frames,
+    test_a_wedged_audio_pipe_degrades_to_video_only,
+    test_a_publisher_that_stopped_reading_is_detected_and_rebuilt,
     test_an_audio_format_change_forces_a_publisher_rebuild,
     test_every_encoder_variant_gets_the_audio_input_and_encoder,
     test_the_video_input_declares_its_rate_with_framerate_never_r,
