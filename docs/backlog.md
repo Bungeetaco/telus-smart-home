@@ -150,6 +150,18 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   placeholder, and an install that already runs door-greeting logic elsewhere
   should integrate talkdown there rather than as a standalone rule.
 
+- **E56 (DONE) The doorbell button press is a first-class event.** A press
+  carries `event_type_name="DoorbellButtonPress"` — a stable server-side enum —
+  alongside `description="Button Push"`. Each doorbell gets an event entity with
+  HA's `doorbell` device class, matching **the enum, never the description**:
+  this account's activity feed renders text in the account's language and has
+  produced both French and English for the same event kinds, so a text match is
+  an automation that silently stops working with no error anywhere. Cameras are
+  selected by chime support; dedup is the current page's id set (not a
+  high-water mark — activity ids are opaque and one press yields
+  timestamp-siblings); a restart cannot re-fire an old press; and it
+  deliberately does not fire again when the clip is attached a poll later.
+
 ## Audio quality / transport
 - **E4 (CLOSED -- not achievable on this device) L16 codec.**
   Investigated to a conclusion rather than left open. L16 (16-bit linear,
@@ -425,6 +437,95 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   unavailable rather than breaking sensor setup. See
   `docs/ha-integration.md` for the entities and an example automation.
 
+- **E63 (DONE) The integration has a test harness.** `tests/` at the repository
+  root holds two suites, run by a dedicated `integration-tests` CI job on every
+  PR under the same conventions as the bridge's: plain scripts ending in
+  `RESULT: PASS` / `RESULT: FAIL (n)`, no network, no account, no hardware, and
+  a new `test_*.py` picked up by the glob with no list to update. The job
+  installs **aiohttp and nothing else**.
+
+  **Home Assistant is stubbed, not installed.** `tests/ha_stubs.py` registers a
+  small `homeassistant.*` package tree in `sys.modules` before the integration
+  is imported, so the REAL integration modules load and the REAL derivations run
+  against stand-in base classes. Installing Home Assistant was evaluated
+  properly rather than assumed impossible: it *does* resolve on the interpreter
+  CI pins, but pulls in the order of a hundred transitive packages (grpcio,
+  boto3, pillow, cryptography, bleak/dbus-fast, zeroconf, SQLAlchemy, and PyRIC,
+  which has no wheel and builds from source) to supply a handful of base
+  classes — and exercising entity behaviour for real on top of it needs
+  `pytest-homeassistant-custom-component`, which pins one exact Home Assistant
+  version and would put this repo on a version-lock treadmill, with a second
+  test framework alongside the bridge's plain scripts. The logic worth pinning
+  is pure and needs none of it. `pyalarmdotcomajax` is stubbed for the three
+  attributes `const.py` reads; `controller.py` is stubbed wholesale, because
+  importing it applies the websocket monkeypatch and needs the real library —
+  work the existing `check_patch.py` CI job already does.
+
+  **Covered.** `test_stream_health_sensors.py` pins E61's audio-state
+  derivation, including all four cases that must never fabricate a `stalled` —
+  an unanswered poll (both guards: the `last_poll_ok` flag and the identical
+  payload object the coordinator hands back), a failed poll, a counter reset on
+  a bridge restart, and the first poll of an entity's life — plus the per-poll
+  delta, the `not_consuming` reset of the remembered count, the unknown state
+  for a bridge too old to report `audio_consumed`, ENUM-options containment, the
+  stream-state and dropped-frames mappings, and the coordinator's two failure
+  flags. `test_event_entities.py` pins the doorbell matcher on the untranslated
+  `event_type_name` enum (a French-described press fires; a "Button Push"
+  *description* with a different enum does not), the per-page id-set dedup
+  (restart safety, timestamp siblings, oldest-first firing with one state write
+  per press, an empty page neither becoming nor clearing the baseline),
+  `_classify` across both locales, `_event_time` ordering across TELUS's two
+  timestamp formats, `_is_doorbell`, and `TelusActivityEvent`'s single extra
+  fire when a clip attaches late.
+
+  **Every invariant was proven falsifiable.** 39 deliberate source mutations
+  were applied one at a time, the suite run, and the mutation reverted: 38 were
+  caught. The one survivor is a *finding about the source, not a hole in the
+  test* — dropping `_classify`'s French `"personne"` needle changes nothing,
+  because `"personne"` contains `"person"` and the English needle already
+  matches it. The French **vehicle** needles are genuinely load-bearing
+  (`"véhicule"` shares no substring with `"vehicle"`) and their removal is
+  caught. That asymmetry is now recorded in the test's own docstring so it is
+  not re-derived.
+
+  **Not covered — see E66**, which carries the list rather than leaving it
+  implied.
+
+- **E66 (open) The integration test harness covers two modules; the rest of the
+  integration is still unpinned.** E63 built the harness and used it on the two
+  places where a silent regression was already known to be expensive. It
+  deliberately stopped there rather than chasing coverage, so this entry records
+  what is NOT covered instead of leaving it implied:
+
+  - `config_flow.py` — the config/reconfigure/reauth flows, including the OTP
+    branch. Pure-ish and testable with the same stub tree; the payoff is that a
+    broken flow is discovered at setup time by a user, not by CI.
+  - `speak_service.py`, `bypass_service.py`, `unpair_service.py` — the service
+    handlers. Their schemas and their error mapping (E51's 413/504/400 wording,
+    for one) are exactly the kind of thing that reads correct and is not.
+  - `switch.py`, `select.py`, `number.py`, `button.py` — the settings-backed
+    platforms. `camera_settings_coordinator.py`'s wire shape *is* covered on the
+    bridge side (`test_camera_settings.py`); what is unpinned here is the HA-side
+    capability gating and option-list handling.
+  - `binary_sensor.py` — including the bridge-connectivity entity that shares
+    `StreamHealthCoordinator` with the covered sensors.
+  - `clip_view.py` — only the link **minting** is exercised (through the doorbell
+    event's `clip_link` attribute). Signature verification, expiry handling and
+    the redirect view's request handling are not.
+  - `arming_devices_coordinator.py` — again, covered bridge-side
+    (`test_arming_devices.py`), not HA-side.
+  - `__init__.py` — every setup, unload and reload path.
+
+  There is also a **structural** gap that no amount of new suites in this shape
+  closes, and it should not be papered over: the stubs assert nothing about Home
+  Assistant's real API, so a breaking upstream change to `CoordinatorEntity` or
+  `EventEntity` leaves every suite green. Closing that means installing Home
+  Assistant, which E63 rejected on cost — the realistic middle ground, if it ever
+  matters, is a separate, occasional CI job that installs Home Assistant and only
+  *imports* the integration's platform modules against the real base classes,
+  the way `bridge-import-smoke` does for the bridge. Not done, and not obviously
+  worth it yet.
+
 ## Dependency-driven (from the aiortc 1.15 / aiohttp 3.14 upgrade)
 - **E21 (DONE) Replaced the hand-rolled HTTP Digest with aiohttp's `DigestAuthMiddleware`.**
   Implemented and verified against the live doorbell (150 chunks streamed clean);
@@ -464,6 +565,23 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   Options: keep it and rely on the CI/dep-review gate, or vendor a small local SDP
   candidate parser so the video path stops depending on library internals.
 
+- **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
+  upstream maintainer has moved and no longer has an Alarm.com system to test
+  against, on an indefinite timeline. The repository is not archived, and its
+  last functional commit predates the notice by over a year — so the library has
+  been dormant for as long as this project has been active, and the notice
+  formalises the status quo.
+
+  No action is required, and pinning is why: `manifest.json` pins an exact
+  version, Renovate never auto-merges it, and CI imports all three monkeypatches
+  and asserts the private instance attributes the replaced `async_login` depends
+  on. Triggers that should reopen this: the pinned version failing on a Python
+  version the runtime moves to, a security advisory, or wanting to change code
+  currently reached by monkeypatch. **Vendoring, not forking, is the likely
+  answer** when one fires — three internals are already monkeypatched precisely
+  because they cannot be changed in place, and vendoring would turn those into
+  ordinary edits and delete the guard machinery with them.
+
 ## Minor
 - **E16 (DONE) Cache `GetDoorbellCameraList`** -- a result is reused
   across talks for `config.TALK_DOORBELL_CACHE_TTL_S` (60 s), saving that round
@@ -487,6 +605,15 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   moved to `config.TALK_CHUNK_MS` / `config.TALK_PREBUFFER_MS` (the transport
   references them under the short names) and documented in
   [configuration.md](configuration.md), including the trade-off each one makes.
+
+- **E65 (open, minor) The MediaMTX publish password is visible in process
+  arguments.** The RTSP publish URL, credentials included, is passed on
+  ffmpeg's command line, so it appears in `docker top` and in any host-visible
+  process listing. It is loopback-scoped (`127.0.0.1/32`), regenerated by
+  `entrypoint.sh`, and only grants publish/read on the local MediaMTX, so the
+  exposure is small — but a credential on an argv is avoidable: ffmpeg accepts
+  the same values through the environment or a config file. Log lines already
+  redact it (`_redact_url`); this is the one place it stays in the clear.
 
 ## Adjacent alarm.com surfaces (from the web-portal survey)
 These are not talkdown, but they are gaps found while working the same account
@@ -1144,6 +1271,22 @@ when it ships.
   are complete and any future drift is a one-line key-tree diff away from
   being visible.
 
+- **E67 (DONE) The Audio state sensor says why audio stopped.**
+  The bridge now distinguishes "the audio pipe wedged and was deliberately
+  dropped so video could keep publishing" from "audio simply stopped arriving",
+  via `audio_dropped` and `audio_dropped_reason` in `/control/status` (E62). The
+  integration reads neither. `CameraAudioStateSensor` reports `stalled` in both
+  cases — correct, because the pump does stop feeding audio once the pipe is
+  dropped, but it leaves the operator to go read container logs for the cause.
+
+  Both now ride as attributes on the existing sensor, needing no new poller.
+  Deliberately *not* a fifth enum state: `stalled` is what an automation should
+  act on either way, and splitting it would break any automation already keyed
+  on it. Absent on an older bridge reads as `null`, never as a fabricated
+  `false` — pinned by a test, along with the dropped-pipe case itself. Whether a
+  dropped pipe also deserves its own binary sensor is a separate question —
+  probably not, since it should be rare and is visible in the attribute.
+
 ## Downstream (listen) audio
 
 - **E53 (ANSWERED — yes, with a caveat) The upstream does serve a downstream
@@ -1537,12 +1680,6 @@ when it ships.
   **Fixed in the bridge.** What live validation must show is listed at the end
   of E62, alongside the other three changes that shipped with this one.
 
-## Entries restored after an editing slip
-
-These three lost their bodies to a bad splice while E54 was being closed, and
-the loss went unnoticed across several commits — only their one-line summaries
-survived. Restored here with their current status rather than as they were.
-
 - **E55 (CLOSED — not worth pursuing) Device-direct listen audio.** Superseded:
   downstream audio comes over the website/Janus path (E53/E54), so a second
   source buys nothing operational.
@@ -1559,88 +1696,11 @@ survived. Restored here with their current status rather than as they were.
   RTSP with an HTTP 400 from lighttpd). Reopen only if the Janus path is
   abandoned.
 
-- **E56 (DONE) The doorbell button press is a first-class event.** A press
-  carries `event_type_name="DoorbellButtonPress"` — a stable server-side enum —
-  alongside `description="Button Push"`. Each doorbell gets an event entity with
-  HA's `doorbell` device class, matching **the enum, never the description**:
-  this account's activity feed renders text in the account's language and has
-  produced both French and English for the same event kinds, so a text match is
-  an automation that silently stops working with no error anywhere. Cameras are
-  selected by chime support; dedup is the current page's id set (not a
-  high-water mark — activity ids are opaque and one press yields
-  timestamp-siblings); a restart cannot re-fire an old press; and it
-  deliberately does not fire again when the clip is attached a poll later.
+## The adaptive frame rate
 
-- **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
-  upstream maintainer has moved and no longer has an Alarm.com system to test
-  against, on an indefinite timeline. The repository is not archived, and its
-  last functional commit predates the notice by over a year — so the library has
-  been dormant for as long as this project has been active, and the notice
-  formalises the status quo.
-
-  No action is required, and pinning is why: `manifest.json` pins an exact
-  version, Renovate never auto-merges it, and CI imports all three monkeypatches
-  and asserts the private instance attributes the replaced `async_login` depends
-  on. Triggers that should reopen this: the pinned version failing on a Python
-  version the runtime moves to, a security advisory, or wanting to change code
-  currently reached by monkeypatch. **Vendoring, not forking, is the likely
-  answer** when one fires — three internals are already monkeypatched precisely
-  because they cannot be changed in place, and vendoring would turn those into
-  ordinary edits and delete the guard machinery with them.
-
-- **E63 (DONE) The integration has a test harness.** `tests/` at the repository
-  root holds two suites, run by a dedicated `integration-tests` CI job on every
-  PR under the same conventions as the bridge's: plain scripts ending in
-  `RESULT: PASS` / `RESULT: FAIL (n)`, no network, no account, no hardware, and
-  a new `test_*.py` picked up by the glob with no list to update. The job
-  installs **aiohttp and nothing else**.
-
-  **Home Assistant is stubbed, not installed.** `tests/ha_stubs.py` registers a
-  small `homeassistant.*` package tree in `sys.modules` before the integration
-  is imported, so the REAL integration modules load and the REAL derivations run
-  against stand-in base classes. Installing Home Assistant was evaluated
-  properly rather than assumed impossible: it *does* resolve on the interpreter
-  CI pins, but pulls in the order of a hundred transitive packages (grpcio,
-  boto3, pillow, cryptography, bleak/dbus-fast, zeroconf, SQLAlchemy, and PyRIC,
-  which has no wheel and builds from source) to supply a handful of base
-  classes — and exercising entity behaviour for real on top of it needs
-  `pytest-homeassistant-custom-component`, which pins one exact Home Assistant
-  version and would put this repo on a version-lock treadmill, with a second
-  test framework alongside the bridge's plain scripts. The logic worth pinning
-  is pure and needs none of it. `pyalarmdotcomajax` is stubbed for the three
-  attributes `const.py` reads; `controller.py` is stubbed wholesale, because
-  importing it applies the websocket monkeypatch and needs the real library —
-  work the existing `check_patch.py` CI job already does.
-
-  **Covered.** `test_stream_health_sensors.py` pins E61's audio-state
-  derivation, including all four cases that must never fabricate a `stalled` —
-  an unanswered poll (both guards: the `last_poll_ok` flag and the identical
-  payload object the coordinator hands back), a failed poll, a counter reset on
-  a bridge restart, and the first poll of an entity's life — plus the per-poll
-  delta, the `not_consuming` reset of the remembered count, the unknown state
-  for a bridge too old to report `audio_consumed`, ENUM-options containment, the
-  stream-state and dropped-frames mappings, and the coordinator's two failure
-  flags. `test_event_entities.py` pins the doorbell matcher on the untranslated
-  `event_type_name` enum (a French-described press fires; a "Button Push"
-  *description* with a different enum does not), the per-page id-set dedup
-  (restart safety, timestamp siblings, oldest-first firing with one state write
-  per press, an empty page neither becoming nor clearing the baseline),
-  `_classify` across both locales, `_event_time` ordering across TELUS's two
-  timestamp formats, `_is_doorbell`, and `TelusActivityEvent`'s single extra
-  fire when a clip attaches late.
-
-  **Every invariant was proven falsifiable.** 39 deliberate source mutations
-  were applied one at a time, the suite run, and the mutation reverted: 38 were
-  caught. The one survivor is a *finding about the source, not a hole in the
-  test* — dropping `_classify`'s French `"personne"` needle changes nothing,
-  because `"personne"` contains `"person"` and the English needle already
-  matches it. The French **vehicle** needles are genuinely load-bearing
-  (`"véhicule"` shares no substring with `"vehicle"`) and their removal is
-  caught. That asymmetry is now recorded in the test's own docstring so it is
-  not re-derived.
-
-  **Not covered — see E66**, which carries the list rather than leaving it
-  implied.
+The frame rate is a device setting, not a constant discovered once; these
+entries are the mechanism that keeps it under review
+(`camera_session.RateWatcher`), its guards, and what is still open about it.
 
 - **E64 (DONE) The frame rate is adaptive, not latched.** The measured fps was
   latched for the life of a process, and `-framerate` bakes it into the output.
@@ -1729,66 +1789,6 @@ survived. Restored here with their current status rather than as they were.
   with a *plausible* 40 fps burst (the failure the logs actually show), it fails
   as it should. A burst test that is too extreme tests the sanity range, not the
   settle window.
-
-- **E65 (open, minor) The MediaMTX publish password is visible in process
-  arguments.** The RTSP publish URL, credentials included, is passed on
-  ffmpeg's command line, so it appears in `docker top` and in any host-visible
-  process listing. It is loopback-scoped (`127.0.0.1/32`), regenerated by
-  `entrypoint.sh`, and only grants publish/read on the local MediaMTX, so the
-  exposure is small — but a credential on an argv is avoidable: ffmpeg accepts
-  the same values through the environment or a config file. Log lines already
-  redact it (`_redact_url`); this is the one place it stays in the clear.
-
-- **E66 (open) The integration test harness covers two modules; the rest of the
-  integration is still unpinned.** E63 built the harness and used it on the two
-  places where a silent regression was already known to be expensive. It
-  deliberately stopped there rather than chasing coverage, so this entry records
-  what is NOT covered instead of leaving it implied:
-
-  - `config_flow.py` — the config/reconfigure/reauth flows, including the OTP
-    branch. Pure-ish and testable with the same stub tree; the payoff is that a
-    broken flow is discovered at setup time by a user, not by CI.
-  - `speak_service.py`, `bypass_service.py`, `unpair_service.py` — the service
-    handlers. Their schemas and their error mapping (E51's 413/504/400 wording,
-    for one) are exactly the kind of thing that reads correct and is not.
-  - `switch.py`, `select.py`, `number.py`, `button.py` — the settings-backed
-    platforms. `camera_settings_coordinator.py`'s wire shape *is* covered on the
-    bridge side (`test_camera_settings.py`); what is unpinned here is the HA-side
-    capability gating and option-list handling.
-  - `binary_sensor.py` — including the bridge-connectivity entity that shares
-    `StreamHealthCoordinator` with the covered sensors.
-  - `clip_view.py` — only the link **minting** is exercised (through the doorbell
-    event's `clip_link` attribute). Signature verification, expiry handling and
-    the redirect view's request handling are not.
-  - `arming_devices_coordinator.py` — again, covered bridge-side
-    (`test_arming_devices.py`), not HA-side.
-  - `__init__.py` — every setup, unload and reload path.
-
-  There is also a **structural** gap that no amount of new suites in this shape
-  closes, and it should not be papered over: the stubs assert nothing about Home
-  Assistant's real API, so a breaking upstream change to `CoordinatorEntity` or
-  `EventEntity` leaves every suite green. Closing that means installing Home
-  Assistant, which E63 rejected on cost — the realistic middle ground, if it ever
-  matters, is a separate, occasional CI job that installs Home Assistant and only
-  *imports* the integration's platform modules against the real base classes,
-  the way `bridge-import-smoke` does for the bridge. Not done, and not obviously
-  worth it yet.
-
-- **E67 (DONE) The Audio state sensor says why audio stopped.**
-  The bridge now distinguishes "the audio pipe wedged and was deliberately
-  dropped so video could keep publishing" from "audio simply stopped arriving",
-  via `audio_dropped` and `audio_dropped_reason` in `/control/status` (E62). The
-  integration reads neither. `CameraAudioStateSensor` reports `stalled` in both
-  cases — correct, because the pump does stop feeding audio once the pipe is
-  dropped, but it leaves the operator to go read container logs for the cause.
-
-  Both now ride as attributes on the existing sensor, needing no new poller.
-  Deliberately *not* a fifth enum state: `stalled` is what an automation should
-  act on either way, and splitting it would break any automation already keyed
-  on it. Absent on an older bridge reads as `null`, never as a fabricated
-  `false` — pinned by a test, along with the dropped-pipe case itself. Whether a
-  dropped pipe also deserves its own binary sensor is a separate question —
-  probably not, since it should be rare and is visible in the attribute.
 
 - **E68 (open) The pacing fix was measured against `-f null -`, never a live
   RTSP publish.** Every container measurement behind E60/E62 — the cadence
