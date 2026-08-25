@@ -62,6 +62,13 @@ and evidence. Grouped by whether anything can actually be done about them.
   app or the portal, so it is a TELUS call. `hasBuiltInMicrophone` is `False`
   for both cameras and is meaningless here.
 
+**Recently shipped, listed only because the trap is expensive**
+
+- **E79** (DONE) - Frigate records to the NAS vault pool over virtiofs. If the
+  VM ever fails to start with `virtiofsd died unexpectedly`, the real error is in
+  `/var/log/syslog`, not the empty virtiofsd log, and the fix is
+  `--sandbox=chroot` in `/etc/libvirt/virtiofsd.opt`.
+
 **Blocked on hardware or a device this account does not have**
 
 - **E13**: validate the webrtc/srtp fallback path; needs an ADC camera that
@@ -2215,3 +2222,45 @@ entries are the mechanism that keeps it under review
   Consequence today: the living room records video only. If audio is ever
   enabled it is a Frigate config change plus a renegotiation, not a rebuild, and
   recordings already on disk stay valid.
+
+- **E79 (DONE) Frigate records to the NAS over virtiofs, not into the VM image.**
+  Recordings previously would have landed in `/home/bungee/frigate/media` on the
+  VM's qcow2 disk, which had 16 GB free. They now go to a btrfs RAID1 pool on the
+  NAS, reached over virtiofs.
+
+  Shape of it: a `nvr` share pinned to the pool with `shareUseCache="only"` so
+  Unraid's mover can never migrate footage onto the array (which is 99 percent
+  full), `nodatacow` set on the directory so it is inherited by every file
+  Frigate creates, a `<filesystem>` device plus shared `memfd` memory backing in
+  the VM XML, an fstab entry with `nofail` so a NAS problem cannot leave the VM
+  unbootable, and the Frigate compose bind repointed. `/config` and the SQLite
+  database deliberately stay on local disk.
+
+  Recording is event-driven: `continuous.days` and `motion.days` both 0, alerts
+  and detections retained 30 days. The doorbell carries
+  `preset-record-generic-audio-copy`, because the default `preset-record-generic`
+  ends in `-c copy -an` and would have silently dropped the audio the whole
+  E60/E62 effort existed to obtain. Verified in a written segment: doorbell is
+  `h264` plus `aac` 48 kHz mono, living room `h264` only (see E78).
+
+  **The trap, which cost the only real downtime: `virtiofsd died unexpectedly`.**
+  On Unraid, `/usr/local/sbin/virtiofsd` is not the binary, it is a 116 byte
+  wrapper that runs a PHP helper to rewrite libvirt's arguments and then execs
+  `/usr/bin/virtiofsd`. Its default options include `--syslog`, which is why
+  `/var/log/libvirt/qemu/<domain>-fs0-virtiofsd.log` is **empty** and libvirt only
+  reports the unhelpful `qemuVirtioFSSetupCgroup: virtiofsd died unexpectedly`.
+  The real error is in `/var/log/syslog`:
+  `Error entering sandbox: PivotRoot(EINVAL)`. virtiofsd's default sandbox uses
+  `pivot_root`, which fails on this mount topology.
+
+  Fix: create `/etc/libvirt/virtiofsd.opt` (Unraid reads it in place of its
+  built-in defaults, one option per line) containing `--syslog`,
+  `--sandbox=chroot` and `--announce-submounts`. `/etc/libvirt` is a btrfs loop
+  mount from `libvirt.img`, so it persists across reboots. Confirmed by running
+  `virtiofsd --sandbox=chroot --shared-dir=... --socket-path=...` by hand first:
+  it prints `Waiting for vhost-user socket connection...` instead of the sandbox
+  error.
+
+  **Operational note that will bite someone: once a manual `<filesystem>` device
+  is in the XML, edit that VM in Unraid's XML view only.** The Form view can drop
+  manual additions. A backup of the pre-change XML is on the flash drive.
