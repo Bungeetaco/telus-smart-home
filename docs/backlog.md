@@ -44,6 +44,11 @@ and evidence. Grouped by whether anything can actually be done about them.
   `ops/stack-watch.sh` but is untested shell that has already produced three
   false positives; its cron entry is not captured in the repo.
 
+- **E76** (open) - the doorbell's residual drops are the audio path stalling at
+  each session rotation: 14 per rotation with audio against 0.8 without,
+  measured by A/B on the same camera. Instrument the handover before changing
+  anything.
+
 **Blocked on hardware or a device this account does not have**
 
 - **E13**: validate the webrtc/srtp fallback path; needs an ADC camera that
@@ -2012,3 +2017,54 @@ entries are the mechanism that keeps it under review
   control API actually promise, and worth deciding whether it should be
   installed by a documented procedure rather than by hand. The cron entry lives
   in the maintainer's user crontab and is not captured anywhere in the repo.
+
+- **E76 (open) The doorbell's residual frame drops are the audio path stalling
+  at each session rotation, not sustained starvation and not normal noise.**
+  After E60 was fixed the doorbell still dropped 7 to 10 frames a minute with
+  audio consuming, steady over six hours. Two things were assumed about this and
+  both were wrong.
+
+  **It is not spread through the session. Every drop is at the handover.** Every
+  drop warning in the log falls between `proactive session rotation` and the new
+  session's first frame, for example rotation 12:40:18, drop 12:40:23, first
+  frame 12:40:24. About 14 frames, roughly 0.9 s of video, once per 165 s cycle.
+
+  **It is not the cost of rotation either.** A controlled A/B on the same camera,
+  same resolution, same rate, same build, switching only the audio knobs:
+
+  | | drops per rotation | share of frames |
+  |---|---|---|
+  | audio off, 15 min, 5 rotations | **0.8** | 0.05 percent |
+  | audio on | **~14** | 0.57 percent |
+
+  So the handover transient is inherent, but audio multiplies it about
+  seventeenfold. This is a real audio-attributable residual, not hardware or
+  cloud-relay noise, and it should not be written off as such.
+
+  **Probable mechanism, not yet confirmed.** The frame hold that bridges the
+  rotation gap already knows audio must stay ahead of video or ffmpeg stops
+  reading the video pipe, and it tops audio up on its own deadline. But it stops
+  the previous session's audio pump as its first act and the next session's pump
+  is not started until the hold has finished, deliberately, so that the two
+  writers to the audio pipe are mutually exclusive. If the audio timeline stops
+  advancing anywhere inside that serialization window, the muxer lead decays,
+  ffmpeg stops reading video, and the queue's 533 ms of tolerance at 15 fps
+  overflows. That is E60's mechanism confined to the handover.
+
+  **Do not guess at a fix.** The next step is instrumentation, not a change:
+  timestamp `_stop_audio_pump` returning, the hold's first silence write, the
+  new session's first video write, and the queue depth across that window. If
+  the lead does collapse there, the numbers will say so.
+
+  **Severity, honestly.** 0.57 percent against a 0.05 percent floor, bounded, not
+  growing over six hours, and invisible to viewers because the frame hold keeps
+  the publisher emitting. Worth fixing properly, not worth destabilising a system
+  that is finally healthy.
+
+  Two side findings worth keeping. The video drop path logs the first drop of a
+  session and then only every 150th, while `/control/status` accumulates across
+  sessions, so a session dropping 14 never reaches a second log line: **the log
+  understates the drop rate by design** and reading it alone suggests one drop
+  per rotation. And the living room camera's zero drops are not health, they are
+  slowness: at 5 fps the 4-frame queue floor holds 800 ms where the doorbell's
+  8-frame ceiling holds 533 ms, so it absorbs a handover the doorbell cannot.
