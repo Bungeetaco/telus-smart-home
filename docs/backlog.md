@@ -36,11 +36,9 @@ and evidence. Grouped by whether anything can actually be done about them.
   three modules. The config flow, the three services, the settings-backed
   platforms and every setup/teardown path are still verified by reading and
   `py_compile` alone.
-- **E68** (open): the E60/E62 pacing fix was measured against `-f null -`, so
-  the RTSP-muxer side of it is inferred rather than captured.
-- **E71** (open): E64's adaptive frame rate is argued from measurement and
-  pinned by tests, but has never been watched correcting a real resolution
-  change live. Five-minute check; not run because the bridge is mid-soak.
+- **E71** (open): E64's adaptive frame rate has never been watched reacting to
+  a real resolution change live. A five-minute operator check; the procedure,
+  now fully readable from `/control/status`, is in the entry.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -1800,21 +1798,29 @@ entries are the mechanism that keeps it under review
   as it should. A burst test that is too extreme tests the sanity range, not the
   settle window.
 
-- **E68 (open) The pacing fix was measured against `-f null -`, never a live
-  RTSP publish.** Every container measurement behind E60/E62 (the cadence
-  table, the queue sizing, the drop-to-video-only check) used a real ffmpeg
-  command line with `-f null -` as the output. That exercises the demuxers, the
-  encoder and the interleaver, which is where the stall lives, but it does not
-  exercise the RTSP muxer or MediaMTX's consumption of it.
+- **E68 (DONE) The pacing fix is confirmed against a live RTSP publish, not
+  only `-f null -`.** The original cadence sweep exercised the demuxers, the
+  encoder and the interleaver but not the RTSP muxer or MediaMTX's
+  consumption of it, so the muxer-target side of the pacing was inferred. The
+  same rig arithmetic (the real `FfmpegSink`, the real `write_silence_to`
+  deficit-vs-wallclock fill, a synthetic 15 fps feed, 900 frames per run) was
+  re-run inside the deployed container publishing a real RTSP ANNOUNCE into
+  the live MediaMTX on a scratch path:
 
-  So the muxer-target side of the pacing is **inferred, not captured**. This is
-  not a reason to doubt the fix: the defect reproduced exactly under the rig
-  (120 of 900 frames, matching the production table to the frame), which is the
-  strongest evidence available that the rig models the right thing. It is a
-  reason not to claim more than was tested. Re-running the cadence sweep with
-  `-f rtsp` into a scratch MediaMTX path would settle it; the obstacle is that
-  publishing to a real path means either racing the live publisher or standing
-  up a second MediaMTX, so it was not done under the live deployment.
+  | case | write_frame p50/p90/p99 (ms) | frames >66.7 ms of 900 |
+  |---|---|---|
+  | video-only control | 1.02 / 1.31 / 1.73 | 0 |
+  | the defect (0.5 s / 2.0 s) | 1.22 / 367.2 / 434.0 | **229** |
+  | shipped (0.05 s / 0.1 s) | 1.03 / 1.32 / 3.78 | **0** |
+
+  The conclusion is unchanged and now captured end to end: the defect cadence
+  stalls the video pipe against a real muxer target too (harder than against
+  `-f null -`: 229 of 900 against 120, which is the muxer's added
+  backpressure), and the shipped cadence eliminates the stalls entirely.
+  Stated limits: the rig used the software encoder (deliberately, so it could
+  not contend with the two live cameras' VAAPI sessions on the iGPU; the
+  stall under test lives in the demux/interleave/mux path, not the encoder)
+  and a 960x960 frame; the drop counts are the load-bearing figures.
 
 - **E69 (DONE) `/control/status` carries the DELIVERED rate beside the declared
   one.** `fps` is what ffmpeg was launched with; `measured_fps` is the bridge's
@@ -1865,8 +1871,16 @@ entries are the mechanism that keeps it under review
   size (which the existing `sink_wh` path would already handle on its own). If it
   turns out the rate does not move with the resolution setting, E64 is still
   correct for the restart-to-restart instability it was written for, but the
-  headline justification would need rewriting. Not run here: the bridge on the VM
-  is mid-soak for the E60/E62 audio validation and must not be disturbed.
+  headline justification would need rewriting.
+
+  Everything the check needs is now in place: `/control/status` carries
+  `measured_fps`, `rate_pending` and `duplicated_frame_warnings` (E69/E70),
+  so the whole sequence is readable from two status polls. The procedure: note
+  the camera's `fps`/`measured_fps` and its resolution, flip the camera's
+  **Live video resolution** select in Home Assistant, wait out one rotation
+  (under ~3 minutes) plus the 10 s settle, and read the log and status again;
+  then flip it back. The publisher rebuilds for the frame-size change either
+  way; the question is only whether `measured_fps` moves with it.
 
 - **E72 (DONE) The E64/E73 thresholds are pinned as values, not only as
   logic.** The rate tests drive the confirmation, hysteresis, storm-bound and
