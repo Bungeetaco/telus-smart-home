@@ -16,10 +16,12 @@ worse -- which is what these exist to make visible. CameraSolarPanelSensor joins
 them from the settings side rather than the diagnostics one (E39), and is
 expected to appear on NO camera on most accounts.
 
-The stream-health sensors (CameraStreamStateSensor, CameraDroppedFramesSensor)
-also attach to the camera devices, but read the bridge's own /control/status
-pipeline diagnostics rather than TELUS-side data -- a stream stuck reconnecting
-is otherwise only visible in the bridge's container logs. Their
+The stream-health sensors (CameraStreamStateSensor, CameraDroppedFramesSensor,
+CameraAudioStateSensor) also attach to the camera devices, but read the bridge's
+own /control/status pipeline diagnostics rather than TELUS-side data -- a stream
+stuck reconnecting is otherwise only visible in the bridge's container logs, and
+a stream whose audio decoder has died is not visible there either: every video
+signal stays green while the published audio is pure silence. Their
 StreamHealthCoordinator is shared with binary_sensor.py's bridge-connectivity
 entity via async_get_stream_health_coordinator.
 
@@ -54,6 +56,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
+from homeassistant.util import dt as dt_util
 
 from .bridge_client import bridge_get
 from .camera_settings_coordinator import (
@@ -98,6 +101,17 @@ SOLAR_PANEL_STATES = [SOLAR_PANEL_CONNECTED, SOLAR_PANEL_NOT_CONNECTED]
 # attribute.
 STREAM_STATES = ["connecting", "streaming", "reconnecting", "restart_deferred"]
 
+# The four states CameraAudioStateSensor can report. Pinned as named constants
+# for the same reason as SOLAR_PANEL_STATES/STREAM_STATES above, but note the
+# difference: unlike those two this vocabulary is NOT the bridge's -- it is
+# derived here, from `audio_consumed` plus whether `decoded_audio_frames` moved
+# between two polls. /control/status has no "is audio alive" field to read.
+AUDIO_NOT_CONSUMING = "not_consuming"
+AUDIO_NO_AUDIO_YET = "no_audio_yet"
+AUDIO_FLOWING = "flowing"
+AUDIO_STALLED = "stalled"
+AUDIO_STATES = [AUDIO_NOT_CONSUMING, AUDIO_NO_AUDIO_YET, AUDIO_FLOWING, AUDIO_STALLED]
+
 
 async def async_setup_entry(
     hass: core.HomeAssistant,
@@ -139,7 +153,13 @@ async def async_setup_entry(
 
     @core.callback
     def _add_stream_health_sensors() -> None:
-        """Create the two stream-health sensors for any camera id not seen before."""
+        """Create the stream-health sensors for any camera id not seen before.
+
+        All three are created for EVERY camera the bridge reports, including the
+        audio one for a camera that is not consuming audio -- see
+        CameraAudioStateSensor's docstring for why that is deliberate rather
+        than the conditional creation the diagnostics/solar sensors below use.
+        """
         new_ids = set(stream_health_coordinator.data or {}) - known_stream_ids
         if not new_ids:
             return
@@ -148,6 +168,7 @@ async def async_setup_entry(
         for camera_id in sorted(new_ids):
             entities.append(CameraStreamStateSensor(stream_health_coordinator, camera_id))
             entities.append(CameraDroppedFramesSensor(stream_health_coordinator, camera_id))
+            entities.append(CameraAudioStateSensor(stream_health_coordinator, camera_id))
         async_add_entities(entities)
 
     _add_stream_health_sensors()
@@ -649,6 +670,191 @@ class CameraDroppedFramesSensor(_StreamHealthEntity):
     @property
     def native_value(self) -> int:
         return int((self._status or {}).get("dropped_frames") or 0)
+
+
+class CameraAudioStateSensor(_StreamHealthEntity):
+    """Whether one camera's audio is actually flowing right now.
+
+    `not_consuming` (the bridge is not asked to consume this camera's audio),
+    `no_audio_yet` (it is, and not one frame has ever decoded), `flowing`
+    (the decoded-frame counter moved since the previous poll) or `stalled`
+    (it did not).
+
+    **Why a derived enum and not the raw counter.** `decoded_audio_frames` is
+    already a perfectly good `total_increasing` sensor -- and it would be
+    useless for the failure it exists to catch. The bridge's Opus decoder dying
+    mid-session (see aiortc_opus_patch.py) does not produce an error, a state
+    change or a dropped frame: the counter simply stops moving while `state`
+    stays `streaming` and `last_frame_at` stays fresh, and the camera publishes
+    silence. Home Assistant cannot trigger on "a number stopped changing" --
+    there is no such trigger -- so a counter turns a hard failure into
+    something a human has to notice on a graph, which is precisely how eleven
+    consecutive silent doorbell sessions went unnoticed. Comparing the counter
+    across polls here turns *stopped* into a state, which IS triggerable. The
+    raw count, the per-poll delta and the observed `audio_format` ride along as
+    attributes, so nothing the bridge reports is lost.
+
+    A binary "audio healthy" was the other candidate and is rejected for the
+    same reason CameraSolarPanelSensor is not a binary_sensor: there is no
+    device class for it, so it renders as a bare On/Off, and it would have to
+    fold "audio is switched off for this camera" and "audio is switched on and
+    dead" into the same Off -- collapsing exactly the distinction an operator
+    needs.
+
+    **Every camera gets one, consuming or not.** Audio consumption is currently
+    disabled on the live deployment (both `JANUS_REQUEST_AUDIO` and
+    `JANUS_CONSUME_AUDIO`, pending the bridge-side work), so today this reports
+    `not_consuming` everywhere. That is a real, honest, translated state, not a
+    broken entity -- and it is the state that answers "why is there no audio?"
+    for someone who did not know the knob was off. Creating the entity only for
+    consuming cameras (the rule the per-camera diagnostics and solar sensors
+    follow) would be wrong here for two reasons: entity creation is sticky, so
+    an entity that appears and disappears with a bridge env var breaks any
+    automation referencing it, and the alternative to appearing is a camera
+    with no audio entity at all, which reads as "audio is fine" exactly like
+    the gap this closes. The diagnostics/solar rule applies to questions the
+    hardware cannot answer at all (no battery, no solar); "audio is switched
+    off" is an answer.
+
+    A bridge too old to report `audio_consumed` gets `unknown` rather than a
+    fabricated `not_consuming`, the same degradation CameraStreamStateSensor
+    uses for a state vocabulary it does not know.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = AUDIO_STATES
+    _attr_icon = "mdi:waveform"
+
+    def __init__(self, coordinator: StreamHealthCoordinator, camera_id: str) -> None:
+        super().__init__(coordinator, camera_id, "audio_state")
+
+        # Everything below is bookkeeping for the across-polls comparison, and
+        # is mutated ONLY in _refresh_derived (called once per coordinator
+        # update). native_value/extra_state_attributes are properties Home
+        # Assistant may read any number of times per update, so deriving the
+        # state inside one of them would compare the counter against itself and
+        # report `stalled` for a perfectly healthy camera.
+        self._audio_state: str | None = None
+        self._previous_frames: int | None = None
+        self._frames_delta: int | None = None
+        self._last_audio_at: str | None = None
+        # The payload the comparison last advanced on, held by reference so the
+        # same poll can never be folded in twice (which would compare a counter
+        # against itself and read as `stalled`). Belt and braces next to the
+        # once-per-update contract of _handle_coordinator_update.
+        self._seen_payload: Any = None
+
+        self._refresh_derived()
+
+    @core.callback
+    def _handle_coordinator_update(self) -> None:
+        """Fold this poll into the derived state, then write it out."""
+        self._refresh_derived()
+        super()._handle_coordinator_update()
+
+    @core.callback
+    def _refresh_derived(self) -> None:
+        """Advance the comparison with this poll's counter.
+
+        Everything here is deliberately conservative about what counts as a
+        comparable poll, because a false `stalled` on a healthy camera would
+        make the whole entity un-automatable:
+
+        * A failed poll, or one the bridge did not answer (its control secret
+          not on the shared mount yet, normal for a few seconds after a bridge
+          restart), leaves the coordinator holding the PREVIOUS payload. That
+          identical data must not read as "the counter did not move" -- so the
+          remembered count and the derived state are both left untouched.
+        * A counter that went DOWN is the bridge process restarting (every
+          number in /control/status resets with it), not a stall; frames have
+          demonstrably arrived since that restart, so it reads `flowing`.
+        * The first comparable poll has nothing to compare against. A camera
+          already at zero is unambiguous (`no_audio_yet`), but one with frames
+          already on the clock is genuinely unknown for one poll interval, and
+          says so rather than guessing.
+        """
+        status = self._status
+        if (
+            status is None
+            or not self.coordinator.last_update_success
+            or self.coordinator.last_poll_ok is not True
+            # The same payload object twice is not a second observation.
+            or self.coordinator.data is self._seen_payload
+        ):
+            return
+        self._seen_payload = self.coordinator.data
+
+        if "audio_consumed" not in status:
+            # A bridge predating these fields. Not knowable, not fabricated.
+            self._audio_state = None
+            self._previous_frames = None
+            self._frames_delta = None
+            return
+
+        if not status.get("audio_consumed"):
+            self._audio_state = AUDIO_NOT_CONSUMING
+            # Dropped so that re-enabling audio (which restarts the bridge, and
+            # with it the counter) starts a fresh comparison instead of
+            # measuring across the gap.
+            self._previous_frames = None
+            self._frames_delta = None
+            return
+
+        frames = int(status.get("decoded_audio_frames") or 0)
+        previous = self._previous_frames
+        self._previous_frames = frames
+
+        if previous is None:
+            self._frames_delta = None
+            self._audio_state = AUDIO_NO_AUDIO_YET if frames == 0 else None
+            return
+
+        # A decrease is a counter reset, which makes the delta meaningless --
+        # report no delta rather than a negative one.
+        self._frames_delta = frames - previous if frames >= previous else None
+
+        if frames != previous:
+            self._audio_state = AUDIO_FLOWING if frames > 0 else AUDIO_NO_AUDIO_YET
+            if frames > 0:
+                self._last_audio_at = dt_util.utcnow().isoformat()
+        elif frames == 0:
+            self._audio_state = AUDIO_NO_AUDIO_YET
+        else:
+            self._audio_state = AUDIO_STALLED
+
+    @property
+    def native_value(self) -> str | None:
+        """The derived audio state, or None until it can honestly be told.
+
+        `stalled` reflects ONE poll window (30 s). Session rotation and a
+        reconnect are both long enough to span one, so an automation should
+        require the state to persist (`for:`) rather than fire on the first
+        sample -- see docs/ha-integration.md.
+        """
+        return self._audio_state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        status = self._status or {}
+        return {
+            "audio_consumed": status.get("audio_consumed"),
+            # The raw lifetime counter, so the underlying number is never
+            # hidden behind the derivation.
+            "decoded_audio_frames": status.get("decoded_audio_frames"),
+            # How far it moved over the last poll interval; None on the first
+            # poll, on a poll the bridge did not answer, and across a counter
+            # reset.
+            "decoded_audio_frames_last_poll": self._frames_delta,
+            # Null until this camera has decoded a frame -- the bridge reports
+            # what it OBSERVED, never the format the publisher was launched
+            # with, so a value here is proof audio decoded at least once.
+            "audio_format": status.get("audio_format"),
+            "dropped_audio_frames": status.get("dropped_audio_frames"),
+            # When the counter was last seen moving, as observed by this poller
+            # (so it starts empty after a Home Assistant restart, not at the
+            # bridge's own first frame).
+            "last_audio_at": self._last_audio_at,
+        }
 
 
 def _scalar_or_none(value: Any) -> str | float | int | None:

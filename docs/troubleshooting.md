@@ -341,10 +341,10 @@ then goes dark is the frame-hold expiring on a genuinely offline camera.
 Per-camera health (`state`, `consecutive_failures`, `last_frame_at`, `fps`,
 `dropped_frames`, `last_error`) is available from the bridge's
 `GET /control/status` endpoint (same auth as the other control endpoints) —
-and, with the HA integration installed, as entities: each camera carries a
-**Stream state** and a **Dropped frames** diagnostic sensor, and a
-**Camera bridge** connectivity sensor says whether the bridge is answering at
-all, so this diagnosis usually needs no curl (see
+and, with the HA integration installed, as entities: each camera carries
+**Stream state**, **Dropped frames** and **Audio state** diagnostic sensors,
+and a **Camera bridge** connectivity sensor says whether the bridge is
+answering at all, so this diagnosis usually needs no curl (see
 [ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity)).
 `dropped_frames` is the lifetime count of frames the ingest queue discarded
 because the consumer fell behind — a steadily climbing total on one camera says
@@ -421,6 +421,15 @@ decoded a single audio frame from this camera — the published track is silence
 the sink generated, not audio the camera sent. If the counter is climbing
 between two polls, audio *is* flowing and the problem is downstream.
 
+With the HA integration installed you do not have to do that comparison by
+hand: each camera carries an **Audio state** sensor that does exactly this
+across its 30 s polls and reports `not_consuming` / `no_audio_yet` / `flowing`
+/ `stalled`, with the raw `decoded_audio_frames`, the per-poll delta and
+`audio_format` as attributes (see
+[ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity)).
+`not_consuming` there is the answer to the two-knob question above; `stalled`
+is the decoder-death case below.
+
 If `audio_consumed` is `true` and there is still no sound:
 
 - **A malformed packet may have killed the decoder thread.** aiortc's Opus
@@ -446,8 +455,10 @@ If `audio_consumed` is `true` and there is still no sound:
 - **Audio dying is not automatically recovered.** The frame-silence watchdog is
   video-only, so a camera whose audio stops still reports `state: "streaming"`
   with a fresh `last_frame_at` and nothing reconnects. It is *detectable* —
-  `decoded_audio_frames` stops advancing between polls — but the recovery is
-  still manual, and restarting the container is the blunt version of it. Watch
+  `decoded_audio_frames` stops advancing between polls, which is what the HA
+  **Audio state** sensor reports as `stalled` and what an automation can
+  trigger on — but the recovery is still manual, and restarting the container
+  is the blunt version of it. Watch
   `dropped_audio_frames` separately for a consumer falling behind; a stream that
   simply went quiet drops nothing.
 

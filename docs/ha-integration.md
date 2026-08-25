@@ -526,7 +526,7 @@ Two screens (`async_step_init` → `async_step_modes`):
 | `switch` | camera config options + bridge automation rules + bridge cameras + arming devices | Skybell binary-chime on/off; **video automation rule** pause/resume; camera **privacy mode**, **indoor chime**, **outdoor tone**, **status LED** and the three **TELUS-app notification** toggles (motion / button press / smart chime); per-phone **Disarm alarm on arrival**; **Panel Bluetooth pairing** (all bridge-backed) |
 | `select` | camera config options + bridge cameras + arming devices | Skybell **adjustable chime** volume and **motion sensitivity**; camera **wired chime type**, **TELUS-app notification format** and **live video resolution**; per-phone **enrolled partition**; **Bluetooth disarm window** (all but the Skybell options bridge-backed) |
 | `climate` | library thermostats | HVAC mode (heat/cool/auto/fan-only/off), setpoints, fan mode, humidity readout |
-| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status; per-camera **Stream state** and **Dropped frames** stream-health diagnostics (bridge-backed) |
+| `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status; per-camera **Stream state**, **Dropped frames** and **Audio state** stream-health diagnostics (bridge-backed) |
 | `camera` | camera bridge | Live RTSP stream + on-demand snapshots (bridge-backed) |
 | `event` | camera bridge | Per-camera video-clip events, a system-wide activity event, and a per-doorbell **button press** event (device class `doorbell`) — all bridge-backed |
 
@@ -632,8 +632,8 @@ Smart Home Integration"** service device rather than any Alarm.com device; the
 with the activity event entity; the per-camera diagnostic (signal strength
 / battery / device status) and solar-panel sensors on the camera devices (see
 [Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities));
-and the per-camera **Stream state** and **Dropped frames** stream-health
-sensors, also on the camera devices (see
+and the per-camera **Stream state**, **Dropped frames** and **Audio state**
+stream-health sensors, also on the camera devices (see
 [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)).
 The two covered here:
 
@@ -685,7 +685,7 @@ a real error.
 | `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, doorbell-press event entities, activity-feed sensor |
 | `AutomationRulesCoordinator` (switch.py) | `/control/automations` | 300 s | automation-rule switches |
 | `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors, and *which cameras are doorbells* (creation gate only — the doorbell event entity itself rides the activity coordinator) |
-| `StreamHealthCoordinator` (sensor.py) | `/control/status` | 30 s | per-camera stream-health sensors, camera-bridge connectivity binary sensor |
+| `StreamHealthCoordinator` (sensor.py) | `/control/status` | 30 s | per-camera stream-health sensors (stream state, dropped frames, audio state), camera-bridge connectivity binary sensor |
 | `TalkMetricsCoordinator` (sensor.py) | `/control/metrics` | 120 s | talkdown status/failure sensors |
 
 The camera-list interval (60 s) is kept below the bridge's own camera-discovery
@@ -1256,18 +1256,20 @@ automation:
 
 ## Stream health and bridge connectivity
 
-Three entities surface the bridge's own video-pipeline diagnostics (the
+Four entities surface the bridge's own pipeline diagnostics (the
 [`GET /control/status`](control-api.md#get-controlstatus) payload), so a stream
-stuck reconnecting — or a bridge container that is down altogether — is visible
-in Home Assistant instead of only in the bridge's container logs.
+stuck reconnecting, a camera publishing silence, or a bridge container that is
+down altogether is visible in Home Assistant instead of only in the bridge's
+container logs.
 
 | Entity | Platform | Device | State |
 | --- | --- | --- | --- |
 | **Stream state** | `sensor` (enum, diagnostic) | the camera device | `connecting`, `streaming`, `reconnecting`, or `restart_deferred` |
 | **Dropped frames** | `sensor` (`total_increasing`, diagnostic) | the camera device | lifetime count of frames the bridge dropped for that camera |
+| **Audio state** | `sensor` (enum, diagnostic) | the camera device | `not_consuming`, `no_audio_yet`, `flowing`, or `stalled` |
 | **Camera bridge** | `binary_sensor` (connectivity, diagnostic) | the integration service device | **on** while the last `/control/status` poll got an answer out of the bridge |
 
-All three ride one `StreamHealthCoordinator` polling `/control/status` every
+All four ride one `StreamHealthCoordinator` polling `/control/status` every
 `STREAM_HEALTH_POLL_INTERVAL_SECONDS` (30 s). That interval is short where the
 TELUS-backed coordinators are deliberately slow, and safely so: the route
 answers from an in-memory dict the bridge's camera loops maintain themselves,
@@ -1299,6 +1301,81 @@ trigger on it. It resets to 0 when the bridge restarts, which the state class
 treats as a counter reset rather than a spike. The bridge folds each ~165 s
 session's counter into the total as the session **ends**, so the value can lag
 the live session's drops by up to one rotation.
+
+**Audio state** answers "is this camera's audio flowing right now, or is it
+dead?" — the one question the rest of `/control/status` cannot answer, because
+the bridge's frame-silence watchdog is video-only: a camera whose audio decoder
+has died still reports `state: streaming` with a fresh `last_frame_at` while it
+publishes pure silence. Its state is **derived here**, not read from a field:
+the integration remembers `decoded_audio_frames` between polls and reports
+
+| State | Meaning |
+| --- | --- |
+| `not_consuming` | the bridge is not consuming this camera's audio at all (`audio_consumed: false` — both `JANUS_REQUEST_AUDIO` and `JANUS_CONSUME_AUDIO` must name the camera) |
+| `no_audio_yet` | audio is being consumed and the counter is still at zero: not one frame has ever decoded |
+| `flowing` | the counter moved since the previous poll |
+| `stalled` | it did not — audio was flowing and has stopped |
+| unknown | no comparison is possible yet: the first poll of a camera that already has frames on the clock, or a bridge too old to report the audio fields |
+
+Why a derived enum rather than a plain `decoded_audio_frames` counter: Home
+Assistant has no "this number stopped changing" trigger, so a counter makes the
+failure something a human has to notice on a graph — and the failure being
+caught is exactly a counter that quietly stops. Comparing across polls turns
+*stopped* into a state, which an automation can trigger on. The raw numbers are
+not lost; they ride along as attributes: `audio_consumed`,
+`decoded_audio_frames`, `decoded_audio_frames_last_poll` (the delta),
+`audio_format` (`null` until a frame has genuinely decoded — a value here is
+proof audio decoded at least once), `dropped_audio_frames`, and `last_audio_at`
+(when this poller last saw the counter move; empty until it does, and reset by a
+Home Assistant restart).
+
+**Every camera gets an Audio state entity, consuming or not.** Audio
+consumption is currently disabled on the live deployment, so today every camera
+reads `not_consuming` — a real answer ("audio is switched off for this camera"),
+which is what someone asking "why is there no sound?" needs, and it becomes
+`flowing` with no Home Assistant restart when the knobs are turned back on. The
+conditional creation the per-camera diagnostics and solar-panel sensors use does
+not apply: entity creation is sticky, so an entity that appears and vanishes
+with a bridge env var breaks any automation naming it, and a camera with no
+audio entity at all reads as "fine" — the very gap this closes.
+
+Reading the state honestly: `stalled` reflects **one poll window** (30 s).
+Session rotation and a reconnect can each span one, so trigger on the state
+*persisting*, not on the first sample:
+
+```yaml
+automation:
+  - alias: Doorbell audio went silent
+    trigger:
+      - platform: state
+        entity_id: sensor.<camera>_audio_state
+        to: stalled
+        for: "00:05:00"
+    action:
+      - service: notify.mobile_app_<device>
+        data:
+          title: Doorbell audio is dead
+          message: >-
+            Audio stopped at
+            {{ state_attr('sensor.<camera>_audio_state', 'last_audio_at') }}
+            after
+            {{ state_attr('sensor.<camera>_audio_state', 'decoded_audio_frames') }}
+            frames (format
+            {{ state_attr('sensor.<camera>_audio_state', 'audio_format') }}).
+            Video is {{ states('sensor.<camera>_stream_state') }}.
+```
+
+Add `no_audio_yet` as a second `to:` (with a longer `for:`) to catch a camera
+that comes up consuming audio and never decodes a single frame — the same
+condition as `audio_consumed: true` with `audio_format: null` on the raw
+endpoint.
+
+A stall is deliberately **not** reported when the coordinator could not reach
+the bridge: an unanswered poll leaves the coordinator holding the previous
+payload, and comparing that identical data against itself would read as "the
+counter did not move". The comparison also treats a counter that went *down* as
+a bridge restart (every number in `/control/status` resets with the process),
+not a stall.
 
 **Camera bridge** reports whether the local bridge container is answering its
 control API at all: **off** means the container is down, mid-restart, or its

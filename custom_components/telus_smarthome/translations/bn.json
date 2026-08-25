@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "বাদ পড়া ফ্রেম"
+            },
+            "camera_audio_state": {
+                "name": "অডিওর অবস্থা",
+                "state": {
+                    "not_consuming": "অডিও নেওয়া হচ্ছে না",
+                    "no_audio_yet": "এখনও কোনো অডিও নেই",
+                    "flowing": "অডিও আসছে",
+                    "stalled": "অডিও থেমে গেছে"
+                }
             }
         },
         "binary_sensor": {

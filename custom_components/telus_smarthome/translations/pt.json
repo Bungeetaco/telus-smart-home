@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "Fotogramas descartados"
+            },
+            "camera_audio_state": {
+                "name": "Estado do áudio",
+                "state": {
+                    "not_consuming": "Áudio não consumido",
+                    "no_audio_yet": "Ainda sem áudio",
+                    "flowing": "A receber áudio",
+                    "stalled": "Áudio parado"
+                }
             }
         },
         "binary_sensor": {

@@ -137,6 +137,15 @@
             },
             "camera_dropped_frames": {
                 "name": "ڈراپ شدہ فریم"
+            },
+            "camera_audio_state": {
+                "name": "آڈیو کی حالت",
+                "state": {
+                    "not_consuming": "آڈیو وصول نہیں کیا جا رہا",
+                    "no_audio_yet": "ابھی تک کوئی آڈیو نہیں",
+                    "flowing": "آڈیو آ رہا ہے",
+                    "stalled": "آڈیو رک گیا"
+                }
             }
         },
         "binary_sensor": {
