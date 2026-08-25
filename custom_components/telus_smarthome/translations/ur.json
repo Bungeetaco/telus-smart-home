@@ -39,7 +39,7 @@
             "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
             "unknown": "[%key:common::config_flow::error::unknown%]",
             "invalid_otp": "غلط ون-ٹائم پاس ورڈ۔",
-            "telus_sso_error": "TELUS کے سنگل سائن-آن عمل نے غیر متوقع نتیجہ دیا۔ اس کا عام طور پر مطلب ہے کہ TELUS نے سرور کی جانب کچھ تبدیل کیا ہے — غلط پاس ورڈ نہیں۔"
+            "telus_sso_error": "TELUS کے سنگل سائن-آن عمل نے غیر متوقع نتیجہ دیا۔ اس کا عام طور پر مطلب ہے کہ TELUS نے سرور کی جانب کچھ تبدیل کیا ہے، غلط پاس ورڈ نہیں۔"
         },
         "abort": {
             "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",

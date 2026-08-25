@@ -127,7 +127,7 @@ unpair_arming_device:
   description: >-
     Remove a paired phone from the alarm panel's Bluetooth disarming, so it can
     no longer disarm the alarm on approach. THIS CANNOT BE UNDONE FROM HOME
-    ASSISTANT — re-pairing needs physical access to both the phone and the
+    ASSISTANT: re-pairing needs physical access to both the phone and the
     panel. Takes one phone at a time on purpose; there is no unpair-all.
   fields:
     entity_id:

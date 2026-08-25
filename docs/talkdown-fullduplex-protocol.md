@@ -1,10 +1,10 @@
-# Doorbell talkdown — full-duplex protocol (ADC-VDB750 / TELUS SmartHome)
+# Doorbell talkdown: full-duplex protocol (ADC-VDB750 / TELUS SmartHome)
 
 Definitive, implementation-grade reference for the doorbell two-way-audio
 ("talkdown") path used by this bridge. Optimized for a future AI agent picking
 this up cold: everything needed to understand, extend, or debug the feature is
 here, with provenance. **The protocol below is confirmed end-to-end against a
-real packet capture** (not inferred) — see *Provenance*. No further live probing
+real packet capture** (not inferred); see *Provenance*. No further live probing
 is needed for the protocol itself.
 
 ## TL;DR
@@ -12,7 +12,7 @@ is needed for the protocol itself.
 To make the doorbell speak:
 
 1. Mint a legacy **MWS SessionToken** (`mobile.alarm.com`) off the existing
-   website session — `mobile_auth.MobileSession` / `mint_if_stale`.
+   website session: `mobile_auth.MobileSession` / `mint_if_stale`.
 2. **`GetDoorbellCameraList`** → the `<cli>` element already carries the
    ready-to-use per-session upstream-audio PUT URLs, the Digest credentials, and
    `did`. No separate "open stream" call is needed first.
@@ -31,15 +31,15 @@ orchestration) → `control_server.py` (`POST /control/cameras/{id}/talk`).
 ## Why the "obvious" paths do NOT work for this doorbell
 
 - **Website REST/Janus path** (what the rest of the bridge uses for *video*):
-  it carries no **upstream** audio — `liveVideoHighestResSources` returns no
+  it carries no **upstream** audio: `liveVideoHighestResSources` returns no
   talk URL of any kind (it has no `audioUpStreamUrl` attribute; see
   [alarm-com-api.md](alarm-com-api.md) §1.4.1 for the real attribute set). Dead
   end for talk. Note this says nothing about *downstream* audio, which that
-  path does offer when asked — backlog E53.
+  path does offer when asked; backlog E53.
 - **`GetLiveVideoStream` `<webrtc>`/`<srtp>` endpoints** (the app's path for
   newer ADC cameras): the VDB750 returns **only `<rtsp>`** (video + listen),
   `SupportsWebRTC=false`, `StreamProtocol=0` (RTSP). So `talk_webrtc.py` /
-  `talk_srtp.py` **do not apply to this doorbell** — they remain in the tree for
+  `talk_srtp.py` **do not apply to this doorbell**: they remain in the tree for
   other/newer ADC cameras and are the fallback path in `talk.py`, but for the
   VDB750 the full-duplex path is the only one that works.
 - The VDB750 is a SkyBell-lineage RTSP/OpenEye device. Its upstream audio is a
@@ -58,14 +58,14 @@ orchestration) → `control_server.py` (`POST /control/cameras/{id}/talk`).
 | LAN IP | `<doorbell-ip>` (private VLAN, same LAN as the bridge `<bridge-ip>`) |
 | Capability flags | `susa=true` (upstream audio), `sdsa=true` (downstream audio), `sfd=true` (full duplex), `StreamProtocol=0` (RTSP), `SupportsWebRTC=false` |
 
-## Step 2 — `GetDoorbellCameraList` (`<gdclr>`), the key call
+## Step 2: `GetDoorbellCameraList` (`<gdclr>`), the key call
 
 POST form-urlencoded to `https://mobile.alarm.com/MobileServlet/SubmitRequest.aspx`
 with `Action=GetDoorbellCameraList`, the full BaseTokenRequest envelope
 (`SessionToken`, `CustomerId`, device fields incl. `Haiku`, and `SeamlessLoginToken`
-when present — see `mws_client._base_token_form`), plus `MaxHeight`/`MaxWidth`.
+when present; see `mws_client._base_token_form`), plus `MaxHeight`/`MaxWidth`.
 
-**Responses are gzip WITHOUT a `Content-Encoding` header** — gunzip manually
+**Responses are gzip WITHOUT a `Content-Encoding` header**: gunzip manually
 (`mobile_auth.read_body_text` handles this). XML fields are **attributes**, not
 child text. `TokenStatus` is attribute **`ts`** (not `TokenStatus`); success is
 `ts==0`. Error is `em`.
@@ -100,21 +100,21 @@ Real response shape (secrets redacted; one `<cli>` per doorbell under `<dcl>`):
 | `UnitId` | account/unit id (`<unit-id>`) | forms `global_device_id` |
 | `l` | stream username (`vieweruser`) | HTTP Digest username |
 | `p` | **per-session stream password** | HTTP Digest password |
-| `uae` | upstream PUT URL — **cloud relay** | WAN fallback (carries `?camera_id=` when relayed) |
-| `duae` | upstream PUT URL — **direct/LAN** | **bridge's primary** (on-LAN with doorbell) |
-| `luae` | upstream PUT URL — **local/LAN** | LAN alternate |
-| `puae` | upstream PUT URL — **public/WAN** | WAN (public IP) |
+| `uae` | upstream PUT URL, **cloud relay** | WAN fallback (carries `?camera_id=` when relayed) |
+| `duae` | upstream PUT URL, **direct/LAN** | **bridge's primary** (on-LAN with doorbell) |
+| `luae` | upstream PUT URL, **local/LAN** | LAN alternate |
+| `puae` | upstream PUT URL, **public/WAN** | WAN (public IP) |
 | `re`/`dre`/`lre`/`pre` | downstream RTSP (cloud/direct/local/public) | video + LISTEN audio (not talkdown) |
 | `susa` | supports upstream audio | gate: only attempt talkdown if true |
 | `sfd` | supports full duplex | informational |
 | `sid` / `cstet` | session token / expiry timestamp | session lifetime bound |
 
-**Key insight:** `GetDoorbellCameraList` itself mints a stream session — the port
+**Key insight:** `GetDoorbellCameraList` itself mints a stream session: the port
 (e.g. `41925`) is **ephemeral/per-session** and the password `p` is
 **per-session**. Never persist them across restarts. The bridge reuses a
-fetched result only within `TALK_DOORBELL_CACHE_TTL_S` (60 s) across talks —
+fetched result only within `TALK_DOORBELL_CACHE_TTL_S` (60 s) across talks:
 observed evidence shows the session is not per-talk in practice (the same
-port served 12+ hours), and a stale hit self-corrects via renegotiation — see
+port served 12+ hours), and a stale hit self-corrects via renegotiation; see
 backlog E16.
 
 Parser: `mws_client.parse_doorbell_camera_list` → per-doorbell dict with
@@ -122,18 +122,18 @@ Parser: `mws_client.parse_doorbell_camera_list` → per-doorbell dict with
 `stream_password`, `did`, `global_device_id`, `supports_upstream_audio`, etc. It
 is unit-tested against the real capture (see *Provenance*).
 
-## Step 3 — `StartFullDuplex`
+## Step 3: `StartFullDuplex`
 
 POST `Action=StartFullDuplex` + envelope + `DeviceId=<did>` (no `ForDevice`).
 Response: `<sfdr ts="0" dsl="false" s="true" crs="0"/>`. **Success = `ts==0` AND
 `s=="true"`.** This only arms the mic path; it returns no URL (the URLs came from
 step 2). `mws_client.start_full_duplex`.
 
-## Step 4 — the PutAudioStream PUT (the actual audio)
+## Step 4: the PutAudioStream PUT (the actual audio)
 
 Transport: `talk_fullduplex.stream_talkdown(put_url, password, audio_source, *, username, ...)`.
 
-- **Method** `PUT`, repeated — **one small audio chunk per request** on a single
+- **Method** `PUT`, repeated: **one small audio chunk per request** on a single
   keep-alive TCP connection (libsoup-style). The bridge sends 40 ms (320 B)
   chunks and paces at real time.
 - **Auth: HTTP Digest**, MD5, `qop=auth`, `nc` incrementing per request.
@@ -145,14 +145,14 @@ Transport: `talk_fullduplex.stream_talkdown(put_url, password, audio_source, *, 
   shell to ffmpeg (`-ac 1 -ar 8000 -f mulaw`, command built by
   `_ffmpeg_args`; streaming encode by default, `TALK_STREAMING_ENCODE`), so
   **any input format works** (WAV, MP3, TTS, a music file). 8 kHz mono µ-law
-  is telephone-grade — music plays but sounds lo-fi; that is a codec limit of
+  is telephone-grade: music plays but sounds lo-fi; that is a codec limit of
   the doorbell, not a bug.
 - **TLS:** the doorbell serves HTTPS with a **self-signed cert**, so CA
   verification cannot apply. The PUT connection uses an unverified TLS context
   with the device certificate **pinned by SHA-256**
   (`TALK_DEVICE_CERT_SHA256` / `TALK_TLS_PIN_MODE`, default `warn`) on the
-  device-terminated endpoint kinds (direct/local/public); the cloud relay — a
-  different host with its own CA-signed certificate — is never pinned and
+  device-terminated endpoint kinds (direct/local/public); the cloud relay (a
+  different host with its own CA-signed certificate) is never pinned and
   stays unverified (`ssl=False`). See backlog E12.
 - **User-Agent** sent by the app: `GStreamer souphttpclientsink libsoup/3.6.0`
   (the bridge mirrors it).
@@ -164,9 +164,9 @@ The bridge is on the doorbell's LAN, so it prefers `duae`/`luae` (direct, no
 relay). Order is `config.TALK_PUT_ENDPOINT_ORDER = (direct, local, public, cloud)`
 (`talk._select_put_url`). Off-LAN the app uses `puae` (public IP) or the cloud
 relay `uae` (which appends a `?camera_id=<token>` routing token); everything else
-— Digest, µ-law body, chunking — is identical. Confirmed by a cellular capture.
+ (Digest, µ-law body, chunking) is identical. Confirmed by a cellular capture.
 
-## Step 5 — teardown
+## Step 5: teardown
 
 POST `Action=EndLiveStream` + envelope + `DeviceId=<did>&ForDevice=0`. Response
 `<elsr ts="0" s="true" he="false"/>`. This is the teardown the app actually
@@ -189,7 +189,7 @@ it best-effort in a `finally` and always removes the spooled temp clip.
   `TALK_STREAM_LOOKUP_TIMEOUT_S`; the streaming deadline derives from the
   audio length (clip + margin) rather than a fixed timeout;
   `TALK_SESSION_TIMEOUT_S` caps the webrtc/srtp **fallback** path only;
-- **no secrets logged** (password, SessionToken, nonce) — only non-secret routing
+- **no secrets logged** (password, SessionToken, nonce); only non-secret routing
   facts (endpoint kind, chunk/byte counts, host).
 
 Feature is **enabled by default** (`config.TALKDOWN_ENABLED`); the control route
@@ -198,7 +198,7 @@ caller asks for it.
 
 ## How to test (once enabled)
 
-The endpoint is fully modular — it plays whatever audio you point it at. Creds are
+The endpoint is fully modular: it plays whatever audio you point it at. Creds are
 NOT supplied here; the bridge mints its own MWS session from the TELUS credentials
 that already live in Home Assistant (see repo README).
 
@@ -215,13 +215,13 @@ curl -s -X POST http://127.0.0.1:8199/control/cameras/<unit-id>-<did>/talk \
 Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
 `docs/talkdown-DEPLOY.md`.
 
-## Provenance (how this was recovered — for auditing the claims)
+## Provenance (how this was recovered, for auditing the claims)
 
 - App: `com.alarm.alarmmobile.android.telus` 5.10.7, jadx-decompiled. The MWS host
   and obfuscated strings were decoded via the app's `hi1.b` Java-`Random` XOR.
 - Control plane + audio transport captured by frida gst/soup hooks on an **arm64**
   Android emulator on an Apple Silicon Mac (x86 emulators can't inject frida into the
-  arm64-translated app — "need arm64 Gadget"). A decrypted HTTP capture (friTap +
+  arm64-translated app: "need arm64 Gadget"). A decrypted HTTP capture (friTap +
   the app's TLS keys) contains the exact `GetDoorbellCameraList` `<gdclr>`,
   `StartFullDuplex` → `<sfdr>`, and `EndLiveStream` → `<elsr>` exchanges quoted
   above, plus (from a separate Mac capture) the `PutAudioStream` Digest PUT of
@@ -238,7 +238,7 @@ Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
   bridge reuses a fetched `GetDoorbellCameraList` result only within
   `TALK_DOORBELL_CACHE_TTL_S` (60 s), self-correcting on a stale hit via
   renegotiation (backlog E16).
-- Digest challenges — including rotated/stale nonces mid-stream — are absorbed
+- Digest challenges (including rotated/stale nonces mid-stream) are absorbed
   by aiohttp's `DigestAuthMiddleware`; a second consecutive raw `401`
   escalates to an in-place reconnect. See backlog E7/E11/E21.
 - Live-verified  (see "Live verification" section below): plays at the
@@ -286,7 +286,7 @@ Findings:
 
 ## Enhancement backlog
 
-Every planned improvement, deferred idea, blocked item, and settled question —
-for this feature and for the adjacent surfaces the project has grown into —
+Every planned improvement, deferred idea, blocked item, and settled question,
+for this feature and for the adjacent surfaces the project has grown into,
 lives in [backlog.md](backlog.md), with stable `E<n>` IDs and the evidence
 behind each status.

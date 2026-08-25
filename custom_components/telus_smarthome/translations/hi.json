@@ -39,7 +39,7 @@
             "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
             "unknown": "[%key:common::config_flow::error::unknown%]",
             "invalid_otp": "अमान्य वन-टाइम पासवर्ड।",
-            "telus_sso_error": "TELUS सिंगल साइन-ऑन प्रक्रिया ने कुछ अप्रत्याशित लौटाया। इसका सामान्यतः मतलब है कि TELUS ने सर्वर-साइड कुछ बदला है — गलत पासवर्ड नहीं है।"
+            "telus_sso_error": "TELUS सिंगल साइन-ऑन प्रक्रिया ने कुछ अप्रत्याशित लौटाया। इसका सामान्यतः मतलब है कि TELUS ने सर्वर-साइड कुछ बदला है, गलत पासवर्ड नहीं है।"
         },
         "abort": {
             "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",

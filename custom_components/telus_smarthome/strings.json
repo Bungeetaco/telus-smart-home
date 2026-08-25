@@ -39,7 +39,7 @@
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
       "invalid_otp": "Invalid one-time password.",
-      "telus_sso_error": "The TELUS single sign-on flow returned something unexpected. This usually means TELUS changed something server-side — not a wrong password."
+      "telus_sso_error": "The TELUS single sign-on flow returned something unexpected. This usually means TELUS changed something server-side, not a wrong password."
     },
     "abort": {
       "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",

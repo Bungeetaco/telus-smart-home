@@ -39,7 +39,7 @@
             "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
             "unknown": "[%key:common::config_flow::error::unknown%]",
             "invalid_otp": "অবৈধ ওয়ান-টাইম পাসওয়ার্ড।",
-            "telus_sso_error": "TELUS সিঙ্গেল সাইন-অন প্রক্রিয়া অপ্রত্যাশিত কিছু ফেরত দিয়েছে। এর সাধারণ অর্থ হলো TELUS সার্ভার-সাইডে কিছু পরিবর্তন করেছে — ভুল পাসওয়ার্ড নয়।"
+            "telus_sso_error": "TELUS সিঙ্গেল সাইন-অন প্রক্রিয়া অপ্রত্যাশিত কিছু ফেরত দিয়েছে। এর সাধারণ অর্থ হলো TELUS সার্ভার-সাইডে কিছু পরিবর্তন করেছে, ভুল পাসওয়ার্ড নয়।"
         },
         "abort": {
             "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",

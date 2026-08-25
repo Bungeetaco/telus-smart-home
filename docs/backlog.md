@@ -1,12 +1,12 @@
 # Enhancement backlog
 
 The project's single list of planned improvements, deferred ideas, and settled
-questions — for the talkdown feature where it began, and for every adjacent
+questions: for the talkdown feature where it began, and for every adjacent
 surface the project has since grown into (camera settings, arming devices,
 bypass, the bridge and integration themselves).
 
 Standing practice: **every known gap or potential improvement, however minor,
-is logged here** rather than dropped — so a future agent (or the maintainer)
+is logged here** rather than dropped, so a future agent (or the maintainer)
 can pick it up. "Not implemented" means "not yet," never "unwanted." Add an
 entry whenever something is deferred, simplified, or noticed in passing, and
 when an entry is closed, keep it: a DONE entry's evidence is what stops the
@@ -15,7 +15,7 @@ references used across the docs and commit history.
 
 Entry statuses: **open** (not started), **DONE** (shipped, entry records the
 evidence), **BLOCKED** (needs hardware/access this account does not have),
-**CLOSED — not achievable** (proven impossible, entry records the proof), and
+**CLOSED: not achievable** (proven impossible, entry records the proof), and
 **DECIDED** (a deliberate keep-as-is with reasoning).
 
 ## Open items at a glance
@@ -25,46 +25,46 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 **Blocking, and actionable now**
 
-- **E62 / E60** — fixed in the bridge, **awaiting live validation**. Audio
+- **E62 / E60**: fixed in the bridge, **awaiting live validation**. Audio
   consumption took the doorbell off the air after ~14 minutes while
   `/control/status` reported `streaming` throughout. Four changes shipped: audio
   pacing at half the muxer lead, a time-based video queue, a wedged audio pipe
   degrading to video-only, and a bounded video drain that makes "publishing to
   nowhere" detectable. Validation is a multi-session soak with audio enabled
   **on the doorbell only**, watching the four signals listed at the end of E62.
-- **E65** (open, minor) — the MediaMTX publish password is passed on ffmpeg's
+- **E65** (open, minor): the MediaMTX publish password is passed on ffmpeg's
   argv, so it shows in `docker top`. Loopback-scoped, but avoidable.
-- **E66** (open) — the integration now has a test harness (E63), but it covers
+- **E66** (open): the integration now has a test harness (E63), but it covers
   two modules. The config flow, the three services, the settings-backed
   platforms and every setup/teardown path are still verified by reading and
   `py_compile` alone.
-- **E68** (open) — the E60/E62 pacing fix was measured against `-f null -`, so
+- **E68** (open): the E60/E62 pacing fix was measured against `-f null -`, so
   the RTSP-muxer side of it is inferred rather than captured.
-- **E72** (open) — the E64 thresholds are pinned as logic but not as values;
+- **E72** (open): the E64 thresholds are pinned as logic but not as values;
   two of the shipped constants can be set to self-defeating values with every
   suite still green.
-- **E71** (open) — E64's adaptive frame rate is argued from measurement and
+- **E71** (open): E64's adaptive frame rate is argued from measurement and
   pinned by tests, but has never been watched correcting a real resolution
   change live. Five-minute check; not run because the bridge is mid-soak.
-- **E69 / E70** (open, minor) — `/control/status` reports the declared frame
+- **E69 / E70** (open, minor): `/control/status` reports the declared frame
   rate but not the measured one, and ffmpeg's `frames duplicated` warning is
   logged but never counted. Both are observability for the rate, not the rate
   itself.
 
 **Blocked on hardware or a device this account does not have**
 
-- **E13** — validate the webrtc/srtp fallback path; needs an ADC camera that
+- **E13**: validate the webrtc/srtp fallback path; needs an ADC camera that
   offers those endpoints.
-- **E20** — the audio-conditioning chain is tuned by ear for the VDB750's
+- **E20**: the audio-conditioning chain is tuned by ear for the VDB750's
   speaker; only matters once a different speaker exists.
-- **E33** (one point) — whether `shouldDisplayBatteryLevel` is reliable; needs a
+- **E33** (one point): whether `shouldDisplayBatteryLevel` is reliable; needs a
   battery-powered camera.
-- **E41** (two questions) — whether panel-wide pairing off makes the per-device
+- **E41** (two questions): whether panel-wide pairing off makes the per-device
   toggle inert, and the never-captured `bluetoothDisarmingSettings` write shape.
 
 **Watch-only, no action by design**
 
-- **E57** — `pyalarmdotcomajax` maintenance is paused upstream. Pinning is why
+- **E57**: `pyalarmdotcomajax` maintenance is paused upstream. Pinning is why
   nothing needs doing; the entry lists the triggers that would reopen it.
 
 ## High value
@@ -126,7 +126,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   a stop *signal*, not task cancellation: `TalkManager` holds an `asyncio.Event`
   per in-flight talk, and the transport checks it at each chunk boundary, so the
   stream stops within one chunk (40 ms) while the MWS teardown still runs on its
-  normal path — cancelling the task would have raced the `finally` that issues
+  normal path; cancelling the task would have raced the `finally` that issues
   `EndLiveStream`. The in-flight `POST .../talk` returns normally with partial
   stats (`"stopped": true`, `played_seconds`) instead of raising, and stopping
   when nothing is playing is a `404`, not an error, so automations can fire it
@@ -151,14 +151,14 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   should integrate talkdown there rather than as a standalone rule.
 
 - **E56 (DONE) The doorbell button press is a first-class event.** A press
-  carries `event_type_name="DoorbellButtonPress"` — a stable server-side enum —
+  carries `event_type_name="DoorbellButtonPress"` (a stable server-side enum)
   alongside `description="Button Push"`. Each doorbell gets an event entity with
   HA's `doorbell` device class, matching **the enum, never the description**:
   this account's activity feed renders text in the account's language and has
   produced both French and English for the same event kinds, so a text match is
   an automation that silently stops working with no error anywhere. Cameras are
   selected by chime support; dedup is the current page's id set (not a
-  high-water mark — activity ids are opaque and one press yields
+  high-water mark: activity ids are opaque and one press yields
   timestamp-siblings); a restart cannot re-fire an old press; and it
   deliberately does not fire again when the clip is attached a poll later.
 
@@ -176,19 +176,19 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   | Question | Result |
   | --- | --- |
   | Is there an OSP backchannel? | **No.** `/ws/ospserver` and `/osp` → `404`; `/api/StartBackchannel`, `/api/GetAudioStream`, `/api/PutAudioStreamL16`, `/api/capabilities`, `/api/GetDeviceInfo` all → `{"errorCode":-1,"msg":"Unknown request"}` |
-  | Does the audio endpoint negotiate a codec? | **No.** `?codec=L16`, `?format=`, `?encoding=`, `?payloadType=97`, `X-Audio-Codec`, `Content-Type: audio/L16` — every variant answers exactly like the baseline. It consumes bytes as mu-law regardless. |
+  | Does the audio endpoint negotiate a codec? | **No.** `?codec=L16`, `?format=`, `?encoding=`, `?payloadType=97`, `X-Audio-Codec`, `Content-Type: audio/L16`: every variant answers exactly like the baseline. It consumes bytes as mu-law regardless. |
   | Could RTSP `ANNOUNCE`+`RECORD` carry RTP/L16? | **No -- there is no RTSP server.** The media port answers RTSP with `HTTP/1.0 400 Bad Request` from `lighttpd/1.4.61`. The `rtsp://` URLs in `<cli>` are consumed over HTTP; the device has no RTSP method set at all. |
 
   So this doorbell exposes exactly **one** inbound audio path, and that path is
   **mu-law only**. That also explains the app's own behaviour: the reference
   implementation selects `mulawenc` for this device, not `skyL16pay`, because
   `skyL16pay` targets the other device family (the OpenEye/SRTP cameras behind the
-  webrtc/srtp transports — see E13). Nothing short of new device firmware changes
+  webrtc/srtp transports; see E13). Nothing short of new device firmware changes
   this, so E4 is closed rather than deferred.
 
   **Consequence:** 8 kHz mu-law is the quality ceiling on this hardware, which is
   what makes the conditioning chain (E-COND) the real lever for how talkdown
-  sounds — not the codec. If this project is ever pointed at a different model,
+  sounds, not the codec. If this project is ever pointed at a different model,
   run the probe tool first: a device that answers "Unknown request" for everything
   it does not implement, ignores codec selectors, and speaks HTTP on its media
   port has one path and one codec, exactly like this one.
@@ -223,7 +223,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   `TALK_STREAMING_ENCODE` (default true) selects it; both modes run the same
   loop and both are tested for byte- and chunk-identity.
 
-- **E6 (CLOSED — accepted as insurance; benefit unmeasured) Adaptive prebuffer.**
+- **E6 (CLOSED: accepted as insurance; benefit unmeasured) Adaptive prebuffer.**
   Every talk reports `put_rtt_p50/p95/max/stdev_ms`, `late_chunks`,
   `max_late_ms` and `prebuffer_ms` **in the talk result**. They are deliberately
   not aggregated into `/control/metrics`, which counts outcomes rather than
@@ -265,7 +265,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   | --- | --- |
   | `put_rtt_p50_ms` | ~8 |
   | `put_rtt_p95_ms` | ~45 |
-  | `put_rtt_max_ms` | ~200 — the FIRST PUT, which pays connection setup and the Digest challenge |
+  | `put_rtt_max_ms` | ~200: the FIRST PUT, which pays connection setup and the Digest challenge |
   | `max_late_ms` | ~330 |
 
   Read together those say the 500 ms lead is about right rather than generous:
@@ -275,7 +275,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   part a listening test would hear.
 
   `late_chunks` counting more than zero on a healthy short clip is expected for
-  the same reason and is not a fault — it is the lead being spent on connection
+  the same reason and is not a fault: it is the lead being spent on connection
   setup, which is what it is for.
 
 - **E7 (DONE -- mostly a finding, not code) Digest `stale` and `nc` rollover.**
@@ -413,9 +413,9 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   endpoint variants, capability flags, plus the no-doorbell / logged-out / wrong-root
   edges), `_parse_action_ack` (that `ts` and `s` are BOTH required, and that a
   teardown parse never raises), `parse_live_video_stream` (the TokenStatus
-  envelope, endpoint ordering, and the full webrtc/srtp/rtsp records — including
+  envelope, endpoint ordering, and the full webrtc/srtp/rtsp records, including
   that the SRTP keys are the base64-*decoded* bytes of `ack`/`vck`, not the
-  base64 text — plus the xmlns-namespaced / logged-out / wrong-root edges),
+  base64 text, plus the xmlns-namespaced / logged-out / wrong-root edges),
   `decode_srtp_key` (a 30-byte round-trip, and `None` for a missing or
   non-base64 value), `config.parse_retry_after` (delta-seconds, HTTP-date,
   past date, missing, garbage) and `TalkManager._session_deadline` (an implausible
@@ -452,20 +452,20 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   CI pins, but pulls in the order of a hundred transitive packages (grpcio,
   boto3, pillow, cryptography, bleak/dbus-fast, zeroconf, SQLAlchemy, and PyRIC,
   which has no wheel and builds from source) to supply a handful of base
-  classes — and exercising entity behaviour for real on top of it needs
+  classes, and exercising entity behaviour for real on top of it needs
   `pytest-homeassistant-custom-component`, which pins one exact Home Assistant
   version and would put this repo on a version-lock treadmill, with a second
   test framework alongside the bridge's plain scripts. The logic worth pinning
   is pure and needs none of it. `pyalarmdotcomajax` is stubbed for the three
   attributes `const.py` reads; `controller.py` is stubbed wholesale, because
-  importing it applies the websocket monkeypatch and needs the real library —
+  importing it applies the websocket monkeypatch and needs the real library:
   work the existing `check_patch.py` CI job already does.
 
   **Covered.** `test_stream_health_sensors.py` pins E61's audio-state
-  derivation, including all four cases that must never fabricate a `stalled` —
+  derivation, including all four cases that must never fabricate a `stalled`:
   an unanswered poll (both guards: the `last_poll_ok` flag and the identical
   payload object the coordinator hands back), a failed poll, a counter reset on
-  a bridge restart, and the first poll of an entity's life — plus the per-poll
+  a bridge restart, and the first poll of an entity's life, plus the per-poll
   delta, the `not_consuming` reset of the remembered count, the unknown state
   for a bridge too old to report `audio_consumed`, ENUM-options containment, the
   stream-state and dropped-frames mappings, and the coordinator's two failure
@@ -481,14 +481,14 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   **Every invariant was proven falsifiable.** 39 deliberate source mutations
   were applied one at a time, the suite run, and the mutation reverted: 38 were
   caught. The one survivor is a *finding about the source, not a hole in the
-  test* — dropping `_classify`'s French `"personne"` needle changes nothing,
+  test*: dropping `_classify`'s French `"personne"` needle changes nothing,
   because `"personne"` contains `"person"` and the English needle already
   matches it. The French **vehicle** needles are genuinely load-bearing
   (`"véhicule"` shares no substring with `"vehicle"`) and their removal is
   caught. That asymmetry is now recorded in the test's own docstring so it is
   not re-derived.
 
-  **Not covered — see E66**, which carries the list rather than leaving it
+  **Not covered: see E66**, which carries the list rather than leaving it
   implied.
 
 - **E66 (open) The integration test harness covers two modules; the rest of the
@@ -497,30 +497,30 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   deliberately stopped there rather than chasing coverage, so this entry records
   what is NOT covered instead of leaving it implied:
 
-  - `config_flow.py` — the config/reconfigure/reauth flows, including the OTP
+  - `config_flow.py`: the config/reconfigure/reauth flows, including the OTP
     branch. Pure-ish and testable with the same stub tree; the payoff is that a
     broken flow is discovered at setup time by a user, not by CI.
-  - `speak_service.py`, `bypass_service.py`, `unpair_service.py` — the service
+  - `speak_service.py`, `bypass_service.py`, `unpair_service.py`: the service
     handlers. Their schemas and their error mapping (E51's 413/504/400 wording,
     for one) are exactly the kind of thing that reads correct and is not.
-  - `switch.py`, `select.py`, `number.py`, `button.py` — the settings-backed
+  - `switch.py`, `select.py`, `number.py`, `button.py`: the settings-backed
     platforms. `camera_settings_coordinator.py`'s wire shape *is* covered on the
     bridge side (`test_camera_settings.py`); what is unpinned here is the HA-side
     capability gating and option-list handling.
-  - `binary_sensor.py` — including the bridge-connectivity entity that shares
+  - `binary_sensor.py`: including the bridge-connectivity entity that shares
     `StreamHealthCoordinator` with the covered sensors.
-  - `clip_view.py` — only the link **minting** is exercised (through the doorbell
+  - `clip_view.py`: only the link **minting** is exercised (through the doorbell
     event's `clip_link` attribute). Signature verification, expiry handling and
     the redirect view's request handling are not.
-  - `arming_devices_coordinator.py` — again, covered bridge-side
+  - `arming_devices_coordinator.py`: again, covered bridge-side
     (`test_arming_devices.py`), not HA-side.
-  - `__init__.py` — every setup, unload and reload path.
+  - `__init__.py`: every setup, unload and reload path.
 
   There is also a **structural** gap that no amount of new suites in this shape
   closes, and it should not be papered over: the stubs assert nothing about Home
   Assistant's real API, so a breaking upstream change to `CoordinatorEntity` or
   `EventEntity` leaves every suite green. Closing that means installing Home
-  Assistant, which E63 rejected on cost — the realistic middle ground, if it ever
+  Assistant, which E63 rejected on cost; the realistic middle ground, if it ever
   matters, is a separate, occasional CI job that installs Home Assistant and only
   *imports* the integration's platform modules against the real base classes,
   the way `bridge-import-smoke` does for the bridge. Not done, and not obviously
@@ -568,7 +568,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
 - **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
   upstream maintainer has moved and no longer has an Alarm.com system to test
   against, on an indefinite timeline. The repository is not archived, and its
-  last functional commit predates the notice by over a year — so the library has
+  last functional commit predates the notice by over a year, so the library has
   been dormant for as long as this project has been active, and the notice
   formalises the status quo.
 
@@ -578,7 +578,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   on. Triggers that should reopen this: the pinned version failing on a Python
   version the runtime moves to, a security advisory, or wanting to change code
   currently reached by monkeypatch. **Vendoring, not forking, is the likely
-  answer** when one fires — three internals are already monkeypatched precisely
+  answer** when one fires: three internals are already monkeypatched precisely
   because they cannot be changed in place, and vendoring would turn those into
   ordinary edits and delete the guard machinery with them.
 
@@ -611,7 +611,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   ffmpeg's command line, so it appears in `docker top` and in any host-visible
   process listing. It is loopback-scoped (`127.0.0.1/32`), regenerated by
   `entrypoint.sh`, and only grants publish/read on the local MediaMTX, so the
-  exposure is small — but a credential on an argv is avoidable: ffmpeg accepts
+  exposure is small, but a credential on an argv is avoidable: ffmpeg accepts
   the same values through the environment or a config file. Log lines already
   redact it (`_redact_url`); this is the one place it stays in the clear.
 
@@ -777,7 +777,7 @@ recorded. None of these block the shipped feature; all were found while groundin
   `{"error": "rate_limited", "retry_after": N}` body. The same helper now also
   fronts the camera settings and diagnostics reads and both halves of every
   settings write (the pre-read and the setter call); the settings bundle's two
-  MWS-backed sections (siren/privacy) remain the deliberate exception — a
+  MWS-backed sections (siren/privacy) remain the deliberate exception: a
   rate-limited MWS read is absorbed internally and those sections degrade to
   `null` rather than failing the response.
 
@@ -1065,9 +1065,9 @@ that look worth having.
 ## Deferred candidates from the full-tree hardening review
 
 A four-lens review (security, stability, structure, polish) of both codebases
-selected five items — the per-request diagnostics timeout, the control-server
+selected five items (the per-request diagnostics timeout, the control-server
 429/clamp/log hardening, the clip-view guards, the credentials-fallback
-robustness, and the LVSR parser coverage, all shipped — and deliberately
+robustness, and the LVSR parser coverage, all shipped) and deliberately
 deferred the rest. Logged here per the rule that a gap noticed is a gap
 recorded; each open entry carries the reason it was deferred, which is the
 evidence the next reviewer needs, and an entry flips to DONE with its evidence
@@ -1076,7 +1076,7 @@ when it ships.
 - **E45 (DONE) A pre-existing `control_secret` file is re-tightened to `0o600`
   when the bridge adopts it.** Previously an adopted file (restored from a
   backup, or written under a permissive umask) kept whatever mode it arrived
-  with — a bearer token sitting group/world-readable on the shared bind mount
+  with: a bearer token sitting group/world-readable on the shared bind mount
   until the next scheduled rotation happened to rewrite it. Now
   `control_server._load_or_create_secret` calls `_tighten_secret_mode()` after
   successfully reading an existing non-empty secret file: if the mode has any
@@ -1085,7 +1085,7 @@ when it ships.
 
   Best-effort on purpose: an `OSError` from the chmod (e.g. the file is owned
   by another uid on the shared mount) logs a warning with traceback and the
-  secret is **still served** — the bridge never regenerates the secret over a
+  secret is **still served**: the bridge never regenerates the secret over a
   permissions problem, so the HA side keeps authenticating. The helper has its
   own `try` block so a chmod failure cannot fall into the read-error path that
   regenerates the secret. The mode is logged, never the secret. This mirrors
@@ -1099,11 +1099,11 @@ when it ships.
   secret file is born `0o600`, an adopted `0o644` file ends at `0o600` with
   the secret unchanged in memory and on disk, and reloading an already-tight
   file changes nothing. The `OSError` branch is **not exercised by the suite**
-  — provoking it needs a file owned by a second uid — so only its warning path
+  (provoking it needs a file owned by a second uid) so only its warning path
   is verified by reading.
 
 - **E46 (DONE) `mws_client` and `mobile_auth` import defusedxml as a HARD
-  top-level dependency** — the decided option, not the warn-once fallback.
+  top-level dependency**: the decided option, not the warn-once fallback.
   Both modules do `import defusedxml.ElementTree as DET` at module level with
   a comment saying why; the try/except-`ImportError` stdlib `ElementTree`
   fallbacks are deleted, along with `mobile_auth`'s stale fallback comment and
@@ -1113,20 +1113,20 @@ when it ships.
   entity-expansion protection for out-of-container runs; a build without
   defusedxml now fails at import time, which the every-module-imports CI job
   turns into a loud PR failure. Pinned by
-  `test_parsers.py::test_defusedxml_is_a_hard_import` — a subprocess with a
-  meta-path blocker for defusedxml asserts neither module imports — which
+  `test_parsers.py::test_defusedxml_is_a_hard_import`: a subprocess with a
+  meta-path blocker for defusedxml asserts neither module imports, which
   fails against the fallback behaviour and passes against the hard import.
 
 - **E47 (DONE) `JanusCameraSession.close()` no longer leaks the Janus
   websocket, and `_keepalive_loop` no longer dies with an unretrieved
-  exception.** Shipped as the dedicated change the entry prescribed — read
+  exception.** Shipped as the dedicated change the entry prescribed (read
   `camera_session.py` and `janus_client.py` in full, `test_camera_session.py`
-  run deliberately — with the dropped-frame half of E51 riding along.
+  run deliberately) with the dropped-frame half of E51 riding along.
 
   The websocket half: `close()` closes the gateway websocket unconditionally
   via try/finally, so a `pc.close()` that raises, or the
   `SESSION_CLOSE_TIMEOUT_S` `wait_for` cancellation landing mid-close, still
-  releases the socket — previously a wedged camera leaked one gateway socket
+  releases the socket; previously a wedged camera leaked one gateway socket
   per ~165 s rotation. The pc-then-ws ordering is preserved, the guarded ws
   close cannot mask `pc.close()`'s own exception, and `CancelledError` is
   re-raised after the cleanup attempt.
@@ -1134,7 +1134,7 @@ when it ships.
   The keepalive half: `_keepalive_loop` catches `websockets.ConnectionClosed`
   and returns quietly (the recv loop owns marking the session dead, exactly as
   the entry noted), re-raises `CancelledError`, and logs-and-returns on any
-  other exception — so a keepalive sent into a session that died between
+  other exception, so a keepalive sent into a session that died between
   keepalives (server force-close ~180 s vs the 25 s interval) no longer
   finishes the task with an exception nothing retrieves, and the recurring
   GC-time "Task exception was never retrieved" tracebacks for ordinary unclean
@@ -1151,14 +1151,14 @@ when it ships.
 - **E48 (DONE) The docs set no longer names `beautifulsoup4` as a live
   dependency.** A fresh grep found four stale spots, all rewritten:
   `development.md`'s Renovate auto-merge example (which now states
-  `renovate.json`'s actual policy — low-risk minor/patch auto-merge, with
+  `renovate.json`'s actual policy: low-risk minor/patch auto-merge, with
   pyalarmdotcomajax/aiortc/av/mediamtx/aiohttp/websockets and the grouped
   `python` pair review-required; the old "(python base image, beautifulsoup4)"
   example was doubly wrong, since `python` is review-required) and the
   requirements tables in `configuration.md` and `ha-integration.md`, which
   now list `pyalarmdotcomajax==0.5.13` only, matching the manifest.
   `development.md`'s audit line recording that beautifulsoup4 was dropped as
-  unused stays — it states a current fact. Rode along:
+  unused stays; it states a current fact. Rode along:
   `configuration.md`'s manifest `version` row no longer hardcodes a release
   number (it points at `development.md`'s versioning section instead), so it
   cannot go stale again.
@@ -1169,7 +1169,7 @@ when it ships.
   no code references the old underscore names. The bundled `development.md`
   corrections shipped too: the underscore-import clause is gone from its
   still-open list, and the entity-naming hazard claim was checked by
-  repo-wide grep, found FALSE, and replaced with the verified truth —
+  repo-wide grep, found FALSE, and replaced with the verified truth:
   `device.__class__.__name__` appears only in `base_device.py` `LOGGER.info`
   lines; entity unique IDs derive from `device.id_` (optionally suffixed with
   a description key or config-option slug) and display names from
@@ -1178,14 +1178,14 @@ when it ships.
   `pylibsrtp` clause remains open there.
 
 - **E50 (DONE) The integration honours the bridge's 429/`Retry-After` contract
-  and maps the talk route's remaining documented errors.** Mapping only — no
+  and maps the talk route's remaining documented errors.** Mapping only: no
   retries and no timing changes anywhere.
   `camera_settings_coordinator.async_bridge_post` special-cases 429 before
   `raise_for_status`: it reads the wait from the `Retry-After` header, falling
   back to the JSON body's `retry_after`, and raises "Alarm.com is rate-limiting
   this account; the change was not applied -- try again in {N}s" ("… try again
   later" when no wait is readable), matching `arming_devices_coordinator.py`'s
-  vocabulary — so the siren buttons, the privacy switch and every
+  vocabulary, so the siren buttons, the privacy switch and every
   camera-settings write get a meaningful toast instead of the raw aiohttp
   "429, message='Too Many Requests'". The integration only reports the
   server's wait; it never retries the write.
@@ -1196,19 +1196,19 @@ when it ships.
   service always sends a well-formed body, so a 400 on this route can only be
   a fetch/decode failure). The 409/403/422 mappings are unchanged. Wordings
   were checked against `control_server.py`'s actual response bodies and
-  `control-api.md`. Verified by `py_compile` and code reading only —
+  `control-api.md`. Verified by `py_compile` and code reading only:
   `speak_service.py` is outside what the integration's test suites cover (E63,
   E66), and this was not run in a live HA instance; live confirmation needs a
   real rate limit or an oversized clip.
 
-- **E51 (DONE — all parts)
+- **E51 (DONE: all parts)
   Observability additions that lost the batch-size contest.** The metrics half
   is shipped:
   `TalkMetrics` (`bridge/metrics.py`) keeps a `by_path` counter mirroring the
-  existing `by_codec`/`by_endpoint` idiom — incremented once per talk that
+  existing `by_codec`/`by_endpoint` idiom: incremented once per talk that
   successfully ran a transport, from the result's `path` value (`full_duplex`,
   `webrtc`, `srtp`), including talks ended early by an explicit stop (the
-  `by_codec` convention); failed and rejected talks add nothing — and
+  `by_codec` convention); failed and rejected talks add nothing, and
   serialised as `"by_path"` in the `GET /control/metrics` snapshot. No
   transport code changed: every transport's result dict already carries
   `path`, and the single choke point recording a winning talk is the
@@ -1216,7 +1216,7 @@ when it ships.
   `test_metrics.py::test_by_path_counter` (increment per path, stopped-talk
   counting, failure/path-less exclusion, snapshot presence, JSON
   serialisability), which was proven to fail (`KeyError('by_path')`) against
-  the pre-change code. This makes a silent degradation visible — the
+  the pre-change code. This makes a silent degradation visible: the
   preferred full-duplex path failing device discovery while every talk
   quietly runs the webrtc/srtp fallback.
 
@@ -1226,16 +1226,16 @@ when it ships.
   each ending session's count into a per-camera lifetime total via a
   `_retire_session()` helper wrapping all three `_close_with_timeout` call
   sites (healthy rotation, failure path, restart-guard path), published as an
-  additive `dropped_frames` field — present as `0` from the first publish — in
+  additive `dropped_frames` field (present as `0` from the first publish) in
   the `/control/status` per-camera object. Because it accumulates at session
   end, it can lag the live session's drops by up to one rotation; it resets
   with the process like the rest of the status dict. `control_server.py`
-  changed in its module-docstring contract only — no route logic. Pinned by a
+  changed in its module-docstring contract only: no route logic. Pinned by a
   new `test_camera_session.py` test (accumulation across sessions, including
   the failure path), proven to fail against the pre-change code. See
   [control-api.md](control-api.md#get-controlstatus).
 
-  The consuming-in-HA idea — held back as a deliberate separate feature — is
+  The consuming-in-HA idea (held back as a deliberate separate feature) is
   now DONE too, and shipped as **per-camera diagnostic sensors on the camera
   device rather than camera-entity attributes**: a Stream state enum sensor
   (the four `run_camera_forever` states pinned as options; an unknown future
@@ -1245,9 +1245,9 @@ when it ships.
   frames `total_increasing` counter, both fed by a `StreamHealthCoordinator`
   polling `GET /control/status` every 30 s (loopback-only, zero alarm.com
   cost) and shared with `binary_sensor.py`, which adds a **camera-bridge
-  connectivity entity** on the integration service device — ON while the
+  connectivity entity** on the integration service device: ON while the
   last status poll got an answer, deliberately staying available when the
-  poll fails so it can actually say "off". Sensors — not attributes — because
+  poll fails so it can actually say "off". Sensors (not attributes) because
   an enum state and a `total_increasing` counter get recorder history and
   can drive automations directly, which attributes on the camera entity
   cannot. It was the MINOR call: shipped as its own new-capability release.
@@ -1258,16 +1258,16 @@ when it ships.
 - **E52 (DONE) All ten translation files carry the identical key set.** Each
   of the nine non-English files (`ar,bn,es,fr,hi,pt,ru,ur,zh-Hans`) now holds
   the same 96 leaf keys as `en.json`, verified by a programmatic key-tree diff
-  (zero missing, zero extra, per language). The 31 keys that were missing —
+  (zero missing, zero extra, per language). The 31 keys that were missing,
   the talkdown sensors, the camera diagnostic and solar sensors, and the
-  entire `number` / `switch` / `select` / `button` groups — were translated
+  entire `number` / `switch` / `select` / `button` groups, were translated
   per language against each file's established register (e.g. pt stays
   European Portuguese: "altifalante", "à chegada"; ru renders talkdown as
   "голосовое оповещение"; bn/hi/ur transliterate it as a feature name,
   matching how those files treat technical loanwords; brand terms TELUS /
   Bluetooth / Alarm.com stay untranslated everywhere, per each file's
   existing practice). Translations are model-written, not native-speaker
-  reviewed — a fluent speaker may still improve phrasing, but the key sets
+  reviewed; a fluent speaker may still improve phrasing, but the key sets
   are complete and any future drift is a one-line key-tree diff away from
   being visible.
 
@@ -1276,20 +1276,20 @@ when it ships.
   dropped so video could keep publishing" from "audio simply stopped arriving",
   via `audio_dropped` and `audio_dropped_reason` in `/control/status` (E62). The
   integration reads neither. `CameraAudioStateSensor` reports `stalled` in both
-  cases — correct, because the pump does stop feeding audio once the pipe is
+  cases: correct, because the pump does stop feeding audio once the pipe is
   dropped, but it leaves the operator to go read container logs for the cause.
 
   Both now ride as attributes on the existing sensor, needing no new poller.
   Deliberately *not* a fifth enum state: `stalled` is what an automation should
   act on either way, and splitting it would break any automation already keyed
   on it. Absent on an older bridge reads as `null`, never as a fabricated
-  `false` — pinned by a test, along with the dropped-pipe case itself. Whether a
-  dropped pipe also deserves its own binary sensor is a separate question —
+  `false`, pinned by a test, along with the dropped-pipe case itself. Whether a
+  dropped pipe also deserves its own binary sensor is a separate question:
   probably not, since it should be rare and is visible in the attribute.
 
 ## Downstream (listen) audio
 
-- **E53 (ANSWERED — yes, with a caveat) The upstream does serve a downstream
+- **E53 (ANSWERED: yes, with a caveat) The upstream does serve a downstream
   audio track.** With `JANUS_REQUEST_AUDIO` on, the gateway offers
   `audio(port=9,opus)` alongside the video for **both** cameras on this
   account. The video-only offer seen by default is entirely explained by the
@@ -1307,15 +1307,15 @@ when it ships.
     camera.** With audio negotiated, camera 2049 repeatedly failed
     `RuntimeError('no frames received before timeout')` with the ICE
     connection going `closed`, reconnecting every ~23 s and reaching three
-    consecutive failures — two short of the escape hatch that hard-exits the
+    consecutive failures, two short of the escape hatch that hard-exits the
     process. The doorbell (2048) streamed normally at 15 fps throughout the
     same window. The experiment was rolled back and both cameras recovered
     immediately.
 
-  **The failure is not slowness — that is now measured.** With first-frame
+  **The failure is not slowness; that is now measured.** With first-frame
   timing instrumented, the indoor camera's *normal* first frame arrives in
   1.2–1.8 s, and it streams at 6–7 fps. When audio was negotiated it waited the
-  **full 20 s timeout and received zero frames** — at 6 fps a merely-slow
+  **full 20 s timeout and received zero frames**: at 6 fps a merely-slow
   camera would still have delivered on the order of a hundred frames in that
   window. So media never arrives for that camera under audio, rather than
   arriving late, and raising the first-frame timeout would not help.
@@ -1342,7 +1342,7 @@ when it ships.
 
   **The rotation gap is filled with silence measured in samples, not sleeps.**
   The publisher deliberately outlives every session, so the audio input is
-  opened once with the sink and never closed — ffmpeg cannot reopen an input,
+  opened once with the sink and never closed: ffmpeg cannot reopen an input,
   and an EOF there would silence the track for the life of the publisher. The
   hold writes `elapsed_seconds * rate - samples_written` samples, so real audio
   and silence share one wallclock baseline and the gap cannot accumulate drift.
@@ -1350,7 +1350,7 @@ when it ships.
   **A real defect was found by testing against the actual ffmpeg binary rather
   than reasoning about it.** Mirroring the video input's
   `-use_wallclock_as_timestamps` onto the audio input makes ffmpeg stop reading
-  the second input a few seconds in and never resume — the pipe then backs up
+  the second input a few seconds in and never resume; the pipe then backs up
   at real-time rate forever, which the sink can only read as a dead publisher.
   Audio-only, the same input keeps up perfectly; it is specifically the
   two-input combination, and it survived a matrix of `aresample`,
@@ -1376,18 +1376,18 @@ when it ships.
   itself from it): any shortfall between the declared fps and the rate frames
   actually arrive at makes audio outrun video, the muxer's interleaver stops
   accepting audio packets, and ffmpeg stops draining the pipe. Proof is in the
-  durations — 11 s of wallclock produced 6.24 s of video, exactly the 15/25
+  durations: 11 s of wallclock produced 6.24 s of video, exactly the 15/25
   ratio of written-to-declared fps.
 
   The fix is one token: the video input drops `-r` when audio is enabled.
-  Everything else was ruled out by measurement inside the container —
+  Everything else was ruled out by measurement inside the container:
   `-fps_mode` (both settings), `-max_interleave_delta 0`, `-thread_queue_size`
   up to 4096 on either or both inputs, dropping `-analyzeduration`/`-probesize`,
   reversing input order, and dropping `aresample` all still stall; the output
   muxer is irrelevant (null, mpegts and live RTSP behave the same). Frame
   *count* is unchanged, so keyframe cadence and encode cost are untouched.
 
-  **MediaMTX accepts the second AAC m-line** — confirmed by publishing to a
+  **MediaMTX accepts the second AAC m-line**: confirmed by publishing to a
   throwaway path and reading it back: `h264 960x960` + `aac 48000Hz mono`, no
   ANNOUNCE error, 100 s with zero pipe backlog, and stable under an extreme
   5-vs-25 fps mismatch and a deliberate 5% audio skew. Not yet exercised: Home
@@ -1399,7 +1399,7 @@ when it ships.
 
   `-r <fps>` before `-i` forces the input stream's rate and overrides
   `-use_wallclock_as_timestamps`, so the timeline advances per frame *written*
-  rather than per second *elapsed* — measured at 24.07 s of media per 40 s of
+  rather than per second *elapsed*, measured at 24.07 s of media per 40 s of
   wall time when a 15 fps-declared camera delivered 9 fps, exactly the 9/15
   ratio. That is the drift an HLS viewer accumulates.
 
@@ -1415,38 +1415,38 @@ when it ships.
 
   **This was already live and wrong.** E54's fix removed `-r` from the
   audio-enabled argv only, so from the moment audio was enabled the doorbell
-  published **CFR 25 with 0.6 s keyframes** — roughly 67% more encoded frames
-  than intended — while E54's note claiming "frame count is unchanged" was
+  published **CFR 25 with 0.6 s keyframes** (roughly 67% more encoded frames
+  than intended) while E54's note claiming "frame count is unchanged" was
   simply false. Both are corrected.
 
 - **E59 (DONE, confirmed live) aiortc's Opus decoder killed
   its own thread, and the published audio was pure silence.** The entry above
-  understated this badly: audio did not "arrive in gaps" — it never arrived at
+  understated this badly: audio did not "arrive in gaps"; it never arrived at
   all. Measured on the live published stream with `ffmpeg -af volumedetect` over
   200 s: **9,572,352 of 9,572,352 samples at the s16 noise floor**, `max_volume`
   equal to `mean_volume`. Every sample in the doorbell's AAC track was coming
   from the sink's silence fill.
 
   The cause is a two-file asymmetry in aiortc. `codecs/h264.py` wraps its decode
-  in `try/except av.FFmpegError`, logs, and returns `[]` — one packet dropped,
+  in `try/except av.FFmpegError`, logs, and returns `[]`: one packet dropped,
   decoder lives (43 such warnings live, zero dead video threads). `codecs/opus.py`
   has **no handler at all**, and neither does `decoder_worker`'s loop, so one
   malformed packet propagates out of the thread target and the `audio-decoder`
-  thread **dies permanently** — it is started once, with no restart path. Live:
+  thread **dies permanently**: it is started once, with no restart path. Live:
   11 sessions, 11 deaths. Two silent consequences followed: the receiver keeps
   queueing to the dead thread (its gate tests the Thread *object*, truthy even
   when dead) at ~8,000 frames per session, and the bridge's audio pump waits
   forever on a `recv()` whose end-sentinel only the dead worker could produce.
 
   Fixed by `bridge/aiortc_opus_patch.py`, a fourth monkeypatch following the
-  integration's `*_patch.py` convention with an import-time compatibility guard
-  — including a check that upstream has not grown its own handler, which would
+  integration's `*_patch.py` convention with an import-time compatibility guard,
+  including a check that upstream has not grown its own handler, which would
   mean the patch should be deleted. **Not fixed upstream:** 1.15.0 is the latest
   release and `main` is byte-identical.
 
   **What the status endpoint was doing is worth remembering.** `audio_format`
   was rendered from what ffmpeg had been *launched* with, which falls back to
-  `AUDIO_DEFAULT_FORMAT` — literally `("s16", 48000, 2)`. So through eleven
+  `AUDIO_DEFAULT_FORMAT`: literally `("s16", 48000, 2)`. So through eleven
   sessions of total silence it reported a confident `"48000Hz/2ch/s16"`
   alongside `state: streaming` and a fresh `last_frame_at`. Nothing in the
   payload could distinguish flowing audio from audio that had never decoded a
@@ -1458,12 +1458,12 @@ when it ships.
   **Confirmed live, and the bad packet is identified.** After the fix: zero dead
   decoder threads, `decoded_audio_frames` climbing (730 within three minutes),
   and the published track measures `mean_volume -20.1 dB` / `max_volume 0.0 dB`
-  against the -91.0 dB noise floor it sat at before — real sound, not silence.
+  against the -91.0 dB noise floor it sat at before: real sound, not silence.
 
   The rejected packet is **G.711 µ-law audio on the Opus payload type**:
   `len=512`, bytes clustered on `0x7c`–`0x7f` and `0xfc`–`0xff`, which is µ-law
   near-silence. Neither of the suspected shapes (Ogg `OpusHead`/`OpusTags`, H.264
-  NAL bytes) — those merely reproduce the same error class. The doorbell's own
+  NAL bytes); those merely reproduce the same error class. The doorbell's own
   upstream audio is µ-law, so the likeliest reading is that the relay forwards a
   device-native frame before its Opus transcode is running; that remains
   **unverified**. It costs a few milliseconds of audio per session.
@@ -1477,8 +1477,8 @@ when it ships.
 
   **An enum rather than a counter, deliberately.** Home Assistant has no "this
   number stopped changing" trigger, so a `total_increasing` frame count would
-  have left the exact failure it exists to catch — decoder dies, counter
-  freezes, `state` stays `streaming`, `last_frame_at` stays fresh — as something
+  have left the exact failure it exists to catch (decoder dies, counter
+  freezes, `state` stays `streaming`, `last_frame_at` stays fresh) as something
   a human must notice on a graph. That is precisely how eleven silent doorbell
   sessions went unnoticed. Comparing the counter between polls turns *stopped*
   into a state you can automate on.
@@ -1486,12 +1486,12 @@ when it ships.
   Every camera gets one, including cameras with audio switched off (they read
   `not_consuming`): entity creation is sticky, so one that appears and vanishes
   with a bridge env var would break any automation naming it, and "no audio
-  entity at all" reads as "fine" — the very gap being closed. A stall is never
+  entity at all" reads as "fine", the very gap being closed. A stall is never
   reported for an unanswered poll, a failed poll, a counter reset (bridge
   restart), or the first poll of a camera that already has frames.
 
   **Deferred, recorded rather than lost:** there is no graphable recorder series
-  for `decoded_audio_frames` (attribute only — a companion `total_increasing`
+  for `decoded_audio_frames` (attribute only; a companion `total_increasing`
   sensor would give one at the cost of a series per camera); the `stalled`
   threshold is one 30 s poll window and is not configurable, so a genuinely
   bursty source needs the automation's `for:` instead; `last_audio_at` is
@@ -1500,12 +1500,12 @@ when it ships.
   derivation is now pinned by `tests/test_stream_health_sensors.py` (E63),
   including all four cases where `stalled` must never be reported. **This makes
   dead audio
-  visible; it does not recover it** — that is E60/E62.
+  visible; it does not recover it**: that is E60/E62.
 
 - **E62 (fixed in the bridge, awaiting live validation) Audio consumption took the doorbell
   off the air, and the bridge reported `streaming` throughout.** Enabled on the
-  doorbell it ran correctly for about fourteen minutes — real decoded audio,
-  measured — and then collapsed. The sequence, from the container log:
+  doorbell it ran correctly for about fourteen minutes (real decoded audio,
+  measured) and then collapsed. The sequence, from the container log:
 
   ```
   22:11:24  ffmpeg publishing 960x960@15fps ... audio aac mono from 48000Hz/2ch/s16
@@ -1517,9 +1517,9 @@ when it ships.
   thereafter  MediaMTX: "no stream is available on path telus_...-2048"
   ```
 
-  **The `-framerate` fix (E58) did not eliminate the pipe stall — it delayed
-  it.** The underlying condition is E60. The mechanism written here originally —
-  "the per-frame pixel copy cannot keep up at 1440x1440" — is **wrong and was
+  **The `-framerate` fix (E58) did not eliminate the pipe stall: it delayed
+  it.** The underlying condition is E60. The mechanism written here originally,
+  "the per-frame pixel copy cannot keep up at 1440x1440", is **wrong and was
   disproven by measurement**; the copy costs 0.24 ms of a 66.7 ms interval. What
   actually starves the video path is the bursty audio silence top-up. The rest
   of the chain held: `janus_client` drops frames before they reach ffmpeg,
@@ -1530,7 +1530,7 @@ when it ships.
 
   **The worst part is the reporting.** Throughout the outage `/control/status`
   said `state: streaming`, `consecutive_failures: 0`, with a fresh
-  `last_frame_at` — while MediaMTX had no path and every reader was being
+  `last_frame_at`, while MediaMTX had no path and every reader was being
   refused. The frame-silence watchdog watches frames arriving from Janus, not
   whether the publisher still exists, so a dead publisher is invisible. That is
   its own defect and arguably the more dangerous one: **the bridge cannot
@@ -1540,10 +1540,10 @@ when it ships.
   with audio enabled on the doorbell only; what it must show is listed at the
   end of this entry.
 
-  1. **Audio pacing.** `AUDIO_SILENCE_TOPUP_S` 0.5 → 0.05 (half the muxer lead —
+  1. **Audio pacing.** `AUDIO_SILENCE_TOPUP_S` 0.5 → 0.05 (half the muxer lead;
      see E60 for why 0.1 measured *worse* than the defect), per-write ceiling
      `_AUDIO_SILENCE_MAX_BURST_S` 2.0 → 0.1, and a new `AUDIO_PUMP_MAX_BURST_S`
-     bounding the pump's drain with a yield rather than a real-time pace —
+     bounding the pump's drain with a yield rather than a real-time pace:
      audio *lagging* the video is the stall condition, so a backlog must be
      delivered as fast as the loop allows. The frame hold also ticks at
      `min(1/fps, TOPUP)`: at 6 fps it was topping up every 167 ms, past the
@@ -1552,7 +1552,7 @@ when it ships.
      of a flat `maxsize=4`. 15 fps → 8 (533 ms), 6 fps → 4 (667 ms, the floor).
      Ceiling arithmetic: 1440×1440 yuv420p is 3.11 MB, so 8 frames is 24.9 MB
      per camera against a 768 MiB limit. Above ~16 fps the memory ceiling binds
-     before the time target. This is defence in depth only — a deeper queue
+     before the time target. This is defence in depth only: a deeper queue
      converts drops into latency, it does not remove a stall.
   3. **A wedged audio pipe degrades to video-only.** `FfmpegSink._drop_audio()`
      closes the audio transport, latches `audio_dropped` /
@@ -1566,7 +1566,7 @@ when it ships.
      completing is direct evidence of consumption; timing out latches
      `publisher_stalled` → `publisher_alive` false → rebuild. **Unbounded, as it
      was, that await parks the camera's entire loop forever with the status
-     frozen on `streaming`** — plausibly the E62 mechanism itself. `/control/status`
+     frozen on `streaming`**, plausibly the E62 mechanism itself. `/control/status`
      gains `publisher_alive` and `last_publish_at`; the gap between
      `last_publish_at` and `last_frame_at` *is* "streaming" vs "streaming to
      nowhere". Chosen over querying MediaMTX because `mediamtx.yml` disables
@@ -1579,16 +1579,16 @@ when it ships.
   time):** that camera's `dropped_frames` delta per ~165 s rotation, which
   should fall from 1,650–2,550 to near the audio-off camera's ~1; whether
   `audio_dropped` fires at all (if it does, something *else* is still starving
-  the video timeline — check `dropped_frames` first); the gap between
+  the video timeline; check `dropped_frames` first); the gap between
   `last_publish_at` and `last_frame_at` on every poll; and
   `decoded_audio_frames` still climbing.
 
   **Two gaps recorded rather than dropped:** the HA **Audio state** sensor read
   `stalled` without the cause, because the integration did not surface
-  `audio_dropped_reason` — closed by **E67**.
+  `audio_dropped_reason`; closed by **E67**.
   And every container measurement behind these four changes output to
   `-f null -`, never a live RTSP publish into MediaMTX, so the muxer-target side
-  of the pacing is **inferred, not captured** — tracked as **E68**.
+  of the pacing is **inferred, not captured**; tracked as **E68**.
 
 - **E60 (DONE, fixed in the bridge) The doorbell's frame drops are
   caused by the audio silence top-up, not by the pixel copy.** Both earlier
@@ -1596,7 +1596,7 @@ when it ships.
   measurement that appeared to disprove the first one.
 
   **What actually happens:** the bridge hands ffmpeg's audio input **0.5 s of
-  PCM in a single burst** (the quiet-audio path — `_pump_audio` waits
+  PCM in a single burst** (the quiet-audio path: `_pump_audio` waits
   `AUDIO_SILENCE_TOPUP_S` for a decoded frame and on timeout pushes the whole
   wallclock deficit at once), and each burst makes ffmpeg **stop reading the
   video pipe for 165–330 ms**. The video queue holds 4 frames = 267 ms of
@@ -1612,7 +1612,7 @@ when it ships.
   | every 1000 ms | p99 730 ms | 61 |
 
   `-thread_queue_size` and `-max_interleave_delta` change nothing, and splitting
-  one 500 ms burst into 25 back-to-back writes changes nothing — it is temporal
+  one 500 ms burst into 25 back-to-back writes changes nothing: it is temporal
   pacing that matters, not chunking. A doorbell is quiet most of the time, so
   the quiet path is the normal path.
 
@@ -1621,12 +1621,12 @@ when it ships.
   pre-scaling the feed to 960x960 changes the stall count by **exactly zero**
   (it halves p50 and nothing else). The old note's "roughly 6 MB of copying per
   second" was wrong twice: it is 3.11 MB *per frame*, ~47 MB/s each way, and
-  neither figure is load-bearing. CPU is not the constraint either — 0.016% of
+  neither figure is load-bearing. CPU is not the constraint either: 0.016% of
   periods throttled, 11% of the 2-core cap used.
 
   **A measurement error of mine, corrected.** This entry previously said the
   hypothesis was disproven because "46 warnings and 5,455 dropped frames in the
-  first twelve minutes — no better than before". That was **not an audio-off
+  first twelve minutes, no better than before". That was **not an audio-off
   control**: it was the first twelve minutes of the audio-*enabled* E62 run. The
   real control is the current audio-off deployment: **2 drops in 21 minutes
   across both cameras**, both at ffmpeg startup. The conclusion drawn from the
@@ -1634,19 +1634,19 @@ when it ships.
   next round of work at the wrong target.
 
   **Severity was also understated.** Not "~300 per session": the incident log
-  shows **1,650–2,550 dropped per ~165 s session, around 70% of frames** — and
+  shows **1,650–2,550 dropped per ~165 s session, around 70% of frames**, and
   only on the camera with audio enabled. The audio-off camera in the same
   process, same event loop, same host, dropped 1.
 
   **E60 is a symptom of E62's audio path, not its cause.** The causal claim in
   both entries ran backwards.
 
-  **The mechanism is the LEAD, not the burst size — a second measurement
+  **The mechanism is the LEAD, not the burst size: a second measurement
   corrected the first.** Building the fix started from the table above and its
   reading that "pacing to 100 ms removes the stall entirely". A more faithful
-  rig — one reproducing `write_silence_to`'s actual arithmetic (deficit against
+  rig, one reproducing `write_silence_to`'s actual arithmetic (deficit against
   wallclock, the 100 ms prime, the per-call ceiling) rather than writing on a
-  fixed cadence — **did not reproduce that row**. It measured 100 ms at **162 of
+  fixed cadence, **did not reproduce that row**. It measured 100 ms at **162 of
   900 frames (18%), twice**, i.e. *worse* than the 500 ms defect it was meant
   to fix. The same rig reproduced the shipped defect exactly (120 of 900,
   matching the first table to the frame), which is what makes it the more
@@ -1667,20 +1667,20 @@ when it ships.
   between top-ups, so **the cliff sits exactly at the prime**: a 0.1 s cadence
   hands ffmpeg a fifth as much per write as 0.5 s and stalls *more* frames,
   because it spends the instant before every write at zero lead. Running ahead
-  is harmless — it only lengthens the lead. Both tables agree wherever the
+  is harmless: it only lengthens the lead. Both tables agree wherever the
   cadence is comfortably under the prime (20–50 ms) and at the 500 ms defect;
   they disagree only at 100 ms, which is the cliff edge itself, and a cliff edge
   is exactly where two rigs should be expected to disagree.
 
   So the shipped value is `AUDIO_SILENCE_TOPUP_S = 0.05`, **half** the lead, not
   the 0.1 that the first reading implied. 0.1 would also have made the cadence
-  equal the ceiling, so a clipped deficit could never be repaid — a permanent,
+  equal the ceiling, so a clipped deficit could never be repaid: a permanent,
   accumulating A/V offset that the old 2.0 s ceiling did not have.
 
   **Fixed in the bridge.** What live validation must show is listed at the end
   of E62, alongside the other three changes that shipped with this one.
 
-- **E55 (CLOSED — not worth pursuing) Device-direct listen audio.** Superseded:
+- **E55 (CLOSED: not worth pursuing) Device-direct listen audio.** Superseded:
   downstream audio comes over the website/Janus path (E53/E54), so a second
   source buys nothing operational.
 
@@ -1688,10 +1688,10 @@ when it ships.
   The doorbell **does** expose a device-direct HTTP API on the LAN, and talkdown
   uses it on every call: the `<cli>` element's `duae`/`luae` are
   `https://<doorbell-ip>:41925/api/PutAudioStream`, and the bridge PUTs audio
-  straight there whenever it shares the LAN with the device — that traffic never
+  straight there whenever it shares the LAN with the device; that traffic never
   traverses alarm.com. What was never characterised is the *downstream* half.
   `GET /api/GetStream?streamID=0` on the same port returns something, but its
-  container, and whether it carries audio at all, are unrecorded — and the URLs
+  container, and whether it carries audio at all, are unrecorded, and the URLs
   are published with an `rtsp://` scheme the device does not serve (it answers
   RTSP with an HTTP 400 from lighttpd). Reopen only if the Janus path is
   abandoned.
@@ -1708,7 +1708,7 @@ entries are the mechanism that keeps it under review
   `15` for another with no change to the camera; the doorbell has logged
   `implausible fps measurement 62`; and the live v1.21.0 deployment measured
   **29 fps** on a camera that then logged `More than 1000 frames duplicated`
-  within 2.5 minutes — the declared rate exceeding what the source delivers,
+  within 2.5 minutes: the declared rate exceeding what the source delivers,
   observed rather than reasoned about.
 
   The rate is a **device setting**, not a property of the camera: the live-video
@@ -1717,7 +1717,7 @@ entries are the mechanism that keeps it under review
   it was therefore wrong by construction, not merely imprecise.
 
   **Shipped:** `camera_session.RateWatcher` re-measures while the stream runs and
-  rebuilds the publisher through the same path a frame-size change takes — on
+  rebuilds the publisher through the same path a frame-size change takes; on
   this platform the same event, since both come from the resolution setting.
 
   **Why each threshold is what it is.** Every rebuild kicks every RTSP reader off
@@ -1726,23 +1726,23 @@ entries are the mechanism that keeps it under review
 
   | Gate | Value | Evidence |
   |---|---|---|
-  | Settle window | `RATE_RESAMPLE_SETTLE_S = 10 s` | The session-start burst has produced 544, 215 and 62 fps readings. The dangerous ones are the *plausible* burst readings — "38–49 fps for a real 15 fps camera" — which no arithmetic can tell from a real change. Leaves ~155 s of every 165 s session measurable. |
+  | Settle window | `RATE_RESAMPLE_SETTLE_S = 10 s` | The session-start burst has produced 544, 215 and 62 fps readings. The dangerous ones are the *plausible* burst readings ("38–49 fps for a real 15 fps camera") which no arithmetic can tell from a real change. Leaves ~155 s of every 165 s session measurable. |
   | Batch | `RATE_RESAMPLE_FRAMES = 90`, median | 3 s at 30 fps, 15 s at 6 fps; no single late or bunched frame moves a median of 90. |
   | Hysteresis (down) | `RATE_CHANGE_TOLERANCE_DOWN = 0.20` | Must clear observed jitter (6↔7 across restarts = 17%) while catching the live 29 → ~22 (−24%) implied by that duplication rate. |
-  | Hysteresis (up) | `RATE_CHANGE_TOLERANCE_UP = 0.35` | Wider, deliberately — see below. Still catches +100% (15 → 30) and +150% (6 → 15). |
+  | Hysteresis (up) | `RATE_CHANGE_TOLERANCE_UP = 0.35` | Wider, deliberately; see below. Still catches +100% (15 → 30) and +150% (6 → 15). |
   | Confirmation | 2 consecutive settled batches must agree | One batch acting alone is exactly the defect being fixed. Also what makes a flapping source **converge**: alternating rates never produce two agreeing batches, so nothing is ever confirmed. |
   | Storm bound | `RATE_REBUILD_MIN_INTERVAL_S = 300 s` | Just under two rotations. Delays a correction, never cancels one. |
 
   **The band is asymmetric, and the direction is settled by measurement, not
   taste.** From `ffmpeg_sink`'s own in-container table: declaring **above** what
-  the source delivers pads to CFR with duplicates (361 written → 601 encoded) —
+  the source delivers pads to CFR with duplicates (361 written → 601 encoded):
   wasteful, nothing lost; declaring **below** it makes ffmpeg **drop** real
-  frames (1201 written → 1002 encoded, **199 gone**) — content destroyed. And
+  frames (1201 written → 1002 encoded, **199 gone**): content destroyed. And
   measurement error is asymmetric the same way, because buffered frames arrive
   back-to-back and never slower than real time, so a contaminated batch always
   reads *fast*. Both arguments point one way: be readier to lower a declared rate
   than to raise it. A camera *set* to 15 that delivers ~13.4 (−11%) is
-  deliberately left alone — 15 is the real setting, and declaring 13 would start
+  deliberately left alone: 15 is the real setting, and declaring 13 would start
   dropping the frames that do arrive on time.
 
   **A rate change never takes the camera off the air.** The rebuild is applied at
@@ -1756,12 +1756,12 @@ entries are the mechanism that keeps it under review
 
   **Interactions with the two things E60/E62 shipped:**
 
-  - **The time-sized queue is not resized — it is rebuilt.** It is per-session and
+  - **The time-sized queue is not resized; it is rebuilt.** It is per-session and
     sized at construction from `known_fps`, so the next session after a confirmed
     change simply gets the right depth; the retiring session's queue dies with the
     session, so **no frames are stranded**. Note that 16–30 fps all clamp to the
     8-frame memory ceiling (confirmed live: both cameras log `queue maxsize=8` at
-    15 and 29 fps), so a change inside that band alters the depth by nothing —
+    15 and 29 fps), so a change inside that band alters the depth by nothing,
     and since queue depth is not an input to the rebuild decision, that costs no
     needless rebuild either.
   - **The frame hold's tick is unchanged and cannot be moved past the muxer
@@ -1771,7 +1771,7 @@ entries are the mechanism that keeps it under review
     frame only means "one frame" to an ffmpeg reading `-framerate N`. The audio
     half is safe at *any* rate by construction: the tick is
     `min(1/fps, AUDIO_SILENCE_TOPUP_S)` and fps is clamped to 1–30, so the tick
-    can never exceed 50 ms — half of `_AUDIO_PRIME_MS`. E60's cadence invariant
+    can never exceed 50 ms, half of `_AUDIO_PRIME_MS`. E60's cadence invariant
     holds for every rate the watcher can produce.
 
   **Tests** (`test_camera_session.py`, four new): the hysteresis band's asymmetry
@@ -1785,20 +1785,20 @@ entries are the mechanism that keeps it under review
   **One test was worthless as first written and was strengthened**, which is
   worth recording because the trap is reusable: the settle-window test used a
   1000 fps burst, which the 1–60 plausibility range rejects wherever it is
-  measured — so deleting the settle window entirely left the test green. Rewritten
+  measured, so deleting the settle window entirely left the test green. Rewritten
   with a *plausible* 40 fps burst (the failure the logs actually show), it fails
   as it should. A burst test that is too extreme tests the sanity range, not the
   settle window.
 
 - **E68 (open) The pacing fix was measured against `-f null -`, never a live
-  RTSP publish.** Every container measurement behind E60/E62 — the cadence
-  table, the queue sizing, the drop-to-video-only check — used a real ffmpeg
+  RTSP publish.** Every container measurement behind E60/E62 (the cadence
+  table, the queue sizing, the drop-to-video-only check) used a real ffmpeg
   command line with `-f null -` as the output. That exercises the demuxers, the
   encoder and the interleaver, which is where the stall lives, but it does not
   exercise the RTSP muxer or MediaMTX's consumption of it.
 
   So the muxer-target side of the pacing is **inferred, not captured**. This is
-  not a reason to doubt the fix — the defect reproduced exactly under the rig
+  not a reason to doubt the fix: the defect reproduced exactly under the rig
   (120 of 900 frames, matching the production table to the frame), which is the
   strongest evidence available that the rig models the right thing. It is a
   reason not to claim more than was tested. Re-running the cadence sweep with
@@ -1808,7 +1808,7 @@ entries are the mechanism that keeps it under review
 
 - **E69 (open, minor) `/control/status` reports the DECLARED frame rate, never
   the measured one.** `fps` in the status dict is written from `sink.fps` at each
-  session start — what ffmpeg was launched with. Since E64 the bridge continuously
+  session start, what ffmpeg was launched with. Since E64 the bridge continuously
   measures a second, independent number (what the camera is actually delivering),
   and the gap between the two is exactly the diagnostic an operator wants: it is
   what says "this publisher is padding 20% of its output" before ffmpeg says
@@ -1820,7 +1820,7 @@ entries are the mechanism that keeps it under review
   new response field is a contract other code is written against
   (`docs/control-api.md`), and the HA integration would want a matching sensor or
   attribute to make it visible, which is a second change in a second repo area.
-  The measurement already exists in `RateWatcher`; surfacing it is plumbing —
+  The measurement already exists in `RateWatcher`; surfacing it is plumbing:
   a `measured_fps` (and arguably `rate_pending`) alongside the existing `fps`.
 
 - **E70 (open, minor) The `More than 1000 frames duplicated` warning is logged,
@@ -1832,7 +1832,7 @@ entries are the mechanism that keeps it under review
 
   It was considered as a settle-time trigger for E64 and rejected, for reasons
   worth keeping: it is **one-directional** (it only ever fires when the declared
-  rate is too HIGH, never when it is too low — and too low is the direction that
+  rate is too HIGH, never when it is too low, and too low is the direction that
   destroys frames), it is **not quantitative** (it says a mismatch exists, not
   what the rate should be, so it cannot drive a correction on its own), and it
   is **coarse** (a fixed 1000-frame threshold, so its timing depends on the rate
@@ -1846,8 +1846,8 @@ entries are the mechanism that keeps it under review
 - **E71 (open) E64's thresholds are argued from measurement, but the mechanism
   has not been observed correcting a real setting change end to end.** The
   hysteresis values, the asymmetry and the settle window are each grounded in
-  numbers that exist — the in-container `-framerate` table, the 6/7/15/29 spread
-  across restarts, the live 29 fps camera duplicating 1000+ frames — and the
+  numbers that exist (the in-container `-framerate` table, the 6/7/15/29 spread
+  across restarts, the live 29 fps camera duplicating 1000+ frames) and the
   logic is pinned by tests that were each proven to fail. What has **not**
   happened is the obvious live confirmation: change the live-video resolution
   from the Home Assistant select on a running bridge, and watch the log go
@@ -1855,7 +1855,7 @@ entries are the mechanism that keeps it under review
   publish line at the new rate, with `consecutive_failures` still `0`.
 
   That is a five-minute check against the real deployment and it is the only
-  thing that would confirm the *premise* — that a resolution change actually
+  thing that would confirm the *premise*: that a resolution change actually
   changes the delivered frame rate on this platform, rather than only the frame
   size (which the existing `sink_wh` path would already handle on its own). If it
   turns out the rate does not move with the resolution setting, E64 is still
@@ -1892,7 +1892,7 @@ entries are the mechanism that keeps it under review
   rate surfaced the case its confirmation gate cannot handle: the 30 fps
   camera's *delivered* rate halves under marginal light and comes back, dwelling
   minutes at each end. Both dwells outlast two settled batches, so both ends
-  confirmed, and the log showed the result — a rate rebuild 29 → 15, another
+  confirmed, and the log showed the result: a rate rebuild 29 → 15, another
   15 → 28 six minutes later, then a further confirmed 28 → 15 held back only by
   the 300 s floor, re-confirming and re-logging every ~12 s. Left alone that is
   a reader-kicking publisher rebuild each way per 300 s window for as long as
@@ -1901,10 +1901,10 @@ entries are the mechanism that keeps it under review
 
   The guard (`camera_session.RateWatcher`): a confirmed return to the very rate
   the last rate rebuild moved away from, within `RATE_FLAP_WINDOW_S` (30 min)
-  of it, is flapping — a real second setting change back inside half an hour is
+  of it, is flapping; a real second setting change back inside half an hour is
   indistinguishable, and the ambiguity is resolved in the direction that costs
   nothing irrecoverable. The flap is resolved **to the higher rate** (held high
-  the output pads with duplicates; held low it drops real frames — the same
+  the output pads with duplicates; held low it drops real frames, the same
   measured asymmetry behind the hysteresis band) and held there: confirmed
   changes down to the flap's low rate are refused while settled batches keep
   sighting the high one, and for `RATE_FLAP_HOLD_S` (1 h) past the last
@@ -1916,14 +1916,14 @@ entries are the mechanism that keeps it under review
   Also fixed alongside, from the same night's log: the storm bound used to
   **discard** a confirmed change it was merely delaying (the candidate was
   cleared before the interval check), so the same evidence was re-derived and
-  re-logged as `the frame rate has moved again` — at warning level — every
+  re-logged as `the frame rate has moved again`, at warning level, every
   second batch for the whole window. The candidate is now kept through the
   hold (the first agreeing batch past the floor acts on it), the hold is
   logged once per pending change at info level, and refusals of a known flap
   are info once, then debug.
 
   Costs and limits, stated: the first swing of a flap episode still pays two
-  rebuilds (down, then the resolution back up) — nothing can know the first
+  rebuilds (down, then the resolution back up); nothing can know the first
   swing will reverse; while held high through a low dwell, ffmpeg logs
   `More than 1000 frames duplicated` (E70's counter would make this a number);
   and a real setting change to a known flap's low rate is delayed up to

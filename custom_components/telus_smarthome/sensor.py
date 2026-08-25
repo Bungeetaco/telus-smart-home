@@ -227,7 +227,7 @@ class AuthHealthSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Diagnostic sensor reflecting TELUS/Alarm.com session auth health.
 
     Not tied to any single Alarm.com device (unlike the other platforms in
-    this integration) — it reports on the health of the integration's own
+    this integration); it reports on the health of the integration's own
     connection, so it's grouped under a synthetic "integration" device
     rather than a partition/panel device.
     """

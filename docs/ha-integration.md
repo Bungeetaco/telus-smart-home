@@ -69,8 +69,8 @@ model](#the-update-model)); polling is the fallback.
 ```
 
 The controller and the library device tree drive the "real" Alarm.com devices.
-A second, parallel data path — several small `DataUpdateCoordinator`s hitting
-the camera bridge's local control server — drives cameras, video-clip events,
+A second, parallel data path (several small `DataUpdateCoordinator`s hitting
+the camera bridge's local control server) drives cameras, video-clip events,
 the activity feed, and video-automation switches.
 
 ---
@@ -102,7 +102,7 @@ These are covered in detail under [The update model](#the-update-model) and
 1. **Clip-link secret.** If the entry has no `clip_link_secret`, generate a
    32-byte hex secret and persist it into `config_entry.data`. This secret signs
    the clip-redirect links served by `clip_view.py`. It is generated once and
-   **never rotated** — the signatures live inside already-delivered phone
+   **never rotated**: the signatures live inside already-delivered phone
    notifications, so a new secret would break every older clip link. It is
    created here, before the coordinators, so `event.py` can always assume it
    exists.
@@ -126,14 +126,14 @@ These are covered in detail under [The update model](#the-update-model) and
    failure simply leaves the coordinator data empty; camera/event entities appear
    on a later poll.
 5. **Activity coordinator.** Construct the shared `ActivityHistoryCoordinator`
-   and `async_refresh()` it, same reasoning — shared so `sensor.py`'s activity
+   and `async_refresh()` it, same reasoning: shared so `sensor.py`'s activity
    feed reads the same data `event.py` polls.
 6. **Store in `hass.data`.** Under `hass.data[DOMAIN][entry_id]` with keys
    `DATA_CONTROLLER`, `DATA_CAMERA_COORDINATOR`, `DATA_ACTIVITY_COORDINATOR`.
 7. **Websocket monitor.** Start `controller.async_start_websocket_monitor()` as a
    **tracked background task** via `config_entry.async_create_background_task`.
    Tracking matters: the monitor loops forever, so an untracked task would
-   survive unload and keep running against a closed session — one leaked,
+   survive unload and keep running against a closed session: one leaked,
    permanently-reconnecting task per reload (and every options save, reauth, or
    reconfigure is a reload).
 8. **Shutdown listener.** Register an `EVENT_HOMEASSISTANT_STOP` listener that
@@ -154,22 +154,22 @@ These are covered in detail under [The update model](#the-update-model) and
     Besides the target/source fields (`entity_id`, `message` /
     `media_content_id`, `engine`, `language`), `speak` takes two **optional**
     audio-shaping fields forwarded verbatim to the bridge's talk route:
-    `conditioning` (boolean — `false` disables the bridge's default ffmpeg
+    `conditioning` (boolean; `false` disables the bridge's default ffmpeg
     conditioning chain for that one clip) and `audio_filter` (an explicit
     ffmpeg `-af` chain that overrides both; `""` disables conditioning).
     A field the caller did not set is **absent from the POST body**, never
-    defaulted — the bridge's own defaults are the contract (see
+    defaulted: the bridge's own defaults are the contract (see
     [control-api.md](control-api.md#post-controlcamerascamera_idtalk)).
     The talk route's `codec` field is deliberately **not** exposed: only
     mu-law works on the reference doorbell, and a one-option selector would
     only invite a broken value. The passthrough is verified by `py_compile`
-    and code reading only — it has not been fired against a live doorbell, and
+    and code reading only: it has not been fired against a live doorbell, and
     `speak_service.py` is outside what the integration's test suites cover
     (see [development.md](development.md#the-integration-suites)).
 13. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
     or un-bypasses named sensors on the alarm partition. **A bypassed zone does
     not trigger the alarm until it is put back**, which is why this is a service
-    rather than a switch on every sensor row — a stray tap should not be able to
+    rather than a switch on every sensor row: a stray tap should not be able to
     stop a zone protecting the house. It is deliberately separate from the
     `force_bypass` arming option and does not touch the arm path: `force_bypass`
     is automatic at arm time, this is manual, and only one of them being
@@ -178,19 +178,19 @@ These are covered in detail under [The update model](#the-update-model) and
     Two live-verified details it accounts for: the partition itself is re-read
     before every write and refuses when it says no (notably when armed, on a
     panel reporting `canBypassSensorWhenArmed` false), and the change takes about
-    **ten seconds** to reach the sensor — so the post-write refresh is delayed
+    **ten seconds** to reach the sensor, so the post-write refresh is delayed
     past that window rather than firing immediately and reading the old state.
 
 14. **Unpair service.** Register `telus_smarthome.unpair_arming_device`, which
     removes one phone from the panel's Bluetooth disarming so it can no longer
-    disarm on approach. **It cannot be undone from Home Assistant** — re-pairing
-    needs physical access to both the phone and the panel — which is the whole
+    disarm on approach. **It cannot be undone from Home Assistant**: re-pairing
+    needs physical access to both the phone and the panel, which is the whole
     reason it is a service and not a button: a button sits on a dashboard beside
     controls that are all trivially reversible and gets pressed by accident, a
     service call has to be written deliberately.
 
-    It takes exactly one entity — the "Disarm alarm on arrival" switch belonging
-    to the phone to remove — never a list, because a list invites "unpair these
+    It takes exactly one entity, the "Disarm alarm on arrival" switch belonging
+    to the phone to remove, never a list, because a list invites "unpair these
     three" written once and re-run later against a household that has changed.
     The entity is resolved through the entity registry and anything uncertain is
     refused: an unknown entity, one belonging to another integration, or one that
@@ -206,20 +206,20 @@ These are covered in detail under [The update model](#the-update-model) and
 
 1. Calls `initialize_lite()`, which constructs the `pyalarmdotcomajax`
    `AlarmController` with a **dedicated aiohttp session**
-   (`async_create_clientsession`) — the SSO handshake needs an isolated cookie
-   jar — and calls `async_login()` (the TELUS-patched login).
+   (`async_create_clientsession`) (the SSO handshake needs an isolated cookie
+   jar) and calls `async_login()` (the TELUS-patched login).
 2. Reads options, registers a config-entry update listener that reloads on
    options change.
 3. Creates the main `DataUpdateCoordinator` with `update_method=async_update`
    and `update_interval` from options (default 300 s).
 4. Registers the coordinator with `telus_ws_push_patch` so websocket pushes
    notify its listeners.
-5. `await update_coordinator.async_config_entry_first_refresh()` — the first
+5. `await update_coordinator.async_config_entry_first_refresh()`: the first
    REST poll that populates device state.
 6. Starts the 60-second keepalive task (`async_track_time_interval`).
 
 `initialize_lite()` is shared between the real setup path and the config flow.
-It deliberately does **not** translate `UnexpectedResponse` — the config flow has
+It deliberately does **not** translate `UnexpectedResponse`: the config flow has
 its own handler that shows a TELUS-specific error string, while `initialize()`
 translates `UnexpectedResponse` → `ConfigEntryNotReady` for its setup-only
 callers.
@@ -230,9 +230,9 @@ The device-reconciliation pass removes HA devices no longer present on
 Alarm.com. It makes **one decision per device, after inspecting all of its
 identifiers**, and only ever considers devices whose identifier looks like an
 Alarm.com id (`<digits>-<digits>`, with optional `_debug`/`_malfunction` style
-suffixes stripped by regex). Devices this fork creates itself — bridge-served
+suffixes stripped by regex). Devices this fork creates itself (bridge-served
 cameras (keyed by TELUS camera UUID), the Activity device, the diagnostic
-"integration" device — are never Alarm.com ids and are always kept. This guards
+"integration" device) are never Alarm.com ids and are always kept. This guards
 against silently discarding user customizations (renames, area assignments,
 enable/disable state) on every restart.
 
@@ -274,7 +274,7 @@ The integration is **push-first with a polling fallback**.
   5 min**). Values below 300 s risk Alarm.com rate-limiting a live account.
 - **Push.** A single websocket to Alarm.com receives real-time device pushes.
   When a push arrives, the library updates its in-memory device objects and the
-  integration notifies coordinator listeners so entities re-read immediately —
+  integration notifies coordinator listeners so entities re-read immediately,
   with no extra API calls.
 
 Both matter because the Alarm.com server closes the push websocket roughly every
@@ -291,7 +291,7 @@ cycle:
 2. Wait for the socket to close, but **bound the wait only while pre-`RUNNING`**
    (`WEBSOCKET_START_TIMEOUT_SECONDS` = 60 s). `start_websocket()` only spawns a
    task; if that task dies before reaching `ws_connect`, no state callback fires
-   and the state stays `STARTING` — an unbounded wait would then block forever
+   and the state stays `STARTING`; an unbounded wait would then block forever
    and silently kill real-time updates. Once `RUNNING`, a healthy connection may
    stay open indefinitely and is never torn down on a timer.
 3. On close (unless state is `STOPPED`), sleep `ws_reconnect_timeout` seconds
@@ -302,7 +302,7 @@ retried rather than silently ending real-time updates for the rest of the HA
 session. `asyncio.CancelledError` is re-raised (clean shutdown).
 
 The state handler (`_ws_state_handler`) also triggers a one-shot
-`async_request_refresh()` on each **reconnect** (not the initial connect — setup
+`async_request_refresh()` on each **reconnect** (not the initial connect; setup
 has just polled). Anything Alarm.com pushed while the socket was down is gone
 (it does not replay), so this refresh closes the blind window at ~1 second of
 cost instead of a full poll interval.
@@ -311,27 +311,27 @@ cost instead of a full poll interval.
 
 A 60-second task (`KEEP_ALIVE_INTERVAL_SECONDS`) calls the library's
 `keep_alive()`. Failures (including plain network blips, which are not
-`AlarmdotcomException` subclasses) are swallowed at debug level — a degraded
+`AlarmdotcomException` subclasses) are swallowed at debug level: a degraded
 session is caught and correctly surfaced by the next coordinator refresh, so the
 keepalive does not need to spam an uncaught-exception traceback every 60 s.
 
-### Runtime patches — what they fix
+### Runtime patches: what they fix
 
 These three patches exist because the stock library, driven by TELUS's server,
 left real-time updates dead much of the time. Each is a generic fix any user of
 this integration relies on.
 
-#### `telus_auth_patch` — TELUS SSO
+#### `telus_auth_patch`: TELUS SSO
 
 Replaces `AlarmController.async_login` with a handshake against TELUS's identity
 gateway, and re-points the library's base URLs at TELUS. See [TELUS SSO
 authentication](#telus-sso-authentication).
 
-#### `telus_ws_heartbeat_patch` — keep the idle socket alive
+#### `telus_ws_heartbeat_patch`: keep the idle socket alive
 
 The library calls `ws_connect()` with **no heartbeat**, so the websocket carries
 zero traffic between pushes. The server drops idle sockets after ~5 minutes,
-after which the integration waits a further reconnect timeout — leaving push dead
+after which the integration waits a further reconnect timeout, leaving push dead
 much of the time and state changes stuck behind the slow REST poll.
 
 The patch wraps the session's `ws_connect` to default `heartbeat=55` seconds.
@@ -342,17 +342,17 @@ wrap idempotent.
 
 > A documented dead end: the live portal connects with extra query params
 > (`?f=1&…&ver=A`) that the library omits. Mirroring them was **rejected** by the
-> server — the socket reached `RUNNING` and closed ~1 ms later, every time. Do
+> server: the socket reached `RUNNING` and closed ~1 ms later, every time. Do
 > not "fix" the endpoint to match the browser capture.
 
-#### `telus_ws_push_patch` — resilience + push-to-HA refresh
+#### `telus_ws_push_patch`: resilience + push-to-HA refresh
 
 Wraps the library's `_async_handle_message` to fix two defects that sat between a
 device changing and HA showing it:
 
 1. **A library crash killed the connection.** The library's message handler
    could hit an `UnboundLocalError` on an unrecognized device (one absent from
-   its registry — e.g. a bridge-served doorbell camera, id like
+   its registry, e.g. a bridge-served doorbell camera, id like
    `<unit>-<device>`). The exception propagated out of the read loop and dropped
    the socket. Because such a device emits events regularly, real-time updates
    were dead much of the time. The wrapper **swallows per-message errors** so one
@@ -364,7 +364,7 @@ device changing and HA showing it:
    message. Coordinators are held in a `weakref.WeakSet` (so a reloaded/removed
    entry's coordinator can be collected); the main coordinator registers itself
    via `register_coordinator()` in `controller.initialize()`. Notifying only
-   re-reads objects already in memory — no extra API requests, no rate-limit
+   re-reads objects already in memory: no extra API requests, no rate-limit
    contribution.
 
 ---
@@ -377,10 +377,10 @@ Alarm.com's; only the login handshake differs. The replacement
 `async_login`:
 
 1. Clears the session cookie jar (TELUS rejects a login if stale session cookies
-   are present — important for re-login on session expiry; the dedicated session
+   are present, important for re-login on session expiry; the dedicated session
    makes wiping safe).
-2. **POST** `smarthome_login_v1` — submit credentials.
-3. **POST** `flows/login?acr=…` — complete the login flow (must send an explicit
+2. **POST** `smarthome_login_v1`: submit credentials.
+3. **POST** `flows/login?acr=…`: complete the login flow (must send an explicit
    empty JSON body; a bodiless POST 415s).
 4. **GET** the OAuth2 authorization endpoint with `allow_redirects=True` and
    follow the full redirect chain, which lands on the page that sets the real
@@ -403,7 +403,7 @@ Two important behaviors:
 - **Base URL re-pointing.** `URL_BASE` is patched to the TELUS host, but that
   only covers URLs the library *formats* at call time. The camera-settings
   extension bakes a fully-qualified Alarm.com URL into a class attribute at its
-  own import time, so its `ENDPOINT` host is rewritten in place — otherwise every
+  own import time, so its `ENDPOINT` host is rewritten in place; otherwise every
   Skybell config option (the switch/select/number platforms) would silently talk
   to the wrong host.
 
@@ -479,7 +479,7 @@ bridge also watches:
 
 - `_sync_write_fallback_and_read_secret` (in an executor thread) writes
   `credentials.json` to the shared dir with mode `0o600` and chowns it to the
-  share dir's owner (the bridge's non-root user must be able to read it — a
+  share dir's owner (the bridge's non-root user must be able to read it; a
   root-owned file caused the bridge's watcher to log `PermissionError` every
   30 s). It writes to a temp file and `os.replace`s it atomically, then reads back
   the bridge's `control_secret`.
@@ -505,7 +505,7 @@ Two screens (`async_step_init` → `async_step_modes`):
 | `arm_away_options` | Same, for arm-away | `[]` |
 | `arm_night_options` | Same, for arm-night | `[]` |
 
-> The options flow deliberately does **not** assign `self.config_entry` — recent
+> The options flow deliberately does **not** assign `self.config_entry`: recent
 > HA core made it a read-only property; assigning to it raised `AttributeError`
 > and broke the options flow entirely.
 
@@ -518,18 +518,18 @@ Two screens (`async_step_init` → `async_step_modes`):
 | Platform | Backed by | Devices / capabilities exposed |
 | --- | --- | --- |
 | `alarm_control_panel` | library partitions | Arm home/away, arm night (if supported), disarm; arming/disarming transitional states; `uncleared_issues` attribute |
-| `binary_sensor` | library sensors + water sensors, plus virtual attribute entities + the stream-health coordinator | Door / window / motion / smoke / CO / glass-break (vibration) / moisture / freeze / safety states; plus per-device **Malfunction** and **Battery** diagnostic sensors; plus the **Camera bridge** connectivity diagnostic on the integration service device (bridge-backed — see [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)) |
+| `binary_sensor` | library sensors + water sensors, plus virtual attribute entities + the stream-health coordinator | Door / window / motion / smoke / CO / glass-break (vibration) / moisture / freeze / safety states; plus per-device **Malfunction** and **Battery** diagnostic sensors; plus the **Camera bridge** connectivity diagnostic on the integration service device (bridge-backed; see [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)) |
 | `lock` | library locks | Lock/unlock with locking/unlocking transitional states; optional code |
 | `cover` | library garage doors + gates | Open/close with opening/closing states; device class garage or gate |
 | `light` | library lights | On/off, brightness (if supported); optimistic state for lights without state tracking |
 | `button` | all stateful devices + bridge cameras | One **Debug** button per device (fires `DEBUG_REQ_EVENT` to dump `debug_data`); **siren start/stop** buttons per camera that supports them (bridge-backed) |
-| `number` | camera config options + bridge cameras | Skybell **brightness** slider/box config option; camera **speaker volume** and **status-LED brightness** (bridge-backed — see [Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities)) |
+| `number` | camera config options + bridge cameras | Skybell **brightness** slider/box config option; camera **speaker volume** and **status-LED brightness** (bridge-backed; see [Camera settings, siren and diagnostics entities](#camera-settings-siren-and-diagnostics-entities)) |
 | `switch` | camera config options + bridge automation rules + bridge cameras + arming devices | Skybell binary-chime on/off; **video automation rule** pause/resume; camera **privacy mode**, **indoor chime**, **outdoor tone**, **status LED** and the three **TELUS-app notification** toggles (motion / button press / smart chime); per-phone **Disarm alarm on arrival**; **Panel Bluetooth pairing** (all bridge-backed) |
 | `select` | camera config options + bridge cameras + arming devices | Skybell **adjustable chime** volume and **motion sensitivity**; camera **wired chime type**, **TELUS-app notification format** and **live video resolution**; per-phone **enrolled partition**; **Bluetooth disarm window** (all but the Skybell options bridge-backed) |
 | `climate` | library thermostats | HVAC mode (heat/cool/auto/fan-only/off), setpoints, fan mode, humidity readout |
 | `sensor` | controller + activity coordinator + bridge cameras | **Auth health** diagnostic sensor; **Recent Events** activity-feed sensor; talkdown status/failure sensors; per-camera **signal strength / battery / status** diagnostics and **solar panel** status; per-camera **Stream state**, **Dropped frames** and **Audio state** stream-health diagnostics (bridge-backed) |
 | `camera` | camera bridge | Live RTSP stream + on-demand snapshots (bridge-backed) |
-| `event` | camera bridge | Per-camera video-clip events, a system-wide activity event, and a per-doorbell **button press** event (device class `doorbell`) — all bridge-backed |
+| `event` | camera bridge | Per-camera video-clip events, a system-wide activity event, and a per-doorbell **button press** event (device class `doorbell`), all bridge-backed |
 
 Most platforms follow the same shape: an `async_setup_entry` that reads the
 controller from `hass.data`, then creates one entity per matching device in
@@ -539,7 +539,7 @@ controller from `hass.data`, then creates one entity per matching device in
 
 `base_device.py` provides the shared `CoordinatorEntity` subclasses:
 
-- **`BaseDevice`** — holds the library device reference, builds `DeviceInfo`
+- **`BaseDevice`**: holds the library device reference, builds `DeviceInfo`
   (manufacturer `Alarm.com`, linking to a partition device via `via_device` only
   when a real partition id exists), and exposes battery-level, battery-alert, and
   malfunction helpers. It registers an external update callback and, on each
@@ -548,12 +548,12 @@ controller from `hass.data`, then creates one entity per matching device in
   (`_device_missing`, since `available` is a property and the `_attr_` shorthand
   wouldn't take), and keeps serving the last known object rather than freezing
   updates for *other* entities in the same dispatch cycle.
-- **`HardwareBaseDevice`** — for real hardware (panels, sensors, locks, …). Sets
+- **`HardwareBaseDevice`**: for real hardware (panels, sensors, locks, …). Sets
   `unique_id` to the device id and exposes a small set of static raw attributes
   (`state_text`, `mac_address`), also with a removed-device fallback.
-- **`AttributeBaseDevice`** — for derived attribute entities (battery,
+- **`AttributeBaseDevice`**: for derived attribute entities (battery,
   malfunction, debug). `unique_id` is `<device_id>_<key>`.
-- **`ConfigBaseDevice`** — for configuration-option entities (Skybell settings).
+- **`ConfigBaseDevice`**: for configuration-option entities (Skybell settings).
   `unique_id` is `<device_id>_<slug>`, entity category `CONFIG`.
 
 `available` on `BaseDevice` combines the coordinator's health with the
@@ -583,21 +583,21 @@ diagnostic sensors from *all* stateful devices. Device class is derived:
   name against precompiled language patterns (from `device_type_langs.py`);
   water sensors → **moisture**; smoke/CO/panic/glass-break/motion/freeze map to
   their obvious classes. The name-matching lists are compiled once into single
-  alternation patterns because `device_class` is read on every state update — a
+  alternation patterns because `device_class` is read on every state update; a
   hot path.
 
 ### Lock / Cover / Light / Climate
 
-- **Lock** — lock/unlock with `is_locking`/`is_unlocking` transitional states
+- **Lock**: lock/unlock with `is_locking`/`is_unlocking` transitional states
   from `state` vs `desired_state`; optional code (`code_format` derived from the
   configured `arm_code`).
-- **Cover** — garage doors and gates; `CoverDeviceClass.GARAGE` or `.GATE`;
+- **Cover**: garage doors and gates; `CoverDeviceClass.GARAGE` or `.GATE`;
   open/close with opening/closing states.
-- **Light** — on/off and brightness. Uses the modern `ColorMode` enum (the old
+- **Light**: on/off and brightness. Uses the modern `ColorMode` enum (the old
   `SUPPORT_BRIGHTNESS`/`COLOR_MODE_*` constants were removed from core and would
   crash every light). Brightness is scaled 0–255 ↔ 0–100. Lights without state
   tracking use `assumed_state` and optimistic local state.
-- **Climate** — thermostats. `_legacy_refresh_attributes` maps device state to
+- **Climate**: thermostats. `_legacy_refresh_attributes` maps device state to
   HVAC mode (aux-heat state folds into `HEAT`, since core removed the aux-heat
   concept), computes setpoints and min/max limits per mode, and sets fan mode.
   Feature flags and HVAC/fan mode lists are derived from the device's `supports_*`
@@ -622,7 +622,7 @@ These are currently Skybell-specific (noted with TODOs to generalize).
 
 One diagnostic **Debug** button per stateful device. Pressing it fires
 `DEBUG_REQ_EVENT` with the device id; the listener in `__init__.py` logs that
-device's `debug_data` at warning level — a support aid.
+device's `debug_data` at warning level, a support aid.
 
 ### Sensor
 
@@ -638,17 +638,17 @@ stream-health sensors, also on the camera devices (see
 [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)).
 The two covered here:
 
-- **`AuthHealthSensor`** — an enum diagnostic sensor
+- **`AuthHealthSensor`**: an enum diagnostic sensor
   (`ok` / `reauth_required` / `telus_error`) reflecting
   `controller.auth_health`, with `detail` and `last_success` attributes. Lets the
   user see auth failing from inside HA (history graph) instead of only via the
   reauth notification or logs. The controller sets these fields in
   `async_update()`.
-- **`ActivityFeedSensor`** — state is the count of events on the current activity
+- **`ActivityFeedSensor`**: state is the count of events on the current activity
   page; the full page (with a durable `clip_link` per clip-bearing event) is in
   the `events` attribute for a dashboard card to render as a scrollable feed. The
   `events` attribute is marked `_unrecorded_attributes` because it is several KB
-  and changes on every 30 s poll (TELUS re-signs URLs each time) — recording it
+  and changes on every 30 s poll (TELUS re-signs URLs each time); recording it
   would write ~2,880 multi-KB rows/day of already-ephemeral data. It shares the
   same `ActivityHistoryCoordinator` as the activity event entity, so it adds no
   extra bridge polling.
@@ -666,10 +666,10 @@ mirrors of the bridge's local control server, reached over loopback HTTP with a
 
 The shared helper `bridge_client.py` provides:
 
-- `read_control_secret()` — blocking read of the bridge's `control_secret` off
+- `read_control_secret()`: blocking read of the bridge's `control_secret` off
   the shared dir (executor only); returns `None` if the bridge hasn't generated
   it yet (a normal, temporary state right after either container restarts).
-- `bridge_get()` — read the secret, then make an authenticated `GET`; returns
+- `bridge_get()`: read the secret, then make an authenticated `GET`; returns
   `None` when the secret isn't ready yet, and raises on other failures.
 
 The philosophy throughout: **a bridge that is down or not yet up must never fail
@@ -685,7 +685,7 @@ a real error.
 | `VideoEventsCoordinator` (event.py) | `/control/events` | 30 s | per-camera event entities |
 | `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, doorbell-press event entities, activity-feed sensor |
 | `AutomationRulesCoordinator` (switch.py) | `/control/automations` | 300 s | automation-rule switches |
-| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors, and *which cameras are doorbells* (creation gate only — the doorbell event entity itself rides the activity coordinator) |
+| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors, and *which cameras are doorbells* (creation gate only; the doorbell event entity itself rides the activity coordinator) |
 | `StreamHealthCoordinator` (sensor.py) | `/control/status` | 30 s | per-camera stream-health sensors (stream state, dropped frames, audio state), camera-bridge connectivity binary sensor |
 | `TalkMetricsCoordinator` (sensor.py) | `/control/metrics` | 120 s | talkdown status/failure sensors |
 
@@ -697,7 +697,7 @@ coordinator's 30 s interval is safe where other intervals are cautious:
 `/control/status` answers from an in-memory dict the bridge's own camera loops
 maintain, entirely over loopback with **zero Alarm.com requests behind it**, so
 the short poll buys "the stream died" being visible within half a minute at no
-rate-limit cost —
+rate-limit cost;
 see [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)
 for how it is shared between `sensor.py` and `binary_sensor.py`.
 
@@ -705,12 +705,12 @@ for how it is shared between `sensor.py` and `binary_sensor.py`.
 
 `TelusCamera` is a `CoordinatorEntity` + `Camera` created **per bridge-reported
 camera**, dynamically: `_add_new_cameras` runs as a coordinator listener on every
-poll and adds entities for any newly-discovered camera id — so cameras added to
+poll and adds entities for any newly-discovered camera id, so cameras added to
 the TELUS account later appear with no restart. `available` follows the
 coordinator health plus whether the bridge still reports that specific camera.
 
 - `stream_source()` returns the RTSP URL the bridge publishes.
-- `async_camera_image()` prefers a **warm live-stream frame** (the common case —
+- `async_camera_image()` prefers a **warm live-stream frame** (the common case;
   streams stay up 24/7), then falls back to TELUS's **on-demand snapshot** via the
   bridge (`/control/cameras/<id>/snapshot`), then to a **cold-stream keyframe**.
   The snapshot call is bounded at 8 s to stay inside core's 10 s image budget (a
@@ -722,9 +722,9 @@ coordinator health plus whether the bridge still reports that specific camera.
 ### Event platform
 
 Three entity kinds. The `CameraSettingsCoordinator` also appears here, but only
-to decide *which* cameras get a doorbell entity — see below.
+to decide *which* cameras get a doorbell entity; see below.
 
-- **`TelusCameraEvent`** — one `EventEntity` per camera (sharing the camera's
+- **`TelusCameraEvent`**: one `EventEntity` per camera (sharing the camera's
   device via identical identifiers, so it appears as a second entity on the
   camera device). Fires `person` / `vehicle` / `animal` / `other` (classified
   from TELUS's free-text description, matching French and English) for any clip
@@ -734,19 +734,19 @@ to decide *which* cameras get a doorbell entity — see below.
   creation (otherwise the first successful poll would replay up to 20 historical
   clips and trigger every attached automation). State is written **once per
   event** so a multi-event poll produces one `state_changed` each.
-- **`TelusActivityEvent`** — one entity for the whole account, covering the
+- **`TelusActivityEvent`**: one entity for the whole account, covering the
   system-wide Activity feed (arm/disarm, door/lock, camera/doorbell triggers).
   Baseline is tracked as a **set of ids** rather than a timestamp high-water mark
   (activity ids are opaque strings; duplicate/formatting hazards make timestamps
   unsound). It also re-fires an event **exactly once more** if an entry gains a
-  clip it lacked when first seen (`_fired_with_clip`) — TELUS attaches the media
+  clip it lacked when first seen (`_fired_with_clip`): TELUS attaches the media
   relationship a poll or two after the entry first appears, so this avoids
   permanently losing a doorbell clip notification. Both sets are re-based onto the
   current (bounded, 20-entry) page each poll so they can't grow unbounded. Its
-  attributes carry `event_type_name` — TELUS's untranslated server-side enum for
-  what the entry *is* — so a template or condition on this catch-all entity can
+  attributes carry `event_type_name` (TELUS's untranslated server-side enum for
+  what the entry *is*) so a template or condition on this catch-all entity can
   key off something the account's language does not change.
-- **`TelusDoorbellEvent`** — one `EventEntity` per doorbell, device class
+- **`TelusDoorbellEvent`**: one `EventEntity` per doorbell, device class
   **`doorbell`**, attached to that camera's existing device. Fires the single
   event type `press`. This is what a ring-triggered automation should trigger
   on; see [Triggering on a doorbell press](#triggering-on-a-doorbell-press)
@@ -759,7 +759,7 @@ to decide *which* cameras get a doorbell entity — see below.
 ### Triggering on a doorbell press
 
 A press is also visible in `TelusActivityEvent`'s feed, but only as a generic
-`other` event whose `description` is free text — so before this entity existed,
+`other` event whose `description` is free text, so before this entity existed,
 every ring automation had to pattern-match that text.
 
 **Matching is on `event_type_name == "DoorbellButtonPress"`, never on the
@@ -767,17 +767,17 @@ description.** This account's activity descriptions have been observed in both
 French (`Déclenché par caméra (Une personne)`, `Mouvement détecté`) and English
 (`Button Push`, `Locked (Manually locked)`). The language is a server-side
 account property, so a text match is a latent failure that would surface as the
-doorbell simply never firing again — no error, no log line. `event_type_name` is
+doorbell simply never firing again: no error, no log line. `event_type_name` is
 a server-side enum and is not translated. The bridge already carries it through
 `/control/history` (see [control-api.md](control-api.md#get-controlhistory)); the
 entity reads it straight off the coordinator.
 `camera-bridge/tests/test_history_events.py` pins the rename it depends on, and
-`tests/test_event_entities.py` pins the matcher itself from both sides — a
+`tests/test_event_entities.py` pins the matcher itself from both sides: a
 French-described press fires, and an entry whose description says `Button Push`
 while its enum says otherwise does not.
 
 **Which cameras get one.** `_is_doorbell()` gates on the chime capability flags
-in the camera's `/settings` `audio` section — `supports_indoor_chime`,
+in the camera's `/settings` `audio` section: `supports_indoor_chime`,
 `supports_outdoor_tone` or `supports_chime_type` (any one of the three; they are
 independent). A chime is what a camera with no bell to ring does not have. Two
 plausible-looking alternatives are deliberately rejected:
@@ -785,7 +785,7 @@ plausible-looking alternatives are deliberately rejected:
 - **`notifications.supports_button_press`** resolves from
   `panelNotificationEnableDisableFeatureSupport`, the *same* upstream enum behind
   the motion-notification toggle, so it reads true for any camera that can push a
-  notification at all — doorbell or not.
+  notification at all, doorbell or not.
 - **"has a press ever been seen for this camera"** is a direct signal but an
   unstable one: the feed is a bounded 20-entry page, so it answers "no" for a
   doorbell nobody has rung lately. The entity would appear and vanish across
@@ -795,10 +795,10 @@ plausible-looking alternatives are deliberately rejected:
 Creation therefore goes through `async_add_camera_entities` (the same
 capability-gated path the siren buttons and chime switches use), so a doorbell
 added to the account later gets its entity with no restart, while *firing* is
-driven by the activity coordinator — the only feed carrying presses.
+driven by the activity coordinator, the only feed carrying presses.
 
 **Attribution to a camera** is by `device_id`, which the history feed reports as
-the alarm.com device id (`<unit>-<did>`) — the same id shape `/control/cameras`
+the alarm.com device id (`<unit>-<did>`), the same id shape `/control/cameras`
 uses, and therefore expected to be the same id the entity was constructed with.
 Never by `device_description`, which is a user-editable label.
 
@@ -810,7 +810,7 @@ exists but never fires on a real press, check that equality first.
 **Firing exactly once.** Dedup reuses `TelusActivityEvent`'s mechanism rather
 than inventing a second one: a set of the press ids present on the current page,
 re-based each poll. Activity ids are opaque strings so they cannot be compared
-for recency, and a timestamp high-water mark is worse — a strict `>` permanently
+for recency, and a timestamp high-water mark is worse: a strict `>` permanently
 discards anything sharing the newest timestamp, and one press reliably produces
 several feed entries inside the same second. The set is bounded by the page size
 because anything that scrolls off is older than everything still on the page and
@@ -830,7 +830,7 @@ baseline instead of firing everything on it.
 be `null` more often here: TELUS attaches the media relationship a poll or two
 *after* the history entry appears, and this entity deliberately does **not**
 re-fire when it does. A doorbell that rings an automation twice for one press is
-worse than one whose first notification carries no thumbnail — use
+worse than one whose first notification carries no thumbnail; use
 `TelusActivityEvent`, which does re-fire exactly once on clip arrival, for a
 clip-carrying notification.
 
@@ -843,8 +843,8 @@ camera-settings routes (see
 [control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)):
 a speaker-volume **Number**, a privacy-mode **Switch**, two siren **Buttons**, the
 chime, LED and notification controls, and up to four diagnostic **Sensors**. They
-exist because the useful half of the camera's own configuration — how loud
-talkdown is heard, whether the chime rings, whether the Wi-Fi is degrading — was
+exist because the useful half of the camera's own configuration (how loud
+talkdown is heard, whether the chime rings, whether the Wi-Fi is degrading) was
 previously reachable only through TELUS's own app or portal.
 
 The camera entities attach to the **camera device** the
@@ -857,7 +857,7 @@ The table below also covers the **alarm-side** entities that share this family's
 machinery but no camera: the per-phone Bluetooth disarming controls, which live on
 a device per paired phone, and the panel-wide Bluetooth settings, which live on
 the integration's own service device. Those have their own coordinators and
-routes — see [The Bluetooth disarming entities](#the-bluetooth-disarming-entities).
+routes; see [The Bluetooth disarming entities](#the-bluetooth-disarming-entities).
 
 ### The settings coordinator
 
@@ -870,7 +870,7 @@ and nine upstream TELUS reads behind them: four website settings documents
 (audio, image, video, and the `generalSettings` document that carries the LED,
 notification and solar sections together), two mobile reads for the siren and
 privacy records, and three more for signal, battery and status. These values only change when a person changes them, and Alarm.com's rate limits are undocumented
-and can lock an account — so there is nothing to win by polling faster and a real
+and can lock an account, so there is nothing to win by polling faster and a real
 account-level risk in trying. Nothing in this path touches the always-warm video
 pipeline.
 
@@ -878,7 +878,7 @@ Unlike the camera and activity coordinators it is **not** created in
 `__init__.py`. `camera_settings_coordinator.async_get_camera_settings_coordinator()`
 builds it on first use and stashes it under `DATA_CAMERA_SETTINGS_COORDINATOR`, so
 whichever of the four platforms sets up first wins and the others attach to the
-same instance — and an account with no bridge cameras never creates it at all.
+same instance, and an account with no bridge cameras never creates it at all.
 Teardown is free: `__init__.py` pops the whole per-entry `hass.data` dict on
 unload.
 
@@ -887,19 +887,19 @@ Its first refresh is a plain `async_refresh()`, never
 activity coordinators: the bridge is deployed and updated **separately** from the
 integration, so it may be down, restarting, or simply an older build that does not
 serve these routes yet. Any of those must leave these entities unavailable and
-nothing else — aborting the config entry would take the alarm panel, the locks and
+nothing else; aborting the config entry would take the alarm panel, the locks and
 every sensor down with it.
 
 That first refresh is also **not awaited**. It runs as a config-entry background
 task (`async_create_background_task`), and `async_get_camera_settings_coordinator`
 returns as soon as the instance is stashed. Swallowing the exception is only half
-the protection: one poll cycle is two bridge requests per camera — the
+the protection: one poll cycle is two bridge requests per camera: the
 `/settings` request bounded by the shared client's 10 s timeout and the
 `/diagnostics` request by its own 45 s timeout
 (`CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS`; the signal read alone can legitimately
-take ~25 s on some models) — so a bridge that is *slow* rather than *down*
+take ~25 s on some models), so a bridge that is *slow* rather than *down*
 costs up to ~55 s per camera and can outlast Home Assistant's 60 s
-platform-setup budget with two cameras — which aborts whichever of
+platform-setup budget with two cameras, which aborts whichever of
 `button`/`number`/`switch`/`sensor` set up first, taking the Debug buttons, the
 Skybell config entities and the integration diagnostics with it. Not waiting
 turns that into "entities appear a moment later".
@@ -909,7 +909,7 @@ missing**: with no data at setup time the siren Buttons cannot be created yet
 (they exist only for a camera reporting the permission), so they arrive on the
 first successful poll via the coordinator listener described below. Anything
 referencing them must tolerate their absence for one poll interval after a
-restart — the same tolerance a camera added to the account later already
+restart, the same tolerance a camera added to the account later already
 requires.
 
 ### The entities
@@ -919,20 +919,20 @@ requires.
 | **Speaker volume** | `number` | The camera reports `supports_call_volume` | Slider over the device's own `call_volume_min`–`call_volume_max` (0–10 on the doorbell), step 1, entity category *config*. Setting it POSTs `/settings/volume` and refreshes the coordinator from the response |
 | **Privacy mode** | `switch` | One per bridge-reported camera | On/off via `/privacy`. Reports **unavailable** when the camera reports no privacy support |
 | **Siren start**, **Siren stop** | `button` | Only when the bridge reports the camera has a siren **this account may manually trigger** | Each press POSTs `/siren` with `start` / `stop` |
-| **Indoor chime** | `switch` | The camera reports `supports_indoor_chime` | On/off via `/settings/chime` (`indoor_on`), entity category *config*. Also reports **unavailable** while the selected wired chime type is one the bridge flags `disables_indoor_chime` — see below |
-| **Outdoor tone** | `switch` | The camera reports `supports_outdoor_tone` | The tone the doorbell itself plays, on/off via `/settings/chime` (`outdoor_on`), entity category *config*. Its **volume** is a separate capability and has no entity — `supports_outdoor_tone_volume` is false on the reference doorbell |
-| **Wired chime type** | `select` | The camera reports `supports_chime_type` | Which kind of physical chime the doorbell is wired to — *not* a ringtone. Options come from the bridge's `chime_type_choices` (e.g. None / Mechanical / Digital); selecting one POSTs `/settings/chime` with `chime_type` |
-| **Status LED** | `switch` | The camera reports `led.supports_enabled` | The indicator light on the device, on/off via `/settings/led`, entity category *config*. **Not** the infrared illuminator — that is `ir_led_enabled` on the image route |
+| **Indoor chime** | `switch` | The camera reports `supports_indoor_chime` | On/off via `/settings/chime` (`indoor_on`), entity category *config*. Also reports **unavailable** while the selected wired chime type is one the bridge flags `disables_indoor_chime`; see below |
+| **Outdoor tone** | `switch` | The camera reports `supports_outdoor_tone` | The tone the doorbell itself plays, on/off via `/settings/chime` (`outdoor_on`), entity category *config*. Its **volume** is a separate capability and has no entity: `supports_outdoor_tone_volume` is false on the reference doorbell |
+| **Wired chime type** | `select` | The camera reports `supports_chime_type` | Which kind of physical chime the doorbell is wired to, *not* a ringtone. Options come from the bridge's `chime_type_choices` (e.g. None / Mechanical / Digital); selecting one POSTs `/settings/chime` with `chime_type` |
+| **Status LED** | `switch` | The camera reports `led.supports_enabled` | The indicator light on the device, on/off via `/settings/led`, entity category *config*. **Not** the infrared illuminator: that is `ir_led_enabled` on the image route |
 | **Status LED brightness** | `number` | The camera reports `led.supports_brightness` | Both cameras on the reference account report this **false**, so neither gets one; the entity exists for models that can dim and has never run against real hardware |
-| **TELUS app motion notifications**, **TELUS app button press notifications**, **TELUS app smart chime notifications** | `switch` | Each gated on its own `notifications.supports_*` | What TELUS pushes to its **own app** — nothing to do with Home Assistant's notifications. Via `/settings/notifications`, entity category *config*. A camera that is not a doorbell reports every flag false and gets none |
-| **TELUS app notification format** | `select` | The camera reports `notifications.supports_format` | Whether TELUS's push carries just text or a thumbnail. Two options only — the upstream enum has four members and the other two are a null state and a legacy value alarm.com rewrites away |
-| **Live video resolution** | `select` | The camera reports `video.supports_live_resolution` | The **live** stream's resolution, labelled the way TELUS labels it. Changing it changes what the bridge restreams — verified live, despite the bridge asking TELUS for the "highest resolution" source. Takes effect on the next stream renegotiation, not immediately |
-| **Disarm alarm on arrival** | `switch` | One per paired phone reporting `supports_disarming_toggle` | Whether that phone disarms the panel when it comes within range. Each phone is its own device in the registry, named as TELUS names it, so it is clear *whose* phone opens the house. Polled every 15 minutes — nothing but a person changes it |
-| **Disarms partition** | `select` | One per paired phone reporting `supports_enrolled_partition` — **and only on an account with two or more partitions** | Which partition that phone disarms. Options come from the record's `enrolled_partition_choices`; selecting one POSTs `/arming-devices/{id}/enrolled-partition` with the partition **number**. See below for why a single-partition account gets no entity |
-| **Panel Bluetooth pairing** | `switch` | The panel reports `supports_pairing_enabled` | Whether the panel accepts Bluetooth pairing at all — i.e. whether a phone that is not already enrolled can be added. On the integration's **service device**, not a camera and not a phone. **Not a master switch** over the per-phone toggles — see below |
-| **Bluetooth disarm window** | `select` | The panel reports `supports_timeout` | How long the panel stays disarmable after a paired phone is seen. Also on the service device. A select rather than a number: the vendor offers exactly five windows — 1, 5, 10, 20 and 30 minutes — and the bridge reports both the unit and the set, so the options are labelled "5 minutes" rather than a bare `5` |
+| **TELUS app motion notifications**, **TELUS app button press notifications**, **TELUS app smart chime notifications** | `switch` | Each gated on its own `notifications.supports_*` | What TELUS pushes to its **own app**: nothing to do with Home Assistant's notifications. Via `/settings/notifications`, entity category *config*. A camera that is not a doorbell reports every flag false and gets none |
+| **TELUS app notification format** | `select` | The camera reports `notifications.supports_format` | Whether TELUS's push carries just text or a thumbnail. Two options only: the upstream enum has four members and the other two are a null state and a legacy value alarm.com rewrites away |
+| **Live video resolution** | `select` | The camera reports `video.supports_live_resolution` | The **live** stream's resolution, labelled the way TELUS labels it. Changing it changes what the bridge restreams, verified live, despite the bridge asking TELUS for the "highest resolution" source. Takes effect on the next stream renegotiation, not immediately |
+| **Disarm alarm on arrival** | `switch` | One per paired phone reporting `supports_disarming_toggle` | Whether that phone disarms the panel when it comes within range. Each phone is its own device in the registry, named as TELUS names it, so it is clear *whose* phone opens the house. Polled every 15 minutes; nothing but a person changes it |
+| **Disarms partition** | `select` | One per paired phone reporting `supports_enrolled_partition`, **and only on an account with two or more partitions** | Which partition that phone disarms. Options come from the record's `enrolled_partition_choices`; selecting one POSTs `/arming-devices/{id}/enrolled-partition` with the partition **number**. See below for why a single-partition account gets no entity |
+| **Panel Bluetooth pairing** | `switch` | The panel reports `supports_pairing_enabled` | Whether the panel accepts Bluetooth pairing at all, i.e. whether a phone that is not already enrolled can be added. On the integration's **service device**, not a camera and not a phone. **Not a master switch** over the per-phone toggles; see below |
+| **Bluetooth disarm window** | `select` | The panel reports `supports_timeout` | How long the panel stays disarmable after a paired phone is seen. Also on the service device. A select rather than a number: the vendor offers exactly five windows (1, 5, 10, 20 and 30 minutes) and the bridge reports both the unit and the set, so the options are labelled "5 minutes" rather than a bare `5` |
 | **Solar panel** | `sensor` | The camera reports `solar.supports_connected` | Whether a solar panel is attached, as an enum sensor reading *Connected* / *Not connected*, entity category *diagnostic*. **Both cameras on the reference account report the feature unsupported, so neither gets one** |
-| **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit** — the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
+| **Signal strength** | `sensor` | The camera reports a signal strength | Diagnostic, graphable, but **no device class and no unit**: the bridge reports alarm.com's normalized 0–100 score, which is not dBm, and the fallback keys other models use have an unverified unit |
 | **Battery** | `sensor` | The camera reports a battery level | Diagnostic, device class *battery*, % |
 | **Camera status** | `sensor` | The camera reports a device status | Diagnostic, the upstream status string |
 
@@ -946,15 +946,15 @@ diagnostics responses document directly (`supports_call_volume`; a non-null
 
 **Signal strength is labelled per camera, not globally.** The bridge says which
 upstream key a reading came from, and the sensor declares a percentage only for
-`normalizedSignalStrength`, alarm.com's 0-100 score. Other key spellings — kept
-for camera models this was never tested against, and possibly real dBm — stay
+`normalizedSignalStrength`, alarm.com's 0-100 score. Other key spellings (kept
+for camera models this was never tested against, and possibly real dBm) stay
 unlabelled. Home Assistant records long-term statistics against the declared
 unit, so a wrong label is not something a later fix undoes.
 
 **Changing the wired chime type to "none" raises a notification.** That setting
 turns the indoor chime off at TELUS and choosing a real type again does not turn
-it back on. The integration does not silently re-enable it — re-arming something
-someone may have wanted off is the worse failure — so instead it says what
+it back on. The integration does not silently re-enable it (re-arming something
+someone may have wanted off is the worse failure) so instead it says what
 happened, naming the camera, once per camera rather than once per change.
 
 ### The notification switches are TELUS's notifications, not yours
@@ -967,16 +967,16 @@ once from the TELUS app and once from your own automation, and only one of those
 is under your control from here.
 
 They are gated independently and by three different upstream rules, which the
-bridge has already collapsed into three booleans — see
+bridge has already collapsed into three booleans; see
 [control-api.md](control-api.md). The visible consequence is that a camera which
 is not a doorbell gets none of these switches, which is correct rather than
 missing.
 
-The notification **format** — text-only versus with a thumbnail — is a select.
+The notification **format** (text-only versus with a thumbnail) is a select.
 Its two options are the only two alarm.com offers: the upstream enum has four
 members, but one is a null state and one is a legacy value the portal rewrites
 away when it reads it. The numbers behind them were read out of the portal's own
-JavaScript, which is a public static asset, rather than guessed — see
+JavaScript, which is a public static asset, rather than guessed; see
 [control-api.md](control-api.md).
 
 ### The chime entities, and why the indoor switch can go unavailable
@@ -985,17 +985,17 @@ The three chime entities are gated by **three separate** capability flags, which
 is easy to get wrong because they sound like one feature: `supports_indoor_chime`
 (the wired chime's on/off), `supports_chime_type` (which kind of chime it is), and
 `supports_outdoor_tone` (the speaker the doorbell has of its own). A fourth,
-`supports_outdoor_tone_volume`, is false on the reference doorbell — it can mute
-the outdoor tone but not level it — so no volume control is offered for it.
+`supports_outdoor_tone_volume`, is false on the reference doorbell (it can mute
+the outdoor tone but not level it) so no volume control is offered for it.
 
 The **wired chime type** is not a ringtone. It tells the doorbell what kind of
 physical chime is on the other end of its wires, and its option names come from
 the mobile API rather than being hardcoded: the website API publishes only bare
 integers. If that secondary read fails the select still works, showing the
-numbers. See [control-api.md](control-api.md#chime_type_choices--names-for-the-chime-types).
+numbers. See [control-api.md](control-api.md#chime_type_choices-names-for-the-chime-types).
 
 Each option carries a `disables_indoor_chime` flag, and the **Indoor chime switch
-reports unavailable** when the selected type sets it — picking "no wired chime"
+reports unavailable** when the selected type sets it: picking "no wired chime"
 leaves the toggle nothing to ring, and the alarm.com portal greys its own control
 out in the same state. Nothing in the integration hardcodes which number that is;
 the flag exists so clients do not have to know. When the labelled options are
@@ -1004,8 +1004,8 @@ than guessing itself into unavailability.
 
 One upstream behaviour to know about, verified live: **picking the "none" chime
 type turns the indoor chime off at TELUS, and picking a real type again does not
-turn it back on.** The Indoor chime switch will therefore read *off* — not merely
-unavailable — after a round trip through "none", and has to be switched on again
+turn it back on.** The Indoor chime switch will therefore read *off* (not merely
+unavailable) after a round trip through "none", and has to be switched on again
 by hand. The integration does not paper over this: silently re-enabling a chime
 the user may have wanted off is a worse failure than leaving it where TELUS put
 it.
@@ -1014,20 +1014,20 @@ The siren and privacy capabilities come from somewhere else entirely: the
 **mobile** API's `GetAllSirenDevices` and `GetAllCameraPrivacyModeInfo`, which
 the bridge reads anyway before it will act on a write. It normalizes each into a
 fixed shape and hands them back as two optional sections of the settings
-response — the
-[siren/privacy contract](control-api.md#the-siren-and-privacy-sections--a-fixed-contract)
+response; the
+[siren/privacy contract](control-api.md#the-siren-and-privacy-sections-a-fixed-contract)
 in control-api.md is the authority on those key names, and this integration
 depends on them exactly:
 
 | Section | Field | Used for |
 | --- | --- | --- |
 | `settings.siren` | `can_manually_trigger` (bool) | Whether the siren Buttons exist at all |
-| `settings.siren` | `active` (bool), `timestamp_end` | Not consumed today — the Buttons hold no state, deliberately (see below) |
+| `settings.siren` | `active` (bool), `timestamp_end` | Not consumed today: the Buttons hold no state, deliberately (see below) |
 | `settings.privacy` | `supported` (bool) | Whether the privacy Switch is available |
 | `settings.privacy` | `active` (bool) | The Switch's on/off state |
 
 Either section can be **`null`**, which the integration treats as *not reported*
-and never as *unsupported* — a `null` siren section means no siren Buttons this
+and never as *unsupported*: a `null` siren section means no siren Buttons this
 cycle, and a `null` privacy section leaves the Switch unavailable. Both are the
 right outcome for a capability nothing has reported, and both mean neither
 control can be pressed into a `422`. The most common cause is a bridge running
@@ -1036,20 +1036,20 @@ through; it is a bridge-configuration state, not a device one.
 
 Note that the siren Buttons hold no state even though `active` / `timestamp_end`
 are available: the siren's duration is chosen server-side, so there is no on/off
-the integration could honestly represent — hence two Buttons rather than one
+the integration could honestly represent, hence two Buttons rather than one
 Switch.
 
 **Nothing here writes on its own.** Setup, polling and reloads only ever `GET`;
 the volume, the switch and the buttons issue their `POST` solely from a user (or
 automation) acting on the entity. That matters most for the siren, which is
-audible hardware in a home — see the caution in
+audible hardware in a home; see the caution in
 [control-api.md](control-api.md#post-controlcamerascamera_idsiren) before pressing
 it the first time on a new device.
 
 ### The Bluetooth disarming entities
 
-Three settings, all the same class of thing — who may walk up to a house and have
-the alarm turn itself off — spread across two coordinators, both polling every
+Three settings, all the same class of thing (who may walk up to a house and have
+the alarm turn itself off) spread across two coordinators, both polling every
 **15 minutes** because these are configuration records that only move when a
 person moves them, and every cycle is a live Alarm.com round trip on an account
 whose rate limits are undocumented. Neither poll is the feedback path for a change
@@ -1062,7 +1062,7 @@ made here: every write adopts the record the bridge answers with.
 - **Per system** (`PanelBluetoothCoordinator`, `GET /control/bluetooth-disarming`):
   the "Panel Bluetooth pairing" switch and the "Bluetooth disarm window" select.
   Both sit on the integration's **service device**, alongside Auth Health and the
-  talkdown sensors — they belong to no phone and no camera, and the alarm panel's
+  talkdown sensors: they belong to no phone and no camera, and the alarm panel's
   own device comes from the `pyalarmdotcomajax` device model, which these
   bridge-served entities have no handle on and which is not guaranteed to exist.
 
@@ -1072,13 +1072,13 @@ Three things about them are load-bearing:
 sitting beside the per-phone toggles, turning it off is not established to stop an
 already-paired phone from disarming. The TELUS portal's per-device page never
 consults that document, and what the panel *firmware* does with the flag is
-unresolved — "the portal does not read it" is evidence about the portal. What it
+unresolved: "the portal does not read it" is evidence about the portal. What it
 is definitely for is taking the panel out of pairing mode, so a phone that is not
 already enrolled cannot be added. A user who wants to be sure a particular phone
 cannot disarm must turn that phone's own switch off.
 
 **The disarm window is a select, not a number.** The panel does not take a free
-range: the vendor offers exactly five windows — 1, 5, 10, 20 and 30 minutes — and
+range: the vendor offers exactly five windows (1, 5, 10, 20 and 30 minutes) and
 the bridge reports both the unit and the set, because the upstream document
 publishes neither and no client could derive them. The options are labelled from
 the unit the bridge reports rather than from a hardcoded word, and read "5
@@ -1088,14 +1088,14 @@ would misreport it and make the next write look like a no-op.
 
 **The enrolled-partition select is only created on an account with two or more
 partitions.** That is a judgement about what to put in front of a user, not a
-technical limit — the bridge accepts the write on a single-partition account
+technical limit: the bridge accepts the write on a single-partition account
 either way. An entity offering exactly one option, already selected, cannot
 express anything: the only interaction it permits is re-selecting what is already
 true, which is a whole-record `PUT` to a live alarm panel that changes nothing and
 carries every risk such a write carries. It would also appear on the majority of
 installs, since most homes have one partition, as a permanently inert control. The
-information is not lost — the disarming switch publishes `enrolled_partition_id`
-as an attribute either way — and the select appears by itself if a second
+information is not lost (the disarming switch publishes `enrolled_partition_id`
+as an attribute either way) and the select appears by itself if a second
 partition is ever added, because the builder is re-offered on every poll until it
 yields something. An empty choices list (the bridge failing to read the partition
 list) lands on the same "no entity" answer, and is likewise retried next poll.
@@ -1105,7 +1105,7 @@ One caveat applies to both panel-level entities: **the bridge's write shape for
 rather than captured.** If one of these writes fails, suspect the reconstruction
 at least as readily as the panel.
 
-The pairing switch also publishes the paired phones as `enrolled_device_ids` —
+The pairing switch also publishes the paired phones as `enrolled_device_ids`:
 opaque ids and not descriptions, because those are household members' names and an
 entity attribute is recorded, shown in the UI, and included in diagnostics
 downloads. The switch entities are already named after the phones for anyone who
@@ -1114,7 +1114,7 @@ needs to tell which is which.
 ### The solar-panel sensor is a sensor, not a binary sensor
 
 The underlying field is a plain boolean, so `binary_sensor` is the reflexive
-choice — and the wrong one. Home Assistant renders a binary sensor's two states
+choice, and the wrong one. Home Assistant renders a binary sensor's two states
 through its device class, and there is no device class for "is a solar accessory
 attached"; without one it reads as a bare On/Off, which for a wiring fact says the
 wrong thing, since *On* suggests something is powered up or generating when all
@@ -1126,7 +1126,7 @@ live electrical or network condition rather than an installation.
 There is no state class and no statistics: this does not change unless someone
 physically installs or removes a panel. And it produces **no entity at all on
 hardware that reports no solar support**, which is the case on both cameras this
-was built against — a camera with no solar hardware reporting a permanent "not
+was built against: a camera with no solar hardware reporting a permanent "not
 connected" is noise dressed up as diagnostics. The gate is the support flag, never
 the value: a camera that cannot answer the question sends the same
 `connected: false` as one that answered "no".
@@ -1142,7 +1142,7 @@ The two are used deliberately and differently:
   and every press or slide would be a `422 unsupported` from the bridge.
 - **Privacy mode is the exception: the Switch is always created and goes
   unavailable** when support is missing. Privacy support is read per poll, so
-  "unsupported" and "the bridge did not answer this cycle" arrive the same way —
+  "unsupported" and "the bridge did not answer this cycle" arrive the same way,
   and an entity that disappears takes its history and any automation referencing
   it with it, which is a much worse outcome than one that reads unavailable for a
   poll or two.
@@ -1151,13 +1151,13 @@ A write the device refuses (`422`) surfaces as a `HomeAssistantError` on the
 service call rather than being swallowed, so a control that has stopped being
 supported is visible instead of appearing to work. A rate-limited write (`429`)
 surfaces the same way, worded "Alarm.com is rate-limiting this account; the
-change was not applied -- try again in {N}s" — `async_bridge_post` takes the
+change was not applied -- try again in {N}s"; `async_bridge_post` takes the
 wait from the bridge's `Retry-After` header, falls back to the response body's
 `retry_after`, and ends "try again later" when neither is readable. The
 integration only reports the server's wait; it never retries the write, so a
 retry cannot walk straight back into the limiter.
 
-The bridge's image and video/clip settings routes have **no entities yet** — the
+The bridge's image and video/clip settings routes have **no entities yet**: the
 URL templates are in `const.py` so the control surface is described in one place,
 but brightness, HDR, clip resolution and retention are still curl-only. That is a
 gap to fill, not a deliberate omission.
@@ -1177,7 +1177,7 @@ username and password** and the bridge credential-sync payload carries the same
 password. `async_redact_data` only redacts by dict key, so `TO_REDACT` covers
 `username`, `password`, `2fa_cookie`, and `arm_code`. Values derived from the
 controller object (e.g. `user_email`) are not dict keys and cannot be caught by
-key-based redaction — `user_email` is therefore **omitted entirely** rather than
+key-based redaction; `user_email` is therefore **omitted entirely** rather than
 partially masked. A diagnostics dump attached to a bug report must never leak
 these.
 
@@ -1201,7 +1201,7 @@ From `const.py` (timing and identity):
 | `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` | 45 | Per-request timeout for the `/diagnostics` bridge read (the signal read alone can take ~25 s on some models); the `/settings` read keeps the shared 10 s default |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | 900 | Bluetooth arming devices **and** the panel-wide Bluetooth settings poll |
 | `TALK_METRICS_POLL_INTERVAL_SECONDS` | 120 | Talkdown-counter poll (`/control/metrics`) |
-| `STREAM_HEALTH_POLL_INTERVAL_SECONDS` | 30 | Stream-health poll (`/control/status`) — loopback-only, answered from bridge memory, zero Alarm.com cost |
+| `STREAM_HEALTH_POLL_INTERVAL_SECONDS` | 30 | Stream-health poll (`/control/status`): loopback-only, answered from bridge memory, zero Alarm.com cost |
 | `CLIP_LINK_TTL_SECONDS` | 90 days | Signed clip-link lifetime |
 
 Bridge control endpoints all live on `http://127.0.0.1:8199/control/…` (both
@@ -1212,8 +1212,8 @@ directory is HA's `/share/telus_cam_bridge` (mounted into the bridge at
 `DATA_ARMING_DEVICES_COORDINATOR`, `DATA_PANEL_BLUETOOTH_COORDINATOR`,
 `DATA_STREAM_HEALTH_COORDINATOR`.
 
-The blacklisted sensor subtypes (`SENSOR_SUBTYPE_BLACKLIST`) — mobile phone,
-panel image sensor, fixed panic — are excluded from entity creation everywhere.
+The blacklisted sensor subtypes (`SENSOR_SUBTYPE_BLACKLIST`) (mobile phone,
+panel image sensor, fixed panic) are excluded from entity creation everywhere.
 
 ## Talkdown diagnostics
 
@@ -1221,12 +1221,12 @@ Two diagnostic sensors surface the bridge's talkdown counters (see
 [control-api.md](control-api.md#get-controlmetrics)), so a talk that starts
 failing is visible in Home Assistant instead of only as an HTTP error to whoever
 triggered it. Both sit under the synthetic "TELUS Smart Home Integration" device
-alongside Auth Health, and are polled slowly — the counters only move when
+alongside Auth Health, and are polled slowly: the counters only move when
 someone triggers a talk.
 
 | Entity | State | Useful attributes |
 | --- | --- | --- |
-| `sensor.…_talkdown_status` | `idle`, `ok`, `stopped`, `rejected`, `failed` | `last_failure_reason`, `last_played_seconds`, `last_camera_id`, `by_path` (talks per transport: `full_duplex` / `webrtc` / `srtp` — which audio path is actually being used is otherwise invisible from HA), `recent` (last 5) |
+| `sensor.…_talkdown_status` | `idle`, `ok`, `stopped`, `rejected`, `failed` | `last_failure_reason`, `last_played_seconds`, `last_camera_id`, `by_path` (talks per transport: `full_duplex` / `webrtc` / `srtp`; which audio path is actually being used is otherwise invisible from HA), `recent` (last 5) |
 | `sensor.…_talkdown_failures` | failed count since the bridge started (`total_increasing`) | `attempts`, `succeeded`, `stopped`, `rejected_in_progress`, `failures_by_reason`, `by_endpoint`, `by_codec`, `renegotiations`, `audio_seconds_played` |
 
 The state is deliberately coarse (`failed`, not `failed:media_error`) so it is
@@ -1277,14 +1277,14 @@ All four ride one `StreamHealthCoordinator` polling `/control/status` every
 `STREAM_HEALTH_POLL_INTERVAL_SECONDS` (30 s). That interval is short where the
 TELUS-backed coordinators are deliberately slow, and safely so: the route
 answers from an in-memory dict the bridge's camera loops maintain themselves,
-entirely over loopback — zero Alarm.com requests per cycle. The coordinator is
+entirely over loopback: zero Alarm.com requests per cycle. The coordinator is
 shared between `sensor.py` and `binary_sensor.py` through the same lazy
 `hass.data` getter pattern as the settings and arming-device coordinators
 (`async_get_stream_health_coordinator`, stashed under
 `DATA_STREAM_HEALTH_COORDINATOR`): whichever platform sets up first creates it,
 and the whole per-entry dict is popped on unload. Per-camera sensors are added
 from a coordinator listener (the same pattern as the camera platform), so a
-camera the bridge starts reporting later — or a bridge that comes up after HA —
+camera the bridge starts reporting later (or a bridge that comes up after HA)
 gets its sensors with no restart.
 
 **Stream state** pins the four states the bridge's `run_camera_forever` loop
@@ -1295,13 +1295,13 @@ build does not know degrades to **unknown** rather than erroring on every
 update, with the verbatim value still readable in the `raw_state` attribute.
 The supporting numbers ride along as attributes rather than more entities:
 `fps` and `hardware_encode` (encoder properties that only ever change on a
-publisher rebuild — `fps` is the rate the publisher is currently *declared*
+publisher rebuild: `fps` is the rate the publisher is currently *declared*
 with, which the bridge keeps under review while the stream runs but applies
-stepwise — not live measurements worth a recorder series),
+stepwise, not live measurements worth a recorder series),
 `consecutive_failures`, `last_error`, `last_frame_at`, and `raw_state`.
 
 **Dropped frames** counts frames discarded because the consumer fell behind the
-decoder — a sustained climb is a quietly-degrading stream that otherwise only
+decoder: a sustained climb is a quietly-degrading stream that otherwise only
 shows as throttled bridge log lines, and `total_increasing` lets an automation
 trigger on it. It resets to 0 when the bridge restarts, which the state class
 treats as a counter reset rather than a spike. The bridge folds each ~165 s
@@ -1309,7 +1309,7 @@ session's counter into the total as the session **ends**, so the value can lag
 the live session's drops by up to one rotation.
 
 **Audio state** answers "is this camera's audio flowing right now, or is it
-dead?" — the one question the rest of `/control/status` cannot answer, because
+dead?": the one question the rest of `/control/status` cannot answer, because
 the bridge's frame-silence watchdog is video-only: a camera whose audio decoder
 has died still reports `state: streaming` with a fresh `last_frame_at` while it
 publishes pure silence. Its state is **derived here**, not read from a field:
@@ -1317,27 +1317,27 @@ the integration remembers `decoded_audio_frames` between polls and reports
 
 | State | Meaning |
 | --- | --- |
-| `not_consuming` | the bridge is not consuming this camera's audio at all (`audio_consumed: false` — both `JANUS_REQUEST_AUDIO` and `JANUS_CONSUME_AUDIO` must name the camera) |
+| `not_consuming` | the bridge is not consuming this camera's audio at all (`audio_consumed: false`; both `JANUS_REQUEST_AUDIO` and `JANUS_CONSUME_AUDIO` must name the camera) |
 | `no_audio_yet` | audio is being consumed and the counter is still at zero: not one frame has ever decoded |
 | `flowing` | the counter moved since the previous poll |
-| `stalled` | it did not — audio was flowing and has stopped |
+| `stalled` | it did not: audio was flowing and has stopped |
 | unknown | no comparison is possible yet: the first poll of a camera that already has frames on the clock, or a bridge too old to report the audio fields |
 
 Why a derived enum rather than a plain `decoded_audio_frames` counter: Home
 Assistant has no "this number stopped changing" trigger, so a counter makes the
-failure something a human has to notice on a graph — and the failure being
+failure something a human has to notice on a graph, and the failure being
 caught is exactly a counter that quietly stops. Comparing across polls turns
 *stopped* into a state, which an automation can trigger on. The raw numbers are
 not lost; they ride along as attributes: `audio_consumed`,
 `decoded_audio_frames`, `decoded_audio_frames_last_poll` (the delta),
-`audio_format` (`null` until a frame has genuinely decoded — a value here is
+`audio_format` (`null` until a frame has genuinely decoded; a value here is
 proof audio decoded at least once), `dropped_audio_frames`, `last_audio_at`
 (when this poller last saw the counter move; empty until it does, and reset by a
 Home Assistant restart), and `audio_dropped` / `audio_dropped_reason`.
 
 Those last two say **why** audio stopped. The bridge drops a wedged audio pipe
 deliberately and keeps publishing video rather than restarting the encoder, so
-losing audio never costs the picture — but from the counter's point of view that
+losing audio never costs the picture, but from the counter's point of view that
 is indistinguishable from audio simply going quiet, and both read `stalled`.
 `audio_dropped_reason` carries the bridge's own explanation, so the cause does
 not require a trip to the container log. Both are `null` on a bridge too old to
@@ -1349,14 +1349,14 @@ already keyed on it.
 
 **Every camera gets an Audio state entity, consuming or not.** A camera whose
 audio the bridge is not configured to consume (the per-camera
-`JANUS_CONSUME_AUDIO` knob, off by default) reads `not_consuming` — a real
+`JANUS_CONSUME_AUDIO` knob, off by default) reads `not_consuming`: a real
 answer ("audio is switched off for this camera"), which is what someone asking
 "why is there no sound?" needs, and it becomes `flowing` with no Home Assistant
 restart when the knobs are turned on for that camera. The
 conditional creation the per-camera diagnostics and solar-panel sensors use does
 not apply: entity creation is sticky, so an entity that appears and vanishes
 with a bridge env var breaks any automation naming it, and a camera with no
-audio entity at all reads as "fine" — the very gap this closes.
+audio entity at all reads as "fine", the very gap this closes.
 
 Reading the state honestly: `stalled` reflects **one poll window** (30 s).
 Session rotation and a reconnect can each span one, so trigger on the state
@@ -1385,7 +1385,7 @@ automation:
 ```
 
 Add `no_audio_yet` as a second `to:` (with a longer `for:`) to catch a camera
-that comes up consuming audio and never decodes a single frame — the same
+that comes up consuming audio and never decodes a single frame, the same
 condition as `audio_consumed: true` with `audio_format: null` on the raw
 endpoint.
 
@@ -1394,8 +1394,8 @@ the bridge: an unanswered poll leaves the coordinator holding the previous
 payload, and comparing that identical data against itself would read as "the
 counter did not move". The comparison also treats a counter that went *down* as
 a bridge restart (every number in `/control/status` resets with the process),
-not a stall. All four ways a false `stalled` could be produced — an unanswered
-poll, a failed poll, a counter reset, and the first poll of the entity's life —
+not a stall. All four ways a false `stalled` could be produced (an unanswered
+poll, a failed poll, a counter reset, and the first poll of the entity's life)
 are pinned by `tests/test_stream_health_sensors.py`.
 
 **Camera bridge** reports whether the local bridge container is answering its
@@ -1403,7 +1403,7 @@ control API at all: **off** means the container is down, mid-restart, or its
 control secret is not on the shared mount yet (that last case reads as
 disconnected too). It deliberately breaks the plain coordinator-availability
 contract: a coordinator whose poll fails marks its entities unavailable, and
-for a connectivity sensor "the bridge is down" **is** the reportable state — an
+for a connectivity sensor "the bridge is down" **is** the reportable state: an
 entity that goes unavailable exactly when it should say "off" can never say
 "off" at all. So it stays available once any poll attempt has completed,
 successful or not, and is unknown only before the first attempt finishes.

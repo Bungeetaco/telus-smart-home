@@ -9,7 +9,7 @@ restart. This document is the complete reference for that API, derived from
 
 ## Binding and reachability
 
-- **Host:** `127.0.0.1` (`config.CONTROL_HOST`) — loopback only. The server is
+- **Host:** `127.0.0.1` (`config.CONTROL_HOST`): loopback only. The server is
   never bound to a routable interface and never given a Docker port-publish
   mapping.
 - **Port:** `8199` by default (`config.CONTROL_PORT`, overridable via the
@@ -39,7 +39,7 @@ bridge container; the HA side reads it from its own view of the shared mount,
   or written under a permissive umask) and the file's mode has any group/other
   bits set, it is best-effort `chmod`ed to `0600`, with a warning naming the
   previous mode. If the chmod fails (e.g. the file is owned by another uid on
-  the shared mount) a warning is logged and the secret is served unchanged —
+  the shared mount) a warning is logged and the secret is served unchanged;
   the bridge never regenerates the secret over a permissions problem, so the
   HA client keeps authenticating.
 - **Rotated every 30 days** (`config.CONTROL_SECRET_ROTATE_INTERVAL_S`). The
@@ -81,11 +81,11 @@ BASE=http://127.0.0.1:8199
 | POST | `/control/cameras/{camera_id}/settings/volume` | bearer | Set the camera speaker (call) volume |
 | POST | `/control/cameras/{camera_id}/settings/chime` | bearer | Set the indoor chime, wired chime type, outdoor tone and its volume |
 | GET | `/control/partitions` | bearer | List alarm partitions and the flags that gate a sensor bypass |
-| POST | `/control/partitions/{partition_id}/bypass` | bearer | Bypass / un-bypass named sensors — **a bypassed zone stops triggering the alarm** |
+| POST | `/control/partitions/{partition_id}/bypass` | bearer | Bypass / un-bypass named sensors; **a bypassed zone stops triggering the alarm** |
 | GET | `/control/arming-devices` | bearer | List the Bluetooth arming devices (phones that may auto-disarm the panel) |
 | POST | `/control/arming-devices/{device_id}/disarming` | bearer | Turn a phone's auto-disarm permission on or off |
 | POST | `/control/arming-devices/{device_id}/enrolled-partition` | bearer | Move a paired phone to a different partition |
-| DELETE | `/control/arming-devices/{device_id}` | bearer | Unpair one phone — **not undoable from this side** |
+| DELETE | `/control/arming-devices/{device_id}` | bearer | Unpair one phone: **not undoable from this side** |
 | GET | `/control/bluetooth-disarming` | bearer | The panel-wide Bluetooth pairing flag and disarm window |
 | POST | `/control/bluetooth-disarming` | bearer | Change the panel-wide Bluetooth pairing flag and disarm window |
 | POST | `/control/cameras/{camera_id}/settings/notifications` | bearer | Turn TELUS-side push notifications on/off |
@@ -110,13 +110,13 @@ Shared error responses across the authed routes:
 | --- | --- | --- |
 | `401` | `{"error": "bad_secret"}` | Missing/wrong `Authorization` header |
 | `502` | `{"error": "telus_error"}` | The upstream TELUS/alarm.com call failed |
-| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited us. Carries a `Retry-After` header with the **server's own** wait — honour it rather than retrying on your own schedule, or the next attempt walks straight back into the limiter. Emitted by the camera settings, diagnostics, siren, privacy, partition, bypass, arming-device and Bluetooth-disarming routes. The one exception: the settings read's two **MWS** sections (siren/privacy) absorb a rate limit internally — held for the server's wait and degraded to `null` — rather than failing the response |
+| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited us. Carries a `Retry-After` header with the **server's own** wait: honour it rather than retrying on your own schedule, or the next attempt walks straight back into the limiter. Emitted by the camera settings, diagnostics, siren, privacy, partition, bypass, arming-device and Bluetooth-disarming routes. The one exception: the settings read's two **MWS** sections (siren/privacy) absorb a rate limit internally (held for the server's wait and degraded to `null`) rather than failing the response |
 
 ---
 
 ## `GET /control/health`
 
-Process liveness probe. **No authentication** — it exposes no credential
+Process liveness probe. **No authentication**: it exposes no credential
 material, only that the process is up and serving.
 
 **Response**
@@ -142,8 +142,8 @@ grepping container logs. The Home Assistant integration polls this route every
 30 s to back its per-camera stream-health sensors and its camera-bridge
 connectivity entity (see
 [ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity));
-the route answers from memory over loopback, so that poll — unlike the settings
-poll — costs no upstream requests.
+the route answers from memory over loopback, so that poll (unlike the settings
+poll) costs no upstream requests.
 
 **Response**
 
@@ -187,17 +187,17 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 | `state` | string | One of `streaming`, `connecting`, `reconnecting`, `restart_deferred` |
 | `consecutive_failures` | int | Reconnect attempts since the last good frame |
 | `last_frame_at` | int \| null | Unix timestamp of the most recent frame, or `null` |
-| `fps` | number \| null | The frame rate the running ffmpeg was **declared** with (`-framerate`, post-clamp to 1–30) — not a live measurement of what the camera is delivering. `null` until the camera first reaches the `streaming` state. It can change between polls without a restart: the frame rate is a device setting, so the bridge keeps re-measuring it and rebuilds the publisher when the delivered rate moves materially away from the declared one (see [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched)). The measured rate itself is not currently exposed — backlog E69 |
+| `fps` | number \| null | The frame rate the running ffmpeg was **declared** with (`-framerate`, post-clamp to 1–30), not a live measurement of what the camera is delivering. `null` until the camera first reaches the `streaming` state. It can change between polls without a restart: the frame rate is a device setting, so the bridge keeps re-measuring it and rebuilds the publisher when the delivered rate moves materially away from the declared one (see [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched)). The measured rate itself is not currently exposed: backlog E69 |
 | `hardware_encode` | bool \| null | Whether the pipeline is using hardware encode; `null` until the camera first reaches the `streaming` state |
-| `dropped_frames` | int | Lifetime total, since process start, of frames dropped because the consumer fell behind the decoder (the ingest queue's latency-over-completeness drop — see [camera-bridge.md](camera-bridge.md)). Present (`0`) from the camera's first status entry. The total is accumulated when each ~165 s video session **ends** — on healthy rotation and on the failure paths alike — not per frame, so it can lag the live session's drops by up to one rotation. Resets with the process, like the rest of this response |
+| `dropped_frames` | int | Lifetime total, since process start, of frames dropped because the consumer fell behind the decoder (the ingest queue's latency-over-completeness drop; see [camera-bridge.md](camera-bridge.md)). Present (`0`) from the camera's first status entry. The total is accumulated when each ~165 s video session **ends**, on healthy rotation and on the failure paths alike, not per frame, so it can lag the live session's drops by up to one rotation. Resets with the process, like the rest of this response |
 | `last_error` | string \| null | Most recent error string, or `null` |
 | `audio_consumed` | bool | Whether the downstream audio track is being decoded and published on this camera's RTSP path. True only when `JANUS_CONSUME_AUDIO` **and** `JANUS_REQUEST_AUDIO` both name the camera; naming it in only the first is a misconfiguration that reads `false` here and is logged once (see [configuration.md](configuration.md)) |
-| `audio_format` | string \| null | The raw PCM shape of an audio frame this camera has actually **decoded**, as `<rate>Hz/<channels>ch/<sample format>` — `null` until one has been. It is an observation, never the shape the publisher was launched with: that is a bootstrap guess (`AUDIO_DEFAULT_FORMAT`) until the first frame lands, and reporting it made this field read `"48000Hz/2ch/s16"` for a camera publishing pure silence. Once observed it persists across rotations, since a camera's audio shape does not change between sessions; use `decoded_audio_frames` to ask whether audio is flowing *now* |
-| `decoded_audio_frames` | int | Lifetime total, since process start, of decoded audio frames this camera's sessions have handed to the publisher. Present (`0`) from the camera's first status entry. Unlike the two drop counters this is updated **as each frame arrives**, not folded in when a session ends, so it does not lag a rotation — it is the field to poll twice and compare. `audio_consumed: true` with this stuck at `0` is a silent stream, not a quiet one, and it is the only field in this response that can tell them apart |
-| `dropped_audio_frames` | int | Lifetime total, since process start, of decoded **audio** frames dropped because the consumer fell behind. Present (`0`) from the camera's first status entry, and accumulated across rotations exactly like `dropped_frames`. Deliberately a separate field: `fps` and `dropped_frames` are a contract about the video stream, and a number that quietly started counting two different things would be worse than no number at all. Note that it cannot detect audio that never decodes at all — a stream that produces nothing drops nothing |
-| `audio_dropped` | bool | Whether the running publisher **gave up on its audio input** and is now publishing video only — because ffmpeg stopped reading the audio pipe, the pipe closed under it, the pipe could not be opened when the publisher started, or a persistent run of decoded frames failed to match their own declared shape. Video is worth more than audio, so this degrades instead of rebuilding the publisher (which would kick every RTSP reader off the path), and the degradation lasts until the publisher is next rebuilt for some other reason. `audio_consumed` keeps saying what the camera is **configured** to do; this says whether the publisher is still doing it, and without it the difference is invisible — `decoded_audio_frames` keeps climbing either way, because frames are still being decoded, they just no longer reach ffmpeg |
+| `audio_format` | string \| null | The raw PCM shape of an audio frame this camera has actually **decoded**, as `<rate>Hz/<channels>ch/<sample format>`; `null` until one has been. It is an observation, never the shape the publisher was launched with: that is a bootstrap guess (`AUDIO_DEFAULT_FORMAT`) until the first frame lands, and reporting it made this field read `"48000Hz/2ch/s16"` for a camera publishing pure silence. Once observed it persists across rotations, since a camera's audio shape does not change between sessions; use `decoded_audio_frames` to ask whether audio is flowing *now* |
+| `decoded_audio_frames` | int | Lifetime total, since process start, of decoded audio frames this camera's sessions have handed to the publisher. Present (`0`) from the camera's first status entry. Unlike the two drop counters this is updated **as each frame arrives**, not folded in when a session ends, so it does not lag a rotation; it is the field to poll twice and compare. `audio_consumed: true` with this stuck at `0` is a silent stream, not a quiet one, and it is the only field in this response that can tell them apart |
+| `dropped_audio_frames` | int | Lifetime total, since process start, of decoded **audio** frames dropped because the consumer fell behind. Present (`0`) from the camera's first status entry, and accumulated across rotations exactly like `dropped_frames`. Deliberately a separate field: `fps` and `dropped_frames` are a contract about the video stream, and a number that quietly started counting two different things would be worse than no number at all. Note that it cannot detect audio that never decodes at all: a stream that produces nothing drops nothing |
+| `audio_dropped` | bool | Whether the running publisher **gave up on its audio input** and is now publishing video only, because ffmpeg stopped reading the audio pipe, the pipe closed under it, the pipe could not be opened when the publisher started, or a persistent run of decoded frames failed to match their own declared shape. Video is worth more than audio, so this degrades instead of rebuilding the publisher (which would kick every RTSP reader off the path), and the degradation lasts until the publisher is next rebuilt for some other reason. `audio_consumed` keeps saying what the camera is **configured** to do; this says whether the publisher is still doing it, and without it the difference is invisible: `decoded_audio_frames` keeps climbing either way, because frames are still being decoded, they just no longer reach ffmpeg |
 | `audio_dropped_reason` | string \| null | What was observed when the audio input was dropped (for a wedged pipe, including the backlog in bytes); `null` while `audio_dropped` is false |
-| `publisher_alive` | bool \| null | Whether this camera's ffmpeg publisher exists **and is still consuming what it is fed** — the process being alive is not sufficient on its own, which is how a camera once reported `state: "streaming"` with `consecutive_failures: 0` while MediaMTX had no path at all. `null` until the camera's first publisher starts. False drives a publisher rebuild, so it is normally seen only in the moment before one; a value that stays false means the rebuild is not succeeding either. It cannot see past ffmpeg — it proves ffmpeg is reading its input, not that MediaMTX still accepts what ffmpeg writes |
+| `publisher_alive` | bool \| null | Whether this camera's ffmpeg publisher exists **and is still consuming what it is fed**: the process being alive is not sufficient on its own, which is how a camera once reported `state: "streaming"` with `consecutive_failures: 0` while MediaMTX had no path at all. `null` until the camera's first publisher starts. False drives a publisher rebuild, so it is normally seen only in the moment before one; a value that stays false means the rebuild is not succeeding either. It cannot see past ffmpeg: it proves ffmpeg is reading its input, not that MediaMTX still accepts what ffmpeg writes |
 | `last_publish_at` | int \| null | Unix timestamp of the last frame ffmpeg actually **took**, against `last_frame_at`'s "a frame arrived from the camera". `null` until the first published frame. The two normally move together; the gap between them is the difference between "streaming" and "streaming to nowhere", and a `last_frame_at` that keeps advancing while this one does not is a publisher that has stopped reading |
 
 `state: "restart_deferred"` is the most informative value: the camera hit the
@@ -214,7 +214,7 @@ audio. What it can tell you is whether audio is flowing: poll
 Two fields answer questions no counter can: `audio_dropped: true` is a publisher
 that stopped carrying audio (rather than a camera that never sent any), and
 `last_publish_at` falling behind `last_frame_at` is a publisher that has stopped
-taking video — the case where every other field in this response still reads
+taking video, the case where every other field in this response still reads
 healthy.
 
 **Example**
@@ -275,12 +275,12 @@ Notes:
   early contributes what it played, not its full length.
 - `failures_by_reason` uses stable labels (`media_error`, `media_too_large`,
   `no_upstream_audio`, `timeout`, `transport_error`, `network_error`,
-  `upstream_error`, `cancelled`) — never exception text, which could carry a URL
+  `upstream_error`, `cancelled`); never exception text, which could carry a URL
   or token.
 - `by_path` counts, per transport, the talks that successfully ran it. Keys are
   the same values the talk response's `path` field reports (`full_duplex`,
   `webrtc`, `srtp`), and a key appears only once that path has run. A talk ended
-  early by an explicit stop still counts — the same convention as `by_codec` —
+  early by an explicit stop still counts (the same convention as `by_codec`)
   while failed and rejected talks never do. This is what makes a silent
   degradation visible: e.g. the preferred full-duplex path failing device
   discovery and every talk quietly running the `webrtc`/`srtp` fallback.
@@ -300,7 +300,7 @@ Notes:
 
 Returns the bridge's in-memory camera registry, populated at startup and kept
 current by the periodic discovery poll (`discover_and_launch_cameras()`, every
-`config.CAMERA_DISCOVERY_INTERVAL_S` — 300 s by default). A camera added to the
+`config.CAMERA_DISCOVERY_INTERVAL_S`, 300 s by default). A camera added to the
 TELUS account appears here within one poll interval, no restart needed.
 
 **Response**
@@ -339,7 +339,7 @@ one-shot re-login-and-retry behavior on an expired session cookie.
 
 - `200`, `Content-Type: image/jpeg`, raw JPEG bytes on success.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Errors**
 
@@ -366,10 +366,10 @@ ever speaks on its own: it plays what a caller explicitly asks it to, and nothin
 else.
 
 Only one talk may be in flight per camera at a time. A concurrent trigger for
-the same camera is rejected with `409` — never queued. See `talk.py` /
+the same camera is rejected with `409`, never queued. See `talk.py` /
 `talk_fullduplex.py` for the transport details.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
@@ -421,24 +421,24 @@ exact key set depends on which transport ran.
 | Field | Notes |
 | --- | --- |
 | `path` | Which upstream-audio transport carried the clip: `full_duplex` (the chunked HTTP PUT the ADC-VDB750 uses), `webrtc`, or `srtp` |
-| `codec` | The codec that actually carried it — `mulaw` on the doorbell this was built against |
+| `codec` | The codec that actually carried it: `mulaw` on the doorbell this was built against |
 | `chunks` / `bytes` | Chunks and bytes delivered to the device |
 | `seconds` | Length of the audio that was produced by the encoder |
-| `played_seconds` | Audio actually pushed to the speaker — lower than `seconds` for a clip that was stopped early |
+| `played_seconds` | Audio actually pushed to the speaker, lower than `seconds` for a clip that was stopped early |
 | `stopped` | `true` when a `talk/stop` ended it; the call still returns `200` with partial stats |
-| `renegotiations` / `reconnects` | How many times a fresh device session, or a fresh socket on the same session, was needed mid-clip. Non-zero is not a failure — the stream resumes at the exact byte offset it reached — but a persistently non-zero count says the session or the link is unstable |
+| `renegotiations` / `reconnects` | How many times a fresh device session, or a fresh socket on the same session, was needed mid-clip. Non-zero is not a failure (the stream resumes at the exact byte offset it reached) but a persistently non-zero count says the session or the link is unstable |
 | `encode` | `streaming` or `buffered`, i.e. which side of `TALK_STREAMING_ENCODE` the clip ran on |
 | `cert_pinned` | Present only when a certificate pin applied and a certificate was seen: `true` when the device's certificate matched the pin, `false` when it did not (in `warn` mode, where the talk proceeds anyway) |
 
 **Timing measurements** (full-duplex path; present whenever at least one chunk
 was delivered). They exist so a later tuning of the chunk size or the
-jitter-buffer lead has real numbers instead of a guess — the current values were
+jitter-buffer lead has real numbers instead of a guess: the current values were
 tuned by ear:
 
 | Field | Notes |
 | --- | --- |
 | `put_rtt_p50_ms`, `put_rtt_p95_ms`, `put_rtt_max_ms`, `put_rtt_stdev_ms` | Distribution of the per-chunk PUT round trip. Sampling is capped at the first 50 000 chunks (~33 minutes of audio), past which the distribution is long settled |
-| `late_chunks` | Chunks whose scheduled slot had already passed when they went out, i.e. round-trip time eating into the jitter-buffer lead. **This is the one that matters**, and it **deliberately excludes the opening prebuffer fill** — those chunks go out back to back *by design*, since that burst is what fills the doorbell's buffer, and counting them would report every healthy talk as a dozen chunks late |
+| `late_chunks` | Chunks whose scheduled slot had already passed when they went out, i.e. round-trip time eating into the jitter-buffer lead. **This is the one that matters**, and it **deliberately excludes the opening prebuffer fill**: those chunks go out back to back *by design*, since that burst is what fills the doorbell's buffer, and counting them would report every healthy talk as a dozen chunks late |
 | `max_late_ms` | The worst such overshoot |
 | `prebuffer_ms` | The lead actually used. Equal to `TALK_PREBUFFER_MS` unless `TALK_PREBUFFER_ADAPTIVE` is on and raised it |
 
@@ -496,7 +496,7 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 Stops the clip currently playing through that camera's speaker. Empty body.
 
-The stream ends at the next chunk boundary — at most one chunk of audio (40 ms) —
+The stream ends at the next chunk boundary, at most one chunk of audio (40 ms),
 and the still-open `POST .../talk` call returns normally with partial stats and
 `"stopped": true`, rather than erroring. Stopping is a signal, not a task
 cancellation, so the session teardown (`EndLiveStream`) still runs on its usual
@@ -530,18 +530,18 @@ and treats that case as a no-op.
 Ten routes cover the per-camera **settings** surface (speaker volume, the
 doorbell's own chime, TELUS's own push notifications, the status LED, image,
 video/clip), read-only **diagnostics** (signal, battery, device status), the
-camera **siren**, and **privacy mode**. One settings section — `solar` — is
+camera **siren**, and **privacy mode**. One settings section (`solar`) is
 read-only and has no write route of its own.
 
 They are independent of talkdown: `TALKDOWN_ENABLED` does not gate them and they
 never open an audio session. Settings and diagnostics come from the **website
 API** (the cookie + `ajaxrequestuniquekey` session the bridge already holds);
 siren and privacy come from the **mobile MWS API** (form POST in, JSON envelope
-back — same `isSuccess` / `ErrorMessage` fields as the XML actions). See
+back: same `isSuccess` / `ErrorMessage` fields as the XML actions). See
 [alarm-com-api.md](alarm-com-api.md) for the two backends.
 
 > **These write to real hardware.** A `GET` here never changes anything, but a
-> `POST` takes effect on a camera in someone's home immediately — and the siren
+> `POST` takes effect on a camera in someone's home immediately, and the siren
 > is audible. Call the write routes only when a user asked for that write; never
 > as a side effect of a read or a poll.
 
@@ -555,7 +555,7 @@ Two properties of the upstream API shape every route in this group:
   only and are never called from the video path.
 - **Feature-support enums.** Every settings field is paired with a
   `<name>FeatureSupport` enum (`0` = unsupported, `2` = supported/editable), and
-  the *same payload shape* comes back for a device that cannot do the thing — so
+  the *same payload shape* comes back for a device that cannot do the thing, so
   the presence of a field proves nothing. Support is reported upward as a
   `supports_*` boolean on the read routes, and writing an unsupported field is a
   **`422 unsupported`**, not a silently-dropped write.
@@ -568,9 +568,9 @@ Errors shared by all ten (individual routes note anything extra):
 | `401` | `{"error": "bad_secret"}` | Missing/wrong `Authorization` header |
 | `404` | `{"error": "unknown_camera"}` | `camera_id` not in the camera registry |
 | `422` | `{"error": "unsupported"}` | The device reports no support for that field or capability |
-| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited the upstream call. Carries a `Retry-After` header with the **server's own** wait — honour it (see the shared table above) |
+| `429` | `{"error": "rate_limited", "retry_after": <seconds>}` | The alarm.com edge rate-limited the upstream call. Carries a `Retry-After` header with the **server's own** wait: honour it (see the shared table above) |
 | `502` | `{"error": "telus_error"}` | The upstream TELUS/alarm.com call failed |
-| `503` | `{"error": "mws_unavailable"}` | Siren and privacy only — no mobile MWS session exists to act through |
+| `503` | `{"error": "mws_unavailable"}` | Siren and privacy only: no mobile MWS session exists to act through |
 
 **Out-of-range values are refused, never clamped.** Every numeric field on every
 write route is checked against the `*_min` / `*_max` the device itself published
@@ -579,13 +579,13 @@ anything outside is a **`400 malformed`** and nothing is sent to the camera.
 
 This is a deliberate choice, not an accident of validation. Clamping would mean
 writing a *different* value to a camera in someone's home than the caller asked
-for and still answering `200` — the caller believes the volume it named is the
+for and still answering `200`; the caller believes the volume it named is the
 volume that landed, and nothing tells it otherwise. Refusing puts the
 disagreement in front of whoever caused it. A device that publishes no usable
 bounds or no option list is not second-guessed: the value is passed through and
 TELUS is the judge.
 
-Note which status this is. **Out of range is a `400`, not a `422`** — the caller
+Note which status this is. **Out of range is a `400`, not a `422`**: the caller
 sent a wrong value, which is a caller mistake and worth fixing at the call site.
 `422 unsupported` means something else entirely: the device reports it cannot do
 that field *at all* (its `*FeatureSupport` enum is not `2`), which no retry with
@@ -596,12 +596,12 @@ a different value will fix. Both leave the camera untouched.
 ## `GET /control/cameras/{camera_id}/settings`
 
 Reads one camera's audio, image and video/clip settings, its status LED,
-notification and solar-panel sections, and its siren and privacy records — eight
+notification and solar-panel sections, and its siren and privacy records: eight
 keys. The website settings are uncached: a settings value a UI renders as a
 slider must not be stale. Each call is **four website GETs plus at most two
 mobile MWS reads** (plus one more MWS read, cached for much longer, for the
 chime-type names), which makes it the heaviest read here. The two MWS actions
-are account-wide, so their results — failures included — are cached for 30 s
+are account-wide, so their results, failures included, are cached for 30 s
 and shared across every camera: a sequential sweep over all cameras pays them
 once, not per camera. The Home Assistant side polls this route every 120 s,
 and you should not poll it tighter.
@@ -609,7 +609,7 @@ and you should not poll it tighter.
 `led`, `notifications` and `solar` all come out of the **same** upstream
 `generalSettings` document and cost one request between them.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Response**
 
@@ -786,25 +786,25 @@ and what the volume and chime writes return too):
 | Field | Type | Notes |
 | --- | --- | --- |
 | `supports_call_volume` | bool | Derived from `callVolumeFeatureSupport` (`2` → true) |
-| `call_volume` | int | Current speaker/call volume — **this is the volume talkdown plays at** |
+| `call_volume` | int | Current speaker/call volume; **this is the volume talkdown plays at** |
 | `call_volume_min` / `call_volume_max` | int | Device-reported range; `0`–`10` on the doorbell this was built against |
 | `mic_and_speaker_on` | bool | The device's mic + speaker master toggle |
 | `supports_indoor_chime` | bool | Whether the indoor chime can be turned on/off |
 | `indoor_chime_on` | bool | Indoor chime state |
-| `supports_chime_type` | bool | Whether the **wired chime type** is selectable — its own upstream enum (`indoorChimeTypeFeatureSupport`), not the indoor chime's on/off flag |
-| `chime_type` | int \| null | Selected wired chime type. **Not a ringtone** — it is the kind of physical chime the doorbell is wired to |
+| `supports_chime_type` | bool | Whether the **wired chime type** is selectable: its own upstream enum (`indoorChimeTypeFeatureSupport`), not the indoor chime's on/off flag |
+| `chime_type` | int \| null | Selected wired chime type. **Not a ringtone**: it is the kind of physical chime the doorbell is wired to |
 | `chime_type_options` | list | The bare integer values this device offers, e.g. `[-1, 0, 1]` |
-| `chime_type_choices` | list | The same options **with names**: `{"value": int, "label": str, "disables_indoor_chime": bool}`. May be absent or `[]` — see below |
+| `chime_type_choices` | list | The same options **with names**: `{"value": int, "label": str, "disables_indoor_chime": bool}`. May be absent or `[]`; see below |
 | `supports_outdoor_tone` | bool | Whether the doorbell's own outdoor tone can be turned on/off |
 | `outdoor_tone_on` | bool | Outdoor tone state |
-| `supports_outdoor_tone_volume` | bool | Whether that tone's **volume** is settable — a **separate** flag, and `false` on the reference doorbell even though the tone itself toggles fine |
-| `outdoor_tone_volume` | int \| null | **`null` when `supports_outdoor_tone_volume` is false.** The website reports `0` there for a tone that is audibly on, while the mobile API reports level 3 for the same setting on the same device — it is a placeholder for a field the website does not manage, not a reading. The min/max still come through for a model that can set it |
+| `supports_outdoor_tone_volume` | bool | Whether that tone's **volume** is settable: a **separate** flag, and `false` on the reference doorbell even though the tone itself toggles fine |
+| `outdoor_tone_volume` | int \| null | **`null` when `supports_outdoor_tone_volume` is false.** The website reports `0` there for a tone that is audibly on, while the mobile API reports level 3 for the same setting on the same device; it is a placeholder for a field the website does not manage, not a reading. The min/max still come through for a model that can set it |
 | `outdoor_tone_volume_min` / `outdoor_tone_volume_max` | int | Device-reported range |
 | `raw` | object | The untouched upstream settings object, so a caller can read a field the bridge does not model yet |
 
 Two traps in this object. The upstream enum names are
 `<thing>EnableDisableFeatureSupport`, not the `is<Thing>OnFeatureSupport` spelling
-you would guess — reading the raw document with the guessed name silently finds
+you would guess: reading the raw document with the guessed name silently finds
 nothing and looks like "unsupported". And the outdoor tone's on/off support and
 its **volume** support are genuinely different flags: on the reference doorbell
 the tone can be switched but its volume cannot, so a `chime` write carrying
@@ -813,12 +813,12 @@ the tone can be switched but its volume cannot, so a `chime` write carrying
 The talk/call volume and the outdoor tone volume are also different things.
 **Only `call_volume` affects talkdown.**
 
-### `chime_type_choices` — names for the chime types
+### `chime_type_choices`: names for the chime types
 
 `chime_type_options` is bare integers, because that is all the website API
 publishes; the alarm.com web portal names them with a client-side enum. The
 bridge instead asks the **mobile** API (`GetCurrentDoorbellSettings`), which
-returns the names and, more usefully, a per-option `disables_indoor_chime` flag —
+returns the names and, more usefully, a per-option `disables_indoor_chime` flag,
 so no client has to know which number means "no wired chime" on a given model.
 On the reference doorbell:
 
@@ -832,7 +832,7 @@ Two things a caller must handle:
 
 - **It is best-effort.** It is a second upstream call, over a different API, and
   is absent or `[]` when there is no mobile session or the read fails. Fall back
-  to `chime_type_options` and show the numbers — losing the labels must not lose
+  to `chime_type_options` and show the numbers; losing the labels must not lose
   the control.
 - **Honour `disables_indoor_chime`.** When the selected type carries it, the
   indoor chime toggle is meaningless (there is no wired chime to ring) and the
@@ -842,24 +842,24 @@ Two things a caller must handle:
 > **Selecting the "none" type turns the indoor chime OFF upstream, and switching
 > back does not turn it on again.** Observed live: setting `chime_type` to `-1`
 > left `indoor_chime_on` false, and a later `chime_type: 0` restored the type but
-> not the toggle. TELUS does this, not the bridge — the write carries only the
+> not the toggle. TELUS does this, not the bridge: the write carries only the
 > field asked for. It follows from the same coupling `disables_indoor_chime`
 > describes, but it is a lasting state change rather than a display rule, so a
 > caller that offers the "none" option should expect to send `indoor_on: true`
 > afterwards if it wants the chime back.
 
 The option list is a property of the hardware, so the bridge caches it for an
-hour rather than re-reading it every poll. The current *selection* is not cached —
+hour rather than re-reading it every poll. The current *selection* is not cached;
 it comes from the website settings in the same response.
 
 `image` and `video` follow the same convention: one key per field the write
 routes accept, each paired with a `supports_<field>` boolean off the matching
 `*FeatureSupport` enum, plus `*_min`/`*_max`/`*_options` where the device reports
-a range or a list, plus `raw`. **Which fields appear is device-dependent** — the
+a range or a list, plus `raw`. **Which fields appear is device-dependent**: the
 example above is a doorbell; a camera without IR will still return the IR keys,
 with `supports_*` false. Always branch on `supports_*`, never on key presence.
 
-### `live_resolution` — the one video field that is not about clips
+### `live_resolution`: the one video field that is not about clips
 
 The `video` object's fields are clip/recording settings with one exception:
 `live_resolution` is the **live stream's** resolution, read from a different
@@ -867,12 +867,12 @@ relationship of the same upstream document.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `supports_live_resolution` | bool | True when the camera offers a choice — see below |
+| `supports_live_resolution` | bool | True when the camera offers a choice; see below |
 | `live_resolution` | str | e.g. `"1440x1440"` |
 | `live_resolution_options` | list | The settable values |
 | `live_resolution_choices` | list | `{"value": str, "label": str}` using the vendor's own labels, e.g. `"Full High Definition (1440x1440)"` |
 
-**This changes what the bridge itself restreams.** That is not obvious — the
+**This changes what the bridge itself restreams.** That is not obvious: the
 bridge fetches its stream from an endpoint named `liveVideoHighestResSources`,
 which reads as though it would ignore the setting. It does not. Verified live:
 selecting `480x480` and renegotiating took the bridge's own stream from
@@ -886,10 +886,10 @@ only when that stream renegotiates.
 Support is derived from the option object itself: an **empty** `webOptions` is
 how this API says "no choice offered" (it is exactly what `mobileOptions` is on
 the reference doorbell), and `isWebOptionsDisabled` is a separate server-side
-veto. Only the **keys** of `webOptions` are settable — the labels are not values,
+veto. Only the **keys** of `webOptions` are settable; the labels are not values,
 unlike the ambiguous `<field>Options` objects elsewhere in this API.
 
-### The `led` object — the status indicator light
+### The `led` object: the status indicator light
 
 Read from `generalSettings`, the same document that carries the `notifications`
 and `solar` objects below; a write to any of them resends the other two
@@ -899,7 +899,7 @@ untouched.
 | --- | --- | --- |
 | `supports_enabled` | bool | From `canTurnOnOffLedLight` |
 | `enabled` | bool | Whether the light is on |
-| `supports_brightness` | bool | From `canChangeLedBrightness` — a **separate** flag, and `false` on the reference doorbell, which can switch its LED but not dim it |
+| `supports_brightness` | bool | From `canChangeLedBrightness`: a **separate** flag, and `false` on the reference doorbell, which can switch its LED but not dim it |
 | `brightness` | int | Current brightness. `brightness_min` / `brightness_max` appear only if the device publishes them; the reference doorbell publishes neither |
 | `raw` | object | The untouched `ledLightSetting` document |
 
@@ -907,14 +907,14 @@ untouched.
 are `ir_led_enabled` in the `image` object, a different field on a different
 endpoint. alarm.com's own interface calls this one "Camera Status LED".
 
-### The `notifications` object — TELUS's own push notifications
+### The `notifications` object: TELUS's own push notifications
 
 **These are the notifications alarm.com sends to its own mobile app, not
 anything Home Assistant does.** Turning one off stops the TELUS app notifying;
 it has no effect on automations, events or notifications on this side. The usual
 reason to want them is to stop being told twice about the same doorbell press.
 
-Read from the same `generalSettings` document as the `led` object — the settings
+Read from the same `generalSettings` document as the `led` object; the settings
 bundle fetches it once and splits it into the two sections.
 
 | Field | Type | Notes |
@@ -927,7 +927,7 @@ bundle fetches it once and splits it into the two sections.
 | `smart_chime` | bool | Notify an alarm.com Smart Chime |
 | `supports_format` | bool | Whether the notification format may be set. Shares the panel-notification capability with motion and button-press |
 | `format` | int \| null | The current notification format. `null` when the camera reports none |
-| `format_choices` | list | `{"value": int, "label": str}` for each format that may be written — always present, see below |
+| `format_choices` | list | `{"value": int, "label": str}` for each format that may be written; always present, see below |
 | `raw` | object | The untouched `doorbellNotificationSetting` document |
 
 **The three `supports_*` booleans are not one upstream flag each**, which is the
@@ -937,7 +937,7 @@ notification toggles" and shows both off that one enum), the smart chime has its
 own `smartChimeNotificationEnableDisableFeatureSupport`, and motion carries a
 *second* condition: the portal renders its row only when
 `isMotionNotificationEnabled` is true, so that is a per-device availability flag
-rather than a toggle. The bridge collapses all of it into the three booleans —
+rather than a toggle. The bridge collapses all of it into the three booleans:
 use them and don't re-derive the rules.
 
 A camera that is not a doorbell reports every flag false and gets no controls at
@@ -950,20 +950,20 @@ upstream enum is:
 
 | Value | Member | Offered? |
 | --- | --- | --- |
-| `-1` | `Unknown` | No — a null state, reported by a camera with no doorbell notifications |
-| `0` | `TextOnly` | **Yes** — "Text Only" |
-| `1` | `AttachVideoClip` | No — legacy, see below |
-| `2` | `AttachThumbnail` | **Yes** — "Attach a Thumbnail" |
+| `-1` | `Unknown` | No: a null state, reported by a camera with no doorbell notifications |
+| `0` | `TextOnly` | **Yes**: "Text Only" |
+| `1` | `AttachVideoClip` | No: legacy, see below |
+| `2` | `AttachThumbnail` | **Yes**: "Attach a Thumbnail" |
 
 Those numbers are not inferred. They were read out of the alarm.com web portal's
-own JavaScript (webpack module `288086`), which is a public static asset — no
+own JavaScript (webpack module `288086`), which is a public static asset; no
 account, no session and no capture of a logged-in page was involved. The labels
 are the portal's own English strings, so what a caller displays matches what the
 TELUS website shows.
 
 **`AttachVideoClip` is deliberately withheld.** The portal builds its own
 dropdown from `TextOnly` and `AttachThumbnail` alone, and elsewhere in the same
-bundle it rewrites `AttachVideoClip` to `AttachThumbnail` whenever it reads one —
+bundle it rewrites `AttachVideoClip` to `AttachThumbnail` whenever it reads one,
 so it is a value alarm.com itself treats as stale. `Unknown` is a state, not a
 choice.
 
@@ -973,22 +973,22 @@ outside `format_choices` before the read-modify-write touches the document.
 `format_choices` is a constant rather than an upstream read, so unlike
 `chime_type_choices` it is always present when the feature is supported.
 
-### The `solar` object — is a solar panel attached
+### The `solar` object: is a solar panel attached
 
 Read from the same `generalSettings` document as the LED and the notification
 toggles, at no extra upstream cost. **Read-only: there is no write route**, and
-that is deliberate — whether a solar panel is bolted to a camera is a fact about
+that is deliberate: whether a solar panel is bolted to a camera is a fact about
 the installation, and the two things that could change it are someone fitting a
 panel and someone removing one.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `supports_connected` | bool | From `connectedToSolarPanelFeatureSupport` — whether this device has anything to say about a solar panel at all |
+| `supports_connected` | bool | From `connectedToSolarPanelFeatureSupport`: whether this device has anything to say about a solar panel at all |
 | `connected` | bool | From `isConnectedToSolarPanel`. Only meaningful when `supports_connected` is true |
 | `raw` | object | The untouched `solarPanelSetting` document |
 
 **Expect `supports_connected: false` on any camera that is not a battery+solar
-model** — it is false on both cameras this was built against. That is the correct
+model**; it is false on both cameras this was built against. That is the correct
 outcome rather than a gap: `connected` is false there too, and a camera with no
 solar hardware reporting a permanent "no solar panel" is noise dressed up as
 diagnostics. A caller should create nothing for a camera that reports the feature
@@ -996,12 +996,12 @@ unsupported.
 
 One nuance worth knowing if you read `raw`: elsewhere in this API a
 `*FeatureSupport` of `2` means "supported **and** editable", and nothing
-establishes that a camera reporting `2` here would accept a write — the field
+establishes that a camera reporting `2` here would accept a write; the field
 reads like a statement about hardware rather than a preference. Since nothing
 writes it, the bridge uses the enum only as "does this device answer the
 question", which is the weaker claim and the one that fails closed.
 
-### The `siren` and `privacy` sections — a fixed contract
+### The `siren` and `privacy` sections: a fixed contract
 
 `audio`, `image` and `video` come from the website API and vary by device model.
 `siren` and `privacy` do not: they come from the **mobile MWS** actions
@@ -1009,35 +1009,35 @@ question", which is the weaker claim and the one that fails closed.
 inconsistent, capture-derived key spellings (`canManuallyTriggerSiren` vs
 `can_manually_trigger_siren`, `SupportsPrivacyMode` vs `supports_privacy_mode`).
 The bridge **normalizes** each record into a fixed, small shape before returning
-it, and that shape is a contract other code depends on — the Home Assistant
+it, and that shape is a contract other code depends on: the Home Assistant
 entities read exactly these key names and nothing else.
 
-**`settings["siren"]`** — an object, or `null`:
+**`settings["siren"]`**: an object, or `null`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `can_manually_trigger` | bool | Whether **this account** may sound this camera's siren. A per-account permission, not a hardware capability — a camera with a siren this account may not fire reports `false`. Gate the control on this |
+| `can_manually_trigger` | bool | Whether **this account** may sound this camera's siren. A per-account permission, not a hardware capability: a camera with a siren this account may not fire reports `false`. Gate the control on this |
 | `active` | bool | Whether the siren is sounding right now |
 | `timestamp_end` | value \| `null` | The server-chosen end of the current sounding, as the upstream reports it. `null` when nothing is running (or when upstream sent none). The duration is not the caller's to choose |
 
-**`settings["privacy"]`** — an object, or `null`:
+**`settings["privacy"]`**: an object, or `null`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `supported` | bool | Whether the camera reports privacy-mode support. `false` for every camera on the account this was built against |
 | `active` | bool | Whether privacy mode is on (camera blinded) |
 
-Every field is a real JSON `bool`, always present, whatever the upstream sent —
+Every field is a real JSON `bool`, always present, whatever the upstream sent:
 the MWS side spells booleans as the strings `"true"`/`"false"` and privacy state
 as `0`/`1`, and normalizing that here is the point of the contract (a truthiness
 test on the string `"false"` is `True`).
 
 The two capability flags default in **opposite** directions, on purpose:
 
-- `can_manually_trigger` fails **closed** — absent, null or unrecognised becomes
+- `can_manually_trigger` fails **closed**: absent, null or unrecognised becomes
   `false`. It is the permission that sounds a real siren in someone's home, so a
   record the bridge cannot read is never taken as consent.
-- `supported` fails **open** — only an explicit `false` reports unsupported. That
+- `supported` fails **open**: only an explicit `false` reports unsupported. That
   action returns a privacy *state* object rather than an enumeration of capable
   devices, so a missing flag is a gap in a shape recovered from the decompiled
   app, not the device saying no; failing closed would leave the privacy control
@@ -1048,16 +1048,16 @@ The two capability flags default in **opposite** directions, on purpose:
 is the dangerous direction to be wrong in.
 
 **`null` is not "unsupported".** Either section is `null` when the mobile session
-was unavailable — no talk manager (`TALKDOWN_ENABLED=false`), a failed MWS read,
-a token that would not mint — or when the MWS response carried no record
+was unavailable (no talk manager (`TALKDOWN_ENABLED=false`), a failed MWS read,
+a token that would not mint) or when the MWS response carried no record
 matching this camera. All of those mean *nothing was reported*, and none of them
 means the camera cannot do the thing.
 
 Both sections are best effort by design: an MWS outage degrades them to `null`
 and still returns a `200` with the website settings intact, rather than failing
-the whole read with a `502`. A caller must therefore distinguish three states —
+the whole read with a `502`. A caller must therefore distinguish three states:
 `null` (unknown), `{"can_manually_trigger": false}` / `{"supported": false}`
-(reported unsupported), and a positive flag — and must not collapse the first
+(reported unsupported), and a positive flag, and must not collapse the first
 two. Treating `null` as `false` turns a transient MWS blip into "this camera has
 no siren"; treating it as `true` offers a control that will fail.
 
@@ -1067,11 +1067,11 @@ account-wide and cached for 30 s across all cameras (failures included), so a
 sweep over several cameras pays them once.
 
 **Errors:** `401 bad_secret`, `404 unknown_camera`, `429 rate_limited`,
-`502 telus_error`. Note there is **no `503` here** — unlike the siren and
+`502 telus_error`. Note there is **no `503` here**, unlike the siren and
 privacy *write* routes, a missing mobile session degrades this read to `null`
 sections instead of failing it. The `429` comes from the **website** half: a
 rate-limited website GET fails the read with the server's `Retry-After`, while a
-rate-limited MWS read is absorbed like any other MWS failure — the negative
+rate-limited MWS read is absorbed like any other MWS failure: the negative
 result is held for the server's wait and the siren/privacy sections degrade to
 `null`.
 
@@ -1088,10 +1088,10 @@ curl -s -H "Authorization: Bearer $SECRET" \
 
 Read-only health for one camera: signal strength, battery, and the device status
 the settings screen shows. A camera degrading to poor Wi-Fi is otherwise a silent
-failure — the picture just gets worse — so this exists to make it a number
+failure (the picture just gets worse) so this exists to make it a number
 something can alert on.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Response**
 
@@ -1106,8 +1106,8 @@ something can alert on.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `signal_strength_key` | str \| null | WHICH upstream key the reading came from. `normalizedSignalStrength` is a 0–100 score; the other spellings, kept for camera models this was never tested against, may be real dBm. A caller must label the first and only the first — Home Assistant records long-term statistics against the declared unit, so a wrong one poisons history rather than just the display |
-| `signal_strength` | number \| null | alarm.com's `normalizedSignalStrength` — a **0–100 score, not dBm** (see below). `null` when the device reports none, typically a wired camera |
+| `signal_strength_key` | str \| null | WHICH upstream key the reading came from. `normalizedSignalStrength` is a 0–100 score; the other spellings, kept for camera models this was never tested against, may be real dBm. A caller must label the first and only the first; Home Assistant records long-term statistics against the declared unit, so a wrong one poisons history rather than just the display |
+| `signal_strength` | number \| null | alarm.com's `normalizedSignalStrength`: a **0–100 score, not dBm** (see below). `null` when the device reports none, typically a wired camera |
 | `battery` | number \| null | Battery percentage, `null` on a camera with no battery |
 | `device_status` | string \| null | Upstream status string |
 | `raw` | object | The three upstream responses as received, under `signal_strength` / `battery` / `device_status` keys, for anything not modelled above |
@@ -1115,17 +1115,17 @@ something can alert on.
 **`signal_strength` is not dBm.** The signal document reports
 `normalizedSignalStrength` (0–100, the bars the portal draws) and a coarse
 `signalStrengthEnum`; it does **not** report `signalStrength` or `rssi`. Anything
-consuming this must not label it dBm — a real Wi-Fi dBm figure is negative, so a
+consuming this must not label it dBm: a real Wi-Fi dBm figure is negative, so a
 `58` presented as dBm is nonsense, and in Home Assistant a wrong unit is recorded
 into long-term statistics rather than just shown. The bridge does fall back to
 `signalStrength` / `signalStrengthValue` for camera models that report those
-instead, and their unit is **unverified** — which is why the Home Assistant
+instead, and their unit is **unverified**, which is why the Home Assistant
 sensor asserts no unit at all.
 
 **`battery` is `null` for "no battery", not `0`.** `batteryLevel` is present and
 `0` on mains-powered devices, so the value alone cannot tell a missing battery
 from a flat one. The bridge honours alarm.com's own `shouldDisplayBatteryLevel`
-flag and reports `null` when it is false — build no entity for a `null`, or you
+flag and reports `null` when it is false: build no entity for a `null`, or you
 get a permanent 0%.
 
 **`raw` carries the camera's Wi-Fi SSID and encryption type.** That is diagnostic
@@ -1134,16 +1134,16 @@ attribute without deciding to do so on purpose.
 
 Every field is nullable on purpose: three separate upstream reads back this
 response, and a camera that reports none of them is normal, not an error. A
-caller must not create a sensor for a `null` field — an "unknown" battery sensor
+caller must not create a sensor for a `null` field: an "unknown" battery sensor
 on a wired camera is noise, not diagnostics.
 
 **A healthy response can take tens of seconds.** The three upstream reads run
 sequentially, and alarm.com appears to answer the signal read by querying the
-camera live — measured on one account at 1.6s for a doorbell and **25s** for an
+camera live, measured on one account at 1.6s for a doorbell and **25s** for an
 indoor camera. The bridge allows each read up to 35s
 (`DIAGNOSTICS_READ_TIMEOUT_S`, see [configuration.md](configuration.md)) instead
 of its usual 15s upstream timeout, so a caller's own client timeout must sit
-well above that — the Home Assistant integration budgets 45s for this route. A
+well above that: the Home Assistant integration budgets 45s for this route. A
 short client timeout abandons responses the bridge would have delivered.
 
 **Errors:** `401 bad_secret`, `404 unknown_camera`, `429 rate_limited`,
@@ -1160,19 +1160,19 @@ curl -s -H "Authorization: Bearer $SECRET" \
 
 ## `POST /control/cameras/{camera_id}/settings/volume`
 
-Sets the camera's speaker/call volume — the level talkdown is heard at. The
+Sets the camera's speaker/call volume: the level talkdown is heard at. The
 mobile API's `<duav>` element claims `SupportsVolumeAdjustment="false"` for this
 doorbell; the website API exposes it as supported with a live 0–10 sweep
 observed, so this route trusts the website's `callVolumeFeatureSupport` and
 ignores the mobile claim.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `volume` | int | yes | Must be within the device's own `call_volume_min`–`call_volume_max` (0–10 on the doorbell tested). Anything outside that range is **refused with a `400 malformed`** — never clamped, so the camera is never quietly set to a volume the caller did not ask for. A non-integer (including `true`) is also a `400` |
+| `volume` | int | yes | Must be within the device's own `call_volume_min`–`call_volume_max` (0–10 on the doorbell tested). Anything outside that range is **refused with a `400 malformed`**, never clamped, so the camera is never quietly set to a volume the caller did not ask for. A non-integer (including `true`) is also a `400` |
 
 The range comes from the device on every write: the route re-reads the audio
 settings before applying and bounds the request against the `call_volume_min` /
@@ -1203,20 +1203,20 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 Sets the doorbell's chime: the indoor chime, the wired chime type, the tone the
 doorbell itself plays, and that tone's volume. Every field is optional and
-independent — send only what you want changed.
+independent: send only what you want changed.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `indoor_on` | bool | no | Indoor chime on/off |
-| `chime_type` | int | no | The **wired chime type** — must be one of `chime_type_options`. Off-list is a **`400 malformed`** (the field is supported, the value just is not offered), while a device that cannot select a type at all is a `422`. Gated on `supports_chime_type`, a *different* flag from `supports_indoor_chime` |
+| `chime_type` | int | no | The **wired chime type**. Must be one of `chime_type_options`. Off-list is a **`400 malformed`** (the field is supported, the value just is not offered), while a device that cannot select a type at all is a `422`. Gated on `supports_chime_type`, a *different* flag from `supports_indoor_chime` |
 | `outdoor_on` | bool | no | The doorbell's own outdoor tone, on/off |
-| `outdoor_volume` | int | no | Must be within `outdoor_tone_volume_min`–`outdoor_tone_volume_max` (0–3 on the doorbell tested). Outside that range is a **`400 malformed`**, not a clamp — same rule as `volume` above. Gated on `supports_outdoor_tone_volume`, which is a *different* flag from `supports_outdoor_tone` and is `false` on the reference doorbell: `outdoor_on` works there, `outdoor_volume` is a `422` |
+| `outdoor_volume` | int | no | Must be within `outdoor_tone_volume_min`–`outdoor_tone_volume_max` (0–3 on the doorbell tested). Outside that range is a **`400 malformed`**, not a clamp; same rule as `volume` above. Gated on `supports_outdoor_tone_volume`, which is a *different* flag from `supports_outdoor_tone` and is `false` on the reference doorbell: `outdoor_on` works there, `outdoor_volume` is a `422` |
 
-An empty body — no recognised field at all — is a `400 malformed` rather than a
+An empty body (no recognised field at all) is a `400 malformed` rather than a
 no-op write, so a caller with a typo'd key hears about it instead of believing a
 setting was applied.
 
@@ -1225,7 +1225,7 @@ setting was applied.
 
 **Errors:** the shared table. `422 unsupported` names the requested field the
 device does not support (`supports_indoor_chime` / `supports_chime_type` /
-`supports_outdoor_tone` / `supports_outdoor_tone_volume` — four separate flags). All
+`supports_outdoor_tone` / `supports_outdoor_tone_volume`: four separate flags). All
 requested fields are support-checked **before anything is written**, so a
 partly-unsupported request leaves the camera untouched rather than half-applied.
 
@@ -1243,9 +1243,9 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 ## `POST /control/cameras/{camera_id}/settings/notifications`
 
 Turns TELUS's own push notifications on or off for one camera. All fields are
-optional and independent — send only what you want changed.
+optional and independent: send only what you want changed.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
@@ -1253,8 +1253,8 @@ optional and independent — send only what you want changed.
 | --- | --- | --- | --- |
 | `motion` | bool | no | Gated on `supports_motion` |
 | `button_press` | bool | no | Gated on `supports_button_press` |
-| `smart_chime` | bool | no | Gated on `supports_smart_chime`, `false` on the reference doorbell — a `422` there |
-| `format` | int | no | Must be one of the values in `format_choices` (`0` or `2`). Anything else — including the upstream enum's other two members, `-1` and `1` — is a **`400 malformed`**: the field is supported, the value just is not offered. Gated on `supports_format` |
+| `smart_chime` | bool | no | Gated on `supports_smart_chime`, `false` on the reference doorbell; a `422` there |
+| `format` | int | no | Must be one of the values in `format_choices` (`0` or `2`). Anything else (including the upstream enum's other two members, `-1` and `1`) is a **`400 malformed`**: the field is supported, the value just is not offered. Gated on `supports_format` |
 
 An empty body is a `400 malformed`.
 
@@ -1303,13 +1303,13 @@ bypass while armed" is not a yes.
 `partition_id` is the partition's alarm.com device id (`<unit>-127`), not the
 `partition_id: 1` ordinal.
 
-**Request body:** `{"bypass": [<sensor id>, ...], "unbypass": [...]}` — both
+**Request body:** `{"bypass": [<sensor id>, ...], "unbypass": [...]}`, both
 lists optional, at least one non-empty, else `400 malformed`. A sensor id
 containing the `|` separator is refused: the wire format is pipe-separated, so
 one would split server-side and bypass a sensor nobody named.
 
 The partition is **re-read before every write** and the operation refused with
-`422 unsupported` when it says no — no permission, or armed on a panel whose
+`422 unsupported` when it says no: no permission, or armed on a panel whose
 `canBypassSensorWhenArmed` is false. Discovering that a panel forbade the write
 by having already attempted it is not an acceptable order of operations.
 
@@ -1317,7 +1317,7 @@ by having already attempted it is not an acceptable order of operations.
 
 > **The write takes about ten seconds to reach the sensor.** Verified live:
 > `isBypassed` was still false 5s after a 200 and true at 10s. The response says
-> nothing about which sensors ended up bypassed — this endpoint never does — so a
+> nothing about which sensors ended up bypassed (this endpoint never does) so a
 > caller that re-reads immediately will see the old state and conclude nothing
 > happened. Wait past that window before reading back.
 
@@ -1328,7 +1328,7 @@ become an automatic second one; see `partitions.py`.
 
 ## `GET /control/arming-devices`
 
-Lists the **Bluetooth arming devices** on the account — paired phones that may
+Lists the **Bluetooth arming devices** on the account: paired phones that may
 disarm the panel when they come within range.
 
 **Response**
@@ -1351,18 +1351,18 @@ disarm the panel when they come within range.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `id` | string | The alarm.com device id of the paired phone |
-| `description` | string | The phone's name as its owner typed it — routinely a real person's name, so treat it as text: never parsed, sliced, or used to build an identifier |
+| `description` | string | The phone's name as its owner typed it, routinely a real person's name, so treat it as text: never parsed, sliced, or used to build an identifier |
 | `disarming_enabled` | bool | Whether this phone disarms the panel on approach |
-| `enrolled_partition_id` | string | The partition it disarms, as the panel's own partition **number** (`"1"`) — see the warning below |
+| `enrolled_partition_id` | string | The partition it disarms, as the panel's own partition **number** (`"1"`); see the warning below |
 | `enrolled_partition_choices` | list | `{"value": "<partition number>", "label": "<partition description>"}` for every partition on the account, so a client can build a picker without a second read. `[]` when the partition list could not be read |
 | `supports_disarming_toggle` | bool | Whether the disarming toggle may be written |
 | `supports_enrolled_partition` | bool | Whether the enrolled partition may be written |
 | `raw` | object | The untouched upstream record |
 
 **`enrolled_partition_id` is the partition NUMBER, not a device id.** The same
-partition also has an alarm.com device id of the form `<unit>-127` — which is
+partition also has an alarm.com device id of the form `<unit>-127`, which is
 what `GET /control/partitions` reports as `id` and what the alarm panel entity
-uses as its unique id — and posting *that* to the write route below is a `400`.
+uses as its unique id, and posting *that* to the write route below is a `400`.
 Match against `partition_id` from `/control/partitions`, as strings.
 
 `enrolled_partition_choices` is stamped onto **every** response that carries an
@@ -1373,7 +1373,7 @@ then adopts the echoed record must not have the choices vanish underneath it.
 Both `supports_*` flags are assembled rather than read from a single flag: this
 endpoint publishes no `*FeatureSupport` enum and no `canSetX`, and the portal
 renders its controls unconditionally. Each combines `canBeSaved` (which does
-discriminate — true on these devices, false on plain mobile devices in the same
+discriminate: true on these devices, false on plain mobile devices in the same
 catalog), `canAccessWebSettings` (the bridge is a website client), and *its own*
 field being present with a usable type. They are separate flags because a record
 can be missing one field and not the other, and gating the partition control on
@@ -1381,11 +1381,11 @@ the disarming field would offer it on the strength of something unrelated.
 
 `supports_enrolled_partition` is deliberately **not** gated on the account having
 more than one partition. That is a fact about the account, not about this
-record's writability — but it is a real consideration for whoever builds a
+record's writability, but it is a real consideration for whoever builds a
 control, and the Home Assistant side acts on it (see
 [ha-integration.md](ha-integration.md#the-entities)).
 
-**Errors:** the shared table, minus `400`/`422` — this route takes no caller
+**Errors:** the shared table, minus `400`/`422`: this route takes no caller
 input, so an upstream problem is a `502` rather than "you asked wrong".
 
 ---
@@ -1396,7 +1396,7 @@ input, so an upstream problem is a `502` rather than "you asked wrong".
 Treat it with the caution the siren route gets: it is never called except by an
 explicit user action.
 
-**Request body:** `{"enabled": <bool>}` — a non-bool is a `400`.
+**Request body:** `{"enabled": <bool>}`; a non-bool is a `400`.
 
 Three refusals, cheapest first: a bad body is a `400` before any upstream call; a
 device id absent from the catalog is a `404`, so a typo can never become a blind
@@ -1421,10 +1421,10 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 ## `POST /control/arming-devices/{device_id}/enrolled-partition`
 
-Moves one paired phone to a different partition — **which** partition it disarms,
+Moves one paired phone to a different partition: **which** partition it disarms,
 the same class of setting as whether it may disarm at all.
 
-**Request body:** `{"partition_id": "<partition number>"}` — a non-empty JSON
+**Request body:** `{"partition_id": "<partition number>"}`; a non-empty JSON
 **string** carrying the panel's own partition number (`"1"`, `"2"`), exactly as
 the arming-device record reports it. It is never coerced: it goes back onto a
 whole-record `PUT` as it arrived, and `str(1)` would change its type on the wire
@@ -1463,7 +1463,7 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 ## `DELETE /control/arming-devices/{device_id}`
 
 Unpairs one phone from the panel's Bluetooth disarming. **This cannot be undone
-from this side** — re-pairing needs physical access to both the phone and the
+from this side**: re-pairing needs physical access to both the phone and the
 panel. There is no cloud-side undo and nothing the bridge can call to reverse it.
 
 One device per call. The vendor portal also offers a delete-all for the whole
@@ -1481,7 +1481,7 @@ address.
 ```
 
 The description is read **before** the delete, so the reply can name the phone
-that was removed — afterwards it is no longer knowable.
+that was removed; afterwards it is no longer knowable.
 
 **Errors:** the shared table, plus `404 {"error": "unknown_device"}`.
 
@@ -1516,24 +1516,24 @@ account, addressed by the session's own system id.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `pairing_enabled` | bool | Whether the panel accepts Bluetooth pairing — i.e. whether a phone that is not already enrolled can be added |
+| `pairing_enabled` | bool | Whether the panel accepts Bluetooth pairing, i.e. whether a phone that is not already enrolled can be added |
 | `timeout` | int \| null | The disarm window, in the unit below |
 | `timeout_unit` | string | `"minutes"` |
 | `timeout_options` | list | The five windows the vendor offers: `[1, 5, 10, 20, 30]` |
-| `supports_pairing_enabled` / `supports_timeout` | bool | See the caveat below — a weaker claim than the per-device flags |
+| `supports_pairing_enabled` / `supports_timeout` | bool | See the caveat below: a weaker claim than the per-device flags |
 | `enrolled_device_ids` | list | The phones the panel says are paired, as ids. The same set `GET /control/arming-devices` discovers, reported here so a caller can tell "pairing is configured" from "the document exists but nothing is paired" without a second read |
 | `raw` | object | The untouched flat document |
 
 **The unit and the option set do not come from the payload.** The upstream
 document publishes neither: it carries a bare `timeout` with no unit, no bounds
 and no options. Both come from the vendor portal's own picker, which builds its
-five entries by rendering `[1, 5, 10, 20, 30]` through a "minutes" string — which
+five entries by rendering `[1, 5, 10, 20, 30]` through a "minutes" string, which
 is exactly why the bridge reports them, since no client could derive them from
 the document.
 
 **The `supports_*` flags here are weaker than the per-device ones.** This
-document publishes no capability flag of any kind — its whole attribute set is
-`deviceId`, `isBluetoothPairingEnabledForSystem` and `timeout` — so rather than
+document publishes no capability flag of any kind: its whole attribute set is
+`deviceId`, `isBluetoothPairingEnabledForSystem` and `timeout`, so rather than
 invent a gate, the bridge reports the only signal there is: the field is present
 and holds a value of the expected type. It fails closed for a panel with no
 Bluetooth support and for a payload shape that has changed, but it does **not**
@@ -1547,7 +1547,7 @@ portal does not read it" is evidence about the portal, not about the firmware.
 Treat the two as independent, and do not tell a user that turning one off
 disables the other.
 
-**Errors:** the shared table, minus `400`/`422` — this route takes no caller
+**Errors:** the shared table, minus `400`/`422`: this route takes no caller
 input, so an upstream problem is a `502`.
 
 ---
@@ -1558,8 +1558,8 @@ Changes the panel-wide settings above.
 
 > **The write shape this reaches is INFERRED, not captured.** No `PUT` to this
 > upstream endpoint was ever observed. What the bridge sends is the convention
-> this API uses everywhere else — the flat whole-document body proven against the
-> per-device endpoint — applied to the one captured `GET`. Two parts of it in
+> this API uses everywhere else (the flat whole-document body proven against the
+> per-device endpoint) applied to the one captured `GET`. Two parts of it in
 > particular are reconstructions rather than observations: how the to-many
 > `enrolledDevices` relationship is resent, and the pluralized resource type. If
 > a write here fails, suspect the reconstruction at least as readily as the panel.
@@ -1569,7 +1569,7 @@ Changes the panel-wide settings above.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `pairing_enabled` | bool | A real JSON boolean |
-| `timeout` | int | Must be one of `timeout_options` — `1`, `5`, `10`, `20` or `30` minutes |
+| `timeout` | int | Must be one of `timeout_options`: `1`, `5`, `10`, `20` or `30` minutes |
 
 An unknown key, a wrong type, or a boolean where an int is wanted is a `400`. The
 bool-for-int check is not pedantry: `bool` is an `int` subclass in Python, so
@@ -1588,7 +1588,7 @@ the session's own system, addressed by its `Context-Id`, so there is no id for a
 caller to have got wrong.
 
 **Success response:** the same shape `GET /control/bluetooth-disarming` returns,
-refreshed after the write — so a client can adopt it instead of polling.
+refreshed after the write, so a client can adopt it instead of polling.
 
 **Example**
 
@@ -1604,18 +1604,18 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 ## `POST /control/cameras/{camera_id}/settings/led`
 
 Turns the device's status indicator light on or off, or sets its brightness.
-Both fields are optional and independent — send only what you want changed.
+Both fields are optional and independent: send only what you want changed.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | no | The light on/off. Gated on `supports_enabled` |
-| `brightness` | int | no | Gated on `supports_brightness`, which is a *different* flag and is `false` on the reference doorbell — `enabled` works there, `brightness` is a `422`. Bounded by `brightness_min`/`brightness_max` when the device publishes them; out of range is a `400`, never a clamp |
+| `brightness` | int | no | Gated on `supports_brightness`, which is a *different* flag and is `false` on the reference doorbell: `enabled` works there, `brightness` is a `422`. Bounded by `brightness_min`/`brightness_max` when the device publishes them; out of range is a `400`, never a clamp |
 
-An empty body — no recognised field — is a `400 malformed` rather than a no-op.
+An empty body (no recognised field) is a `400 malformed` rather than a no-op.
 
 **Success response:** the refreshed `led` object (same shape as `GET
 .../settings`'s `led`).
@@ -1639,9 +1639,9 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 Sets picture settings. Every field is optional; only the ones sent are changed
 (the rest are carried over from the read half of the read-modify-write).
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
-**Request body (JSON)** — accepted keys:
+**Request body (JSON)**: accepted keys:
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -1680,22 +1680,22 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 Sets recording/clip settings. Same optional-field, read-modify-write behaviour as
 the image route.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
-**Request body (JSON)** — accepted keys:
+**Request body (JSON)**: accepted keys:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `clip_resolution` | string | Must be one of the device's `clip_resolution_options` (`480x480` / `960x960` / `1440x1440` on the cameras seen). This is the **recorded clip** resolution and has no effect on the live stream — for that, see `live_resolution` below |
+| `clip_resolution` | string | Must be one of the device's `clip_resolution_options` (`480x480` / `960x960` / `1440x1440` on the cameras seen). This is the **recorded clip** resolution and has no effect on the live stream; for that, see `live_resolution` below |
 | `clip_quality` | string | Encode quality; must be one of the device's `clip_quality_options` |
 | `pretrigger_enabled` | bool | Pre-trigger recording (the seconds before the event) |
-| `keep_clips_days` | int | Cloud retention in days, checked against whichever the device publishes — its `keep_clips_days_options` list and/or a min/max. **`-1` is a legitimate option meaning "keep forever"**, so do not filter negatives out on the assumption that a retention must be positive |
+| `keep_clips_days` | int | Cloud retention in days, checked against whichever the device publishes: its `keep_clips_days_options` list and/or a min/max. **`-1` is a legitimate option meaning "keep forever"**, so do not filter negatives out on the assumption that a retention must be positive |
 | `alarm_clip_duration` | int | Alarm-clip length in seconds; must be within the device-reported range, else `400` |
 | `camera_triggered_clip_duration` | int | Camera-triggered clip length in seconds; checked against the device's published options/range like the other numeric fields |
-| `live_resolution` | string | The **live stream's** resolution — the exception in this route, and the one field here that is not about clips. Must be one of `live_resolution_options`. Unlike `clip_resolution` it **does** change what this bridge restreams (verified live), though only from the next stream renegotiation |
+| `live_resolution` | string | The **live stream's** resolution: the exception in this route, and the one field here that is not about clips. Must be one of `live_resolution_options`. Unlike `clip_resolution` it **does** change what this bridge restreams (verified live), though only from the next stream renegotiation |
 
 Any other key, or a value of the wrong type, is a `400 malformed`. A recognised
-key the device reports no support for is a `422 unsupported` — that gate runs on
+key the device reports no support for is a `422 unsupported`; that gate runs on
 the pre-read, before anything is sent.
 
 A value **off the option list** the device published is a `400 malformed`, not a
@@ -1723,13 +1723,13 @@ Starts or stops the camera's built-in siren, via the mobile MWS actions
 `ManualSirenStart` / `ManualSirenStop`.
 
 > **This is loud, on purpose, in someone's home.** Nothing in the bridge fires it
-> on its own — it happens only when a caller explicitly posts `start`. Treat the
+> on its own; it happens only when a caller explicitly posts `start`. Treat the
 > first invocation on a new device as an experiment and pick your moment: no live
 > siren command was ever captured from the app on the account this was built
 > against (the UI is absent there), so the request shape comes from the decompiled
 > app rather than from an observed round trip.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
@@ -1743,7 +1743,7 @@ Starts or stops the camera's built-in siren, via the mobile MWS actions
 200 {"status": "applied"}
 ```
 
-That is the **whole** body — exactly two keys' worth, and nothing from the
+That is the **whole** body: exactly two keys' worth, and nothing from the
 upstream MWS envelope is merged into it. The route checks the envelope's `ok`
 flag (a not-ok envelope becomes a `502 telus_error`) and then discards it, so a
 `200` means "the upstream accepted the command", not "here is the siren's new
@@ -1761,7 +1761,7 @@ state". There is no read-back of siren state on this route; the only read is the
   discover the refusal on a failed press.
 - **The siren is time-bounded by the server, not by you.** The upstream carries a
   `timestampEnd` chosen server-side. Do not assume a duration and do not assume
-  it stops on its own on any particular schedule — post `{"action": "stop"}` to
+  it stops on its own on any particular schedule; post `{"action": "stop"}` to
   end it early.
 
 **Errors:** the shared table, plus `422 unsupported` for
@@ -1773,7 +1773,7 @@ state". There is no read-back of siren state on this route; the only read is the
 
 The `503` is the one that surprises people. Siren and privacy are the only two
 routes in this group that speak the **mobile** API, and the bridge does not own
-an MWS session of its own — it borrows the one the talk manager mints. With
+an MWS session of its own; it borrows the one the talk manager mints. With
 `TALKDOWN_ENABLED=false` no talk manager is constructed, so these two routes
 return `503 mws_unavailable` even though the rest of the settings surface works
 normally. It is a bridge-configuration state, not a device or account state, and
@@ -1799,10 +1799,10 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 Turns camera privacy mode on or off (MWS `SetCameraPrivacyModeState`). Privacy
 mode blinds the camera at the device, so **the live RTSP stream and snapshots go
-dark while it is active** — this is the one route here that changes what the
+dark while it is active**: this is the one route here that changes what the
 video half of the bridge can deliver.
 
-**Path parameter:** `camera_id` — must exist in the camera registry.
+**Path parameter:** `camera_id`. Must exist in the camera registry.
 
 **Request body (JSON)**
 
@@ -1852,7 +1852,7 @@ Most recent camera video-clip events across all cameras, newest first.
 
 | Param | Default | Notes |
 | --- | --- | --- |
-| `limit` | `20` | Max number of events. Clamped to `1`–`100` — it is passed to the upstream account as a page size, so it is bounded rather than forwarded verbatim. A non-integer value falls back to `20`. |
+| `limit` | `20` | Max number of events. Clamped to `1`–`100`; it is passed to the upstream account as a page size, so it is bounded rather than forwarded verbatim. A non-integer value falls back to `20`. |
 
 **Response**
 
@@ -1873,7 +1873,7 @@ Most recent camera video-clip events across all cameras, newest first.
 ```
 
 `thumbnail_url` and `download_url` are signed TELUS relay-host URLs, passed
-through as-is (fetchable directly, no cookie needed) — they are **not** proxied
+through as-is (fetchable directly, no cookie needed); they are **not** proxied
 through this endpoint. Note that these signed URLs expire within minutes of the
 fetch; use [`/control/clip/{video_event_id}`](#get-controlclipvideo_event_id)
 to re-mint a fresh one at click time.
@@ -1890,7 +1890,7 @@ curl -s -H "Authorization: Bearer $SECRET" "$BASE/control/events?limit=10"
 
 ## `GET /control/history`
 
-TELUS's system-wide activity feed — arm/disarm, door/lock, camera triggers,
+TELUS's system-wide activity feed: arm/disarm, door/lock, camera triggers,
 doorbell presses, etc., newest first. Broader than `/control/events` (which is
 camera clips only).
 
@@ -1898,7 +1898,7 @@ camera clips only).
 
 | Param | Default | Notes |
 | --- | --- | --- |
-| `limit` | `20` | Max number of entries. Clamped to `1`–`100` — it is passed to the upstream account as a page size, so it is bounded rather than forwarded verbatim. A non-integer value falls back to `20`. |
+| `limit` | `20` | Max number of entries. Clamped to `1`–`100`; it is passed to the upstream account as a page size, so it is bounded rather than forwarded verbatim. A non-integer value falls back to `20`. |
 
 **Response**
 
@@ -1941,13 +1941,13 @@ rather than assuming the list above is exhaustive.
 `description` is **not** a substitute for it. That field is free text rendered in
 the account's own language, and this project's reference account has produced
 both French (`Déclenché par caméra (Une personne)`, `Mouvement détecté`) and
-English (`Button Push`, `Locked (Manually locked)`) descriptions — the language
+English (`Button Push`, `Locked (Manually locked)`) descriptions; the language
 is a server-side account property, not a request parameter. A consumer that
 matches description text therefore breaks silently the day the account's locale
 changes: the route keeps answering 200 with well-formed activity, and the only
 symptom is a match that stops matching. `event_type_name` does not translate.
 
-`device_id` is the alarm.com device id (`<unit>-<did>`) — the same id
+`device_id` is the alarm.com device id (`<unit>-<did>`), the same id
 `/control/cameras` reports for a camera, so a camera-related entry can be
 attributed by comparing the two directly. `device_description` is a
 user-editable label and is for display only.
@@ -1968,14 +1968,14 @@ Re-mints a **fresh** signed download URL for one saved clip on demand. The
 signed URLs embedded in `/control/events` and `/control/history` responses
 expire within minutes of being issued (alarm.com stamps each mint into the
 token), even though the clip itself never expires. A URL captured at poll time
-and opened later lands on alarm.com's "you don't have permission" page — so
+and opened later lands on alarm.com's "you don't have permission" page, so
 callers hit this endpoint at click time and redirect to the result.
 
 Responses are cached in-process for `config.CLIP_URL_CACHE_TTL_S` (60 s), keyed
 by event id, so a burst of taps on one notification collapses into a single
 TELUS round trip. Expired cache entries are evicted opportunistically.
 
-**Path parameter:** `video_event_id` — the id from a `/control/history` entry's
+**Path parameter:** `video_event_id`: the id from a `/control/history` entry's
 `video_event_id` (or an `/control/events` entry `id`).
 
 **Response**
@@ -2041,7 +2041,7 @@ curl -s -H "Authorization: Bearer $SECRET" $BASE/control/automations
 Pause or resume one automation rule. No request body.
 
 **Path parameter:** `rule_id`. This is **not** validated against a known-rules
-list first — TELUS itself 404s/errors on a bad id, and that is surfaced as
+list first; TELUS itself 404s/errors on a bad id, and that is surfaced as
 `telus_error`, so a local pre-check would only duplicate what TELUS enforces.
 
 **Response**
@@ -2070,11 +2070,11 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 Manual levers to (re)start or stop a single camera pipeline without touching
 the others and without a full container restart. **Not used by Home
-Assistant** and not called automatically — every registered camera's pipeline
+Assistant** and not called automatically; every registered camera's pipeline
 is started eagerly by `main.py` and left running ("always warm"), so there is
 no reader-count-driven on-demand start/stop.
 
-**Path parameter:** `path_name` — the RTSP path name
+**Path parameter:** `path_name`: the RTSP path name
 (`config.rtsp_path_for(camera_id)`), kept rather than `camera_id` because
 MediaMTX's `$MTX_PATH` is what identifies a path elsewhere in the codebase. The
 handler maps it back to a camera via the registry.
@@ -2159,14 +2159,14 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 
 The HA integration talks to this API through
 `custom_components/telus_smarthome/bridge_client.py`, used throughout the
-integration — `camera.py`, `event.py`, `switch.py`, `sensor.py`, the
+integration: `camera.py`, `event.py`, `switch.py`, `sensor.py`, the
 settings and arming-device coordinators, and the speak/clip/bypass/unpair
 services. Two helpers matter:
 
 - **`read_control_secret()`** reads the shared secret off the mounted share
   (`/share/telus_cam_bridge/control_secret`), stripped. It is blocking file I/O
   and must run in an executor. It returns `None` when the bridge has not yet
-  generated its secret (e.g. right after either container restarts) — callers
+  generated its secret (e.g. right after either container restarts); callers
   treat that as "nothing to report this cycle", not an error.
 - **`bridge_get(hass, url, *, params=None, timeout=10)`** reads the secret
   fresh **on every call** (this is why secret rotation needs no coordination),

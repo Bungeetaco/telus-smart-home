@@ -329,7 +329,7 @@ class CameraChimeTypeSelect(CameraSettingsEntity, SelectEntity):
                     f"{self._device_label}, because that setting means there is "
                     "no wired chime to ring.\n\n"
                     "TELUS does this, and choosing a real chime type again does "
-                    "**not** turn it back on — switch the indoor chime back on by "
+                    "**not** turn it back on; switch the indoor chime back on by "
                     "hand if you want it."
                 ),
                 title="Indoor chime turned off",

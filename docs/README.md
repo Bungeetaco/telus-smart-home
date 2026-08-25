@@ -1,7 +1,7 @@
-# TELUS Smart Home for Home Assistant — Documentation
+# TELUS Smart Home for Home Assistant: Documentation
 
-This project brings a **TELUS Smart Home** system — a white-labeled Alarm.com
-deployment — into **Home Assistant**. TELUS ships no official API, so the project
+This project brings a **TELUS Smart Home** system (a white-labeled Alarm.com
+deployment) into **Home Assistant**. TELUS ships no official API, so the project
 is built by reverse-engineering the browser and mobile-app traffic of a real
 account. It has two independent halves:
 
@@ -10,7 +10,7 @@ account. It has two independent halves:
 - a standalone **camera bridge** container that republishes Alarm.com's WebRTC
   video as plain RTSP and exposes a small loopback control API.
 
-The docs below describe the software generically — any operator running this
+The docs below describe the software generically; any operator running this
 project can follow them. Placeholders such as `<ha-host>`, `<ha-host-ip>`,
 `<doorbell-ip>`, `<unit-id>`, and `<did>` stand in for values specific to your
 own deployment.
@@ -25,9 +25,9 @@ own deployment.
 
 | Doc | What it covers |
 | --- | --- |
-| [ha-integration.md](ha-integration.md) | The `telus_smarthome` Home Assistant hub integration — entities, services, coordinators, and how it consumes the bridge. |
+| [ha-integration.md](ha-integration.md) | The `telus_smarthome` Home Assistant hub integration: entities, services, coordinators, and how it consumes the bridge. |
 | [camera-bridge.md](camera-bridge.md) | The standalone Docker service that pulls WebRTC video and republishes it as local RTSP. |
-| [control-api.md](control-api.md) | The bridge's loopback HTTP control server — state polling, snapshots, clips, talkdown, camera settings/diagnostics/siren/privacy, and the credential handoff. |
+| [control-api.md](control-api.md) | The bridge's loopback HTTP control server: state polling, snapshots, clips, talkdown, camera settings/diagnostics/siren/privacy, and the credential handoff. |
 
 ## Reference
 
@@ -35,9 +35,9 @@ own deployment.
 | --- | --- |
 | [alarm-com-api.md](alarm-com-api.md) | The Alarm.com backend API and the TELUS SSO login handshake (both reimplementations). |
 | [mobile-api-findings.md](mobile-api-findings.md) | Survey of mobile-app API actions this project does NOT use, and what each would enable. |
-| [web-portal-api-findings.md](web-portal-api-findings.md) | Survey of the web portal API surface (from a browser HAR) — camera settings including speaker volume, diagnostics, and other writes. |
+| [web-portal-api-findings.md](web-portal-api-findings.md) | Survey of the web portal API surface (from a browser HAR): camera settings including speaker volume, diagnostics, and other writes. |
 | [configuration.md](configuration.md) | Every configurable knob across the bridge and the integration, in one place. |
-| [backlog.md](backlog.md) | The enhancement backlog — every open, blocked, and settled improvement idea across the project, with stable `E<n>` IDs and the evidence behind each status. |
+| [backlog.md](backlog.md) | The enhancement backlog: every open, blocked, and settled improvement idea across the project, with stable `E<n>` IDs and the evidence behind each status. |
 
 ## Guides
 

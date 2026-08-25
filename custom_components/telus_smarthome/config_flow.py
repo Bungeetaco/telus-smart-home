@@ -69,7 +69,7 @@ LegacyArmingOptions = Literal["home", "away", "true", "false"]
 def _sync_write_fallback_and_read_secret(payload: dict) -> str | None:
     """Write the camera-bridge credential fallback file and read its control secret.
 
-    Runs in an executor thread (blocking file I/O) — never call directly from the
+    Runs in an executor thread (blocking file I/O); never call directly from the
     event loop. Best-effort: any failure here must not surface as a config flow error,
     since HA's own successful Alarm.com login is what determines reconfigure/reauth
     success, not whether the camera bridge is currently reachable.
@@ -333,7 +333,7 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
             if self._existing_entry.unique_id is not None:
                 self._abort_if_unique_id_mismatch()
 
-            LOGGER.debug("Existing entry found — updating in place (%s).", self._success_abort_reason)
+            LOGGER.debug("Existing entry found; updating in place (%s).", self._success_abort_reason)
 
             await self._async_sync_bridge_credentials()
             # The entry is served by a controller async_setup_entry creates for
@@ -393,7 +393,7 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
     async def _async_sync_bridge_credentials(self) -> None:
         """Push updated credentials to the camera bridge; write a fallback file either way.
 
-        Best-effort only — must never block or fail this config flow. HA's own
+        Best-effort only: must never block or fail this config flow. HA's own
         successful Alarm.com login is the sole determinant of reconfigure/reauth
         success, not whether the (separate, independently-deployed) camera bridge
         container happens to be reachable right now.

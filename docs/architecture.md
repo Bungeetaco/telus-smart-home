@@ -1,7 +1,7 @@
 # Architecture
 
-This project brings a TELUS Smart Home system — a white-labeled Alarm.com
-deployment — into Home Assistant. TELUS ships no official API, so both halves of
+This project brings a TELUS Smart Home system (a white-labeled Alarm.com
+deployment) into Home Assistant. TELUS ships no official API, so both halves of
 this project are built by reverse-engineering the browser and mobile-app traffic
 of a real account. This document is the map: it explains the two components, how
 they talk, the two distinct Alarm.com backends the project speaks to, and the
@@ -22,13 +22,13 @@ They are deliberately separate. The integration is a Home Assistant custom
 component (a fork of the community `alarmdotcom` integration built on
 `pyalarmdotcomajax`, with a TELUS SSO monkeypatch applied at import). The bridge
 is a from-scratch Python service in its own container that has **no shared code
-with the integration** — it reimplements the TELUS login independently. See
+with the integration**: it reimplements the TELUS login independently. See
 [integration.md](ha-integration.md) and [camera-bridge.md](camera-bridge.md) for
 each component's internals.
 
 ### Why two processes, not one
 
-Alarm.com's video platform has no RTSP or ONVIF interface — the only live-video
+Alarm.com's video platform has no RTSP or ONVIF interface: the only live-video
 path is a proprietary Janus Gateway / WebRTC signaling flow. Janus negotiates a
 wide ephemeral UDP port range for RTP that does not survive Docker's default
 bridge networking and NAT, so the bridge must run with `--network host`. Rather
@@ -45,12 +45,12 @@ requirement.
 A subtle but central fact: the project speaks to **two different Alarm.com
 backends**, because no single one exposes everything needed.
 
-### 1. The website AJAX / cookie API — state and video
+### 1. The website AJAX / cookie API: state and video
 
 The TELUS-branded website backend (`smarthome-security.telus.com`) is the
 primary backend. It is reached with a cookie-authenticated session established
 through TELUS's SSO/OAuth gateway (a PingFederate IdP) rather than Alarm.com's
-native login form — which is exactly why the stock `alarmdotcom` integration and
+native login form, which is exactly why the stock `alarmdotcom` integration and
 stock Alarm.com camera tooling do not work against a TELUS account. Once
 authenticated, the REST and push-websocket API are identical to Alarm.com's own;
 only the login handshake differs.
@@ -67,22 +67,22 @@ implementation of the SSO handoff:
   session.
 
 This backend serves **panel/lock/sensor state** (integration), the **live-video
-source descriptors** — Janus gateway URL, token, ICE servers — that the bridge
+source descriptors** (Janus gateway URL, token, ICE servers) that the bridge
 feeds into WebRTC (`bridge/telus_rest.py`), **snapshots**, and the **clip /
 event / activity / automation** data. Both SSO reimplementations were built from
 HAR captures; see [telus-auth.md](alarm-com-api.md).
 
-### 2. The legacy mobile "MWS" API — two-way audio, siren and privacy
+### 2. The legacy mobile "MWS" API: two-way audio, siren and privacy
 
 There is one thing the website backend does **not** unlock: upstream (talkdown)
 audio to a doorbell speaker. That capability is gated behind the **MWS (Mobile
-Web Service)** — the legacy XML servlet the native Alarm.com mobile app uses, at
+Web Service)**: the legacy XML servlet the native Alarm.com mobile app uses, at
 `mobile.alarm.com/MobileServlet/SubmitRequest.aspx`. Its `GetLiveVideoStream`
 action is the only call that returns the `<webrtc>` / `<srtp>` upstream-audio
 endpoints, and it requires an **MWS `SessionToken`**, which no website endpoint
 mints.
 
-The same session later turned out to be the only way to reach two more things —
+The same session later turned out to be the only way to reach two more things:
 the camera **siren** (`ManualSirenStart` / `ManualSirenStop`) and **privacy mode**
 (`SetCameraPrivacyModeState`), which have no website equivalent. Those actions are
 ordinary MWS form POSTs but answer **JSON** rather than XML, with the same
@@ -94,7 +94,7 @@ session (a `SeamlessLoginNew` form POST in steady state, or an
 `SSORedirectHandler.ashx?AppType=66` → `LoginAsLogin` bootstrap the first time),
 parses the returned XML for the `SessionToken`, then `bridge/mws_client.py`
 POSTs `GetLiveVideoStream` to resolve the talk endpoints. Apart from the siren
-and privacy commands above, everything else uses backend #1 — including all the
+and privacy commands above, everything else uses backend #1, including all the
 camera settings and diagnostics. It is reverse-engineered
 from the decompiled Android app and is documented in
 [talkdown.md](talkdown-fullduplex-protocol.md).
@@ -127,7 +127,7 @@ the box. The integration is a pure **client** of this API. Key endpoints:
 | `/control/cameras` | GET | Current camera list + RTSP publish URLs (polled) |
 | `/control/status` | GET | Per-camera session diagnostics |
 | `/control/cameras/{id}/snapshot` | GET | On-demand still (real round trip to TELUS) |
-| `/control/cameras/{id}/talk` | POST | Talkdown — fetch and play an audio URL |
+| `/control/cameras/{id}/talk` | POST | Talkdown: fetch and play an audio URL |
 | `/control/events` | GET | Recent camera clip events |
 | `/control/clip/{video_event_id}` | GET | Re-mint a fresh signed download URL for one clip |
 | `/control/history` | GET | System-wide activity feed |
@@ -142,7 +142,7 @@ request/response shapes.
 
 ### Shared directory (credential & secret handoff)
 
-The same host directory is bind-mounted into both containers — `/share/telus_cam_bridge`
+The same host directory is bind-mounted into both containers: `/share/telus_cam_bridge`
 in HA, `/shared` in the bridge (host path
 `/var/lib/homeassistant/share/telus_cam_bridge` by default). It carries the
 secrets and fallbacks the loopback API cannot bootstrap on its own:
@@ -159,7 +159,7 @@ The credential handoff is deliberately belt-and-suspenders: when TELUS
 credentials change via HA's reauth/reconfigure flow, the integration **always**
 writes `credentials.json` first, then makes a **best-effort, non-blocking** push
 to `/control/credentials`. The bridge applies a live push immediately, and
-independently adopts `credentials.json` at startup and re-checks it every 30s — so
+independently adopts `credentials.json` at startup and re-checks it every 30s, so
 a change reaches the bridge immediately, or within 30s, or at next start,
 whichever comes first, and HA's own credential update never blocks on the bridge
 being reachable. See [credential-sync.md](control-api.md).
@@ -185,13 +185,13 @@ reconnect. See [integration.md](ha-integration.md) and [latency.md](ha-integrati
 
 Alarm.com force-closes each video session at ~180s server-side, so the bridge
 proactively rotates every session at 165s and bridges the gap by holding the last
-frame — see [camera-bridge.md](camera-bridge.md).
+frame; see [camera-bridge.md](camera-bridge.md).
 
 ### Snapshots
 
 Integration calls `/control/cameras/{id}/snapshot`; the bridge does a real round
 trip to the website backend for a one-shot signed JPEG URL. For "who was at the
-door", clip thumbnails are usually preferred over live stills — see
+door", clip thumbnails are usually preferred over live stills; see
 [snapshots-and-clips.md](control-api.md).
 
 ### Events, clips, and activity
@@ -219,7 +219,7 @@ is the one area where the bridge is doing something other than moving video or
 audio: it is a settings client.
 
 `camera_settings.py`, `arming_devices.py` and `partitions.py` all speak the
-**website** API and all share one shape — a JSON:API read, a **flat** write, and
+**website** API and all share one shape: a JSON:API read, a **flat** write, and
 a whole-document read-modify-write, because a settings PUT replaces the entire
 object rather than patching it. Every field is paired with a capability flag that
 is checked before a control is offered or applied, and absence of a flag counts
@@ -233,7 +233,7 @@ panel), and selective sensor bypass.
 One thing crosses backends. The **chime-type option labels** come from the mobile
 API's `GetCurrentDoorbellSettings`, because the website publishes those options as
 bare integers and names them only in the portal's own JavaScript. That read is
-cached for an hour — the option list is a property of the hardware, not state.
+cached for an hour: the option list is a property of the hardware, not state.
 
 The two alarm-side capabilities are treated with more caution than the rest, and
 the docs say why in each place: an arming-device write decides whether a phone
@@ -282,11 +282,11 @@ graph TB
 
 ## Where to go next
 
-- [ha-integration.md](ha-integration.md) — the Home Assistant custom component
-- [camera-bridge.md](camera-bridge.md) — the standalone video/RTSP service
-- [alarm-com-api.md](alarm-com-api.md) — the website SSO handshake and backend API (both implementations)
-- [talkdown-fullduplex-protocol.md](talkdown-fullduplex-protocol.md) — the mobile MWS two-way-audio path
-- [control-api.md](control-api.md) — the loopback control HTTP endpoints and credential handoff
-- [configuration.md](configuration.md) — every configurable knob across both halves
-- [setup.md](setup.md) — host networking and installation
-- [troubleshooting.md](troubleshooting.md) — symptom → cause → fix across both components
+- [ha-integration.md](ha-integration.md): the Home Assistant custom component
+- [camera-bridge.md](camera-bridge.md): the standalone video/RTSP service
+- [alarm-com-api.md](alarm-com-api.md): the website SSO handshake and backend API (both implementations)
+- [talkdown-fullduplex-protocol.md](talkdown-fullduplex-protocol.md): the mobile MWS two-way-audio path
+- [control-api.md](control-api.md): the loopback control HTTP endpoints and credential handoff
+- [configuration.md](configuration.md): every configurable knob across both halves
+- [setup.md](setup.md): host networking and installation
+- [troubleshooting.md](troubleshooting.md): symptom → cause → fix across both components

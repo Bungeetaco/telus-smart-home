@@ -36,7 +36,7 @@ Relevant modules:
 
 ---
 
-## Part 1 — Website API
+## Part 1: Website API
 
 ### 1.1 SSO login flow
 
@@ -53,12 +53,12 @@ TELUS_CLIENT_ID     = <telus-client-id>
 TELUS_AUTH_PROVIDER = <telus-auth-provider-id>
 ```
 
-**Step 0 — clear cookies.** The gateway rejects a fresh login outright ("Logout or
+**Step 0: clear cookies.** The gateway rejects a fresh login outright ("Logout or
 clear cookies first") if stale cookies from a prior login are still present, so the
 client wipes its cookie jar before *every* login attempt, not just the first. The
 aiohttp session must be dedicated to this integration for that to be safe.
 
-**Step 1 — submit credentials** (XHR/fetch shape, JSON body):
+**Step 1: submit credentials** (XHR/fetch shape, JSON body):
 
 ```
 POST {AUTH_GATEWAY}/v1/flows/smarthome_login_v1
@@ -68,9 +68,9 @@ Origin: https://www.telus.com
 ```
 
 Expect `200`. A `4xx` other than `429` means bad credentials. A `429` or `5xx` is
-**transient**, not a credentials failure (see [rate limiting](#15-rate-limiting-cloudflare-429)).
+**transient**, not a credentials failure (see [rate limiting](#16-rate-limiting-cloudflare-429)).
 
-**Step 2 — complete the login flow** (issues the gateway session):
+**Step 2: complete the login flow** (issues the gateway session):
 
 ```
 POST {AUTH_GATEWAY}/v1/flows/login?acr=ci-loa2-smarthome
@@ -81,7 +81,7 @@ Content-Type: application/json
 The empty JSON body is required. A truly bodiless POST (no `Content-Type` at all)
 gets a `415` from the gateway. Expect `200`.
 
-**Step 3 — OAuth2 authorization code grant**, following the full redirect chain:
+**Step 3: OAuth2 authorization code grant**, following the full redirect chain:
 
 ```
 GET {AUTH_GATEWAY}/as/authorization.oauth2
@@ -101,7 +101,7 @@ Follow redirects. The chain is `auth-gateway` → `TokenSso.ashx` →
 `DetermineLandingPage.aspx`; `TokenSso.ashx` is what actually sets the dealer-portal
 session cookie on `smarthome-security.telus.com`. **Success predicate:** the final
 URL contains `DetermineLandingPage` *or* `web/system`. Landing anywhere else means
-the SSO handoff failed — most likely an MFA/OTP challenge, which this flow does not
+the SSO handoff failed, most likely an MFA/OTP challenge, which this flow does not
 handle (none was observed in the captured login; a `2FA` gate at the TELUS gateway
 would break here).
 
@@ -114,10 +114,10 @@ XHR `Accept: */*`; step 3 uses a navigation `Accept: text/html…`.
 After login the session is cookie-based. Two things are extracted for subsequent
 API calls:
 
-- **`ajaxrequestuniquekey` header** — the value of the `afg` anti-forgery cookie set
+- **`ajaxrequestuniquekey` header**: the value of the `afg` anti-forgery cookie set
   during the SSO handoff. Every authenticated `web/api/*` call must echo it as this
   header. (It may be absent for some vendors; treat as best-effort.)
-- **`Context-Id` header** — identifies which Alarm.com *system* (site) to operate
+- **`Context-Id` header**: identifies which Alarm.com *system* (site) to operate
   against. It is **not** the account or user id; it is the `id` of whichever system
   has `isSelected: true` in the available-systems list. A real browser sends it on
   every `web/api/video/*` call, and also on automation-rule and video-event calls.
@@ -171,14 +171,14 @@ All paths are relative to `TELUS_BASE` and use the header set from §1.2.
 | `web/api/video/snapshots/{camera_id}` | GET | one-shot signed JPEG still URL (see below) |
 | `web/api/video/videoEvents` | GET | saved camera clips; `?page&pageSize&search&startTime&endTime`, or `?ids[]=A&ids[]=B` to batch by id |
 | `web/api/activity/historyEvents?includeCommands=false&numberOfEvents=N` | GET | system-wide activity feed (arm/disarm, locks, doorbell presses, camera triggers) |
-| `web/api/automation/rules/rules?filter[deviceType]=15` | GET | video automation rules; **the filter is mandatory** — omitting it returns `423`, not an unfiltered list |
+| `web/api/automation/rules/rules?filter[deviceType]=15` | GET | video automation rules; **the filter is mandatory**: omitting it returns `423`, not an unfiltered list |
 | `web/api/automation/rules/rules/{id}/pauseRule` | POST | pause a rule; **empty body** (rule identified by the URL) |
 | `web/api/automation/rules/rules/{id}/resumeRule` | POST | resume a rule; empty body |
 
 Signed-URL behaviour worth knowing:
 
 - **Snapshot / clip URLs point at a separate relay host** (not the dealer portal) and
-  need no auth of their own — a bare GET with no headers succeeds. They are
+  need no auth of their own: a bare GET with no headers succeeds. They are
   **short-lived** (minutes) and effectively single-use. Fetch promptly; never cache.
 - `historyEvents` entries never carry thumbnail/download URLs themselves
   (`thumbnailUrl` is always null there). To attach clip media to an activity entry,
@@ -197,19 +197,19 @@ The full attribute set, observed live on both of this account's cameras:
 `spsAndPpsRequired`, `urlEncoded`, `visualVerificationRecord`. The four the
 bridge parses:
 
-- `proxyUrl` — the RTP relay URI the Janus mountpoint pulls from.
-- `janusGatewayUrl` — the Janus WebSocket gateway to connect to.
-- `janusToken` — bearer token attached to every Janus message.
-- `iceServers` — a **JSON string** (parse it) of STUN/TURN servers.
+- `proxyUrl`: the RTP relay URI the Janus mountpoint pulls from.
+- `janusGatewayUrl`: the Janus WebSocket gateway to connect to.
+- `janusToken`: bearer token attached to every Janus message.
+- `iceServers`: a **JSON string** (parse it) of STUN/TURN servers.
 
 **There is no `supportsAudio` and no `audioUpStreamUrl` attribute in this
-response at all** — neither key is present for either camera. Any reasoning
+response at all**: neither key is present for either camera. Any reasoning
 that treats a `supportsAudio=false` here as evidence about audio is reasoning
 about a field this endpoint does not return. Upstream (talk) audio comes from
 the mobile MWS API instead (Part 2).
 
 What this path yields is a matter of what the *client* asks for. The mountpoint
-the bridge creates requests video only, so the offer comes back video only —
+the bridge creates requests video only, so the offer comes back video only,
 but when the create body also asks for audio, the gateway offers
 `audio(port=9,opus)` alongside the video for **both** cameras. Downstream audio
 therefore exists on this path; see the enhancement backlog (E53) for the
@@ -236,13 +236,13 @@ The Alarm.com library maintains a real-time push websocket for device-state upda
 Two lifecycle facts a reimplementer must plan around:
 
 - **The server drops the socket roughly every 6 minutes**, on every connection,
-  regardless of keepalive pings — it is a token-lifetime cutoff, not an idle
+  regardless of keepalive pings: it is a token-lifetime cutoff, not an idle
   timeout. Keep a short reconnect timeout (≈30 s) and treat the websocket as
   best-effort: back it with a REST poll (≈300 s) so state still converges when the
   socket is down. Polling much faster than that risks Alarm.com rate-limiting.
 - **A malformed/unknown-device push can kill the whole connection.** In the upstream
   library, an unrecognised device raised an unhandled error inside the read loop that
-  propagated out and dropped the socket — so any event from a device not in the
+  propagated out and dropped the socket, so any event from a device not in the
   library's registry (e.g. a bridge-served camera) silently took down *all* real-time
   updates until the next poll. A robust client swallows per-message parse errors
   rather than letting one bad frame end the loop.
@@ -253,12 +253,12 @@ that to tell them apart in logs.
 
 ### 1.6 Rate limiting (Cloudflare 429)
 
-Every `auth-gateway.telus.com` request — and, in Part 2, every `mobile.alarm.com`
-request — sits behind the same Cloudflare edge. Under load it returns **HTTP 429 with
+Every `auth-gateway.telus.com` request (and, in Part 2, every `mobile.alarm.com`
+request) sits behind the same Cloudflare edge. Under load it returns **HTTP 429 with
 Cloudflare error 1015** ("Access denied … used Cloudflare to restrict access"). This
 is the **edge** rate limiter, *not* an Alarm.com application-level account lockout.
 
-Discipline that matters (learned the hard way — a fixed short retry schedule turned
+Discipline that matters (learned the hard way: a fixed short retry schedule turned
 one bad night into a multi-hour outage):
 
 - **Honor `Retry-After` exactly.** The 429 response carries its own `Retry-After`
@@ -269,7 +269,7 @@ one bad night into a multi-hour outage):
   can't interleave and mix two attempts' cookies.
 - **De-duplicate the burst.** On a session expiry, every in-flight request 401s at
   roughly the same instant and each one queues to re-login. Because each login clears
-  the whole cookie jar, they invalidate one another — a self-sustaining stampede
+  the whole cookie jar, they invalidate one another: a self-sustaining stampede
   against the Cloudflare-fronted gateway. Collapse the burst by capturing a
   monotonically-increasing "login generation" counter *before* taking the lock and
   re-checking it *after*: if it moved, another caller already refreshed the session,
@@ -282,7 +282,7 @@ one bad night into a multi-hour outage):
 
 ---
 
-## Part 2 — Legacy mobile "MWS" XML API
+## Part 2: Legacy mobile "MWS" XML API
 
 The Mobile Web Service (MWS) is the legacy backend the native Alarm.com app uses. It
 lives at `https://mobile.alarm.com/MobileServlet/SubmitRequest.aspx`, speaks
@@ -302,7 +302,7 @@ mobile SSO servlet against the same PingFederate IdP session the website already
 holds, catches a "login-as" token off the redirect, and exchanges it. Two paths
 mirror the app (`mobile_auth.py`):
 
-**Path A — first-time bootstrap (SSO → LoginAsLogin).** Used when no rolling token is
+**Path A: first-time bootstrap (SSO → LoginAsLogin).** Used when no rolling token is
 held, or when the rolling token is rejected. It hits the Cloudflare edge, so it gets
 the same care as the website login (single-flight, honor `Retry-After`).
 
@@ -311,7 +311,7 @@ the same care as the website login (single-flight, honor `Retry-After`).
    device has an empty 2faId).
 2. `GET https://mobile.alarm.com/MobileServlet/SSO/SSORedirectHandler.ashx?AppType=66`
    with the website SSO cookie jar. Follow the redirect chain **by hand** with
-   redirects disabled — it terminates in a custom-scheme hop
+   redirects disabled; it terminates in a custom-scheme hop
    (`alarmtelus://loginaslogin?…`) that an HTTP client cannot auto-follow. Scan every
    hop's **query *and* fragment** for the login-as token. The chain observed:
    `SSORedirectHandler → auth-gateway.telus.com OAuth code → TokenSso.ashx →
@@ -333,9 +333,9 @@ the same care as the website login (single-flight, honor `Retry-After`).
    Response root element `<lalr …/>` (attributes, see §2.4). Absorb `st`
    (SessionToken), `slt` (rolling SeamlessLoginToken), `dcid` (CustomerId).
 
-**Path B — silent re-login (SeamlessLoginNew).** The steady-state / restart path.
+**Path B: silent re-login (SeamlessLoginNew).** The steady-state / restart path.
 Once you hold a rolling `slt`, a single form POST re-mints the SessionToken with **no
-SSO / Cloudflare hop** — this is the rate-limit-safe path, preferred whenever an
+SSO / Cloudflare hop**: this is the rate-limit-safe path, preferred whenever an
 `slt` is held:
 
 ```
@@ -347,7 +347,7 @@ Action=SeamlessLoginNew&SeamlessLoginToken=<slt>
 Response root `<slnr …/>`. On a genuine rejection (not a 429) fall back to Path A.
 
 State to persist across restarts: the stable **device uid** and the rolling **`slt`**
-(atomic write, fail-open). Do **not** persist the SessionToken — it is short-lived
+(atomic write, fail-open). Do **not** persist the SessionToken: it is short-lived
 and always re-minted in memory. A failed mint (as opposed to a 429) should start a
 cool-down (≈5 min) so a caller that re-triggers on every event can't re-walk the SSO
 bootstrap against the edge; a 429 is not converted into that cool-down, since it
@@ -362,14 +362,14 @@ carries its own `Retry-After`.
   element**, not child text nodes. Each action has its own root tag (`<lalr>`,
   `<slnr>`, `<lvsr>`, `<gdclr>`, `<sfdr>`, `<elsr>`, …). Parse namespace-tolerantly
   (match on the local, namespace-stripped tag name) and read scalars from
-  `element.attrib`. Use a hardened XML parser (e.g. `defusedxml`) — the body is
+  `element.attrib`. Use a hardened XML parser (e.g. `defusedxml`); the body is
   attacker-reachable.
 
 ### 2.3 The device/token envelope (BaseTokenRequest)
 
 Every authenticated MWS action ("BaseTokenRequest") carries the same device-identity
 envelope the app attaches to all token requests. Sending only
-`Action`/`SessionToken`/`DeviceId` makes server rejection likely — `CustomerId`
+`Action`/`SessionToken`/`DeviceId` makes server rejection likely; `CustomerId`
 (scoping) and the app-integrity constant were the missing pieces. The canonical set:
 
 | Field | Value / meaning |
@@ -381,14 +381,14 @@ envelope the app attaches to all token requests. Sending only
 | `MobileDeviceType` | `2` (Android phone; `7` = Fire TV) |
 | `ApplicationBuildNumber` / `BuildString` | app build / version (e.g. `2260` / `5.10.7`) |
 | `Culture` | e.g. `en-US` |
-| `Haiku` | static app-integrity secret baked into the app build — treat as a secret constant (`<app-haiku>`); gates the endpoints, and must never be logged |
+| `Haiku` | static app-integrity secret baked into the app build: treat as a secret constant (`<app-haiku>`); gates the endpoints, and must never be logged |
 | `TwoFactorId` | `<device-uid>:<2faId>` (fresh device: `<device-uid>:`) |
 | `CustomerId` | `dcid` from the login response; sent on scoped actions |
 | `SeamlessLoginToken` | the rolling `slt`, when held |
 | `SessionToken` | the minted token, on every action after login |
 
 Never log `SessionToken`, `SeamlessLoginToken`, `LoginAsLoginToken`, `Haiku`, or
-`TwoFactorId` — redact them out of any form dump.
+`TwoFactorId`: redact them out of any form dump.
 
 ### 2.4 Quirks that cost debugging time
 
@@ -410,7 +410,7 @@ was a real debugging session.
 
    | value | meaning | action |
    |---|---|---|
-   | `0` | success — stream/data present | proceed |
+   | `0` | success, stream/data present | proceed |
    | `1` | session token invalid/expired | re-auth |
    | `2` | account lacks the entitlement | do **not** retry |
    | `3` | transient server error | back off and retry |
@@ -423,7 +423,7 @@ was a real debugging session.
    as diagnostics only. One hard-fail still applies: an `asu` (AccountSetupUrl)
    attribute means the account isn't provisioned for mobile.
 
-5. **Cloudflare 429 + `Retry-After` discipline** — identical to §1.6, and *sharper*
+5. **Cloudflare 429 + `Retry-After` discipline**: identical to §1.6, and *sharper*
    here because the bootstrap path walks up to ~10 GETs plus a POST against the same
    edge. Single-flight the mint, dedup the burst via a login-generation counter, and
    honor the server's `Retry-After` rather than any fixed schedule. Distinguish a
@@ -447,7 +447,7 @@ Action=GetLiveVideoStream&SessionToken=<tok>&DeviceId=<numeric>&ForDevice=0
 - `DeviceId` is the **numeric part before the first `-`** of the website
   `globalDeviceId` (`<unit-id>-<device-id>` → send `<unit-id>`).
 - `ForDevice` is the `LiveVideoDeviceEnum` value (`0` = doorbell).
-- Opens a real stream server-side — never call casually against a live account.
+- Opens a real stream server-side; never call casually against a live account.
 
 Response `<lvsr ts=… Resolution=… StreamId=…>` → `<vsel>` list of `<vsei st=…>`
 entries; each entry can carry a `<webrtc>`, `<srtp>`, and/or `<rtsp>` child:
@@ -456,15 +456,15 @@ entries; each entry can carry a `<webrtc>`, `<srtp>`, and/or `<rtsp>` child:
 |---|---|---|
 | `<webrtc>` | `SignalingServerUrl`, `SignalingServerToken`, `CameraAuthToken`, `HalfDuplexReenableAudioDelayInMs`, `MaxLoadTimeSeconds` | yes (custom text-WS signaling) |
 | `<srtp>` | audio side `aip`/`ap`/`ack`(base64 key)/`acc`/`aca`/`ac`/`oassrc` (app→camera SSRC), video side `vip`/`vp`/`vck`/…, `sdp`; crypto suite fixed at `AES_CM_128_HMAC_SHA1_80` | yes (SRTP upstream) |
-| `<rtsp>` | `rtspurl`, `csda` (downstream/listen audio flag), `bfmrs` | no — video (+ listen) only |
+| `<rtsp>` | `rtspurl`, `csda` (downstream/listen audio flag), `bfmrs` | no: video (+ listen) only |
 
 `st` on each `<vsei>` is the `StreamProtocolEnum` ordinal
 (`0`=rtsp, `1`=srtp, `3`=webrtc, `4`=mjpeg, `5`=oesp, `6`=rtsps). SRTP crypto keys
-(`ack`/`vck`) are base64 of the concatenated AES_CM_128 key+salt bytes — decode before
+(`ack`/`vck`) are base64 of the concatenated AES_CM_128 key+salt bytes; decode before
 use.
 
 > Device-specific caveat: the doorbell in this deployment (an ADC-VDB750, older
-> firmware) returns **only an `<rtsp>` endpoint** — no `<webrtc>`, no `<srtp>` — so its
+> firmware) returns **only an `<rtsp>` endpoint** (no `<webrtc>`, no `<srtp>`) so its
 > talkdown is *not* on this response at all (see §2.6). The webrtc/srtp fields above
 > are still the right target for newer Alarm.com cameras.
 
@@ -476,7 +476,7 @@ Action=GetDoorbellCameraList&SessionToken=<tok>&MaxHeight=1440&MaxWidth=1440
 ```
 
 Response `<gdclr ts=…>` → `<dcl>` → one `<cli>` per doorbell. The `<cli>` element is
-the payload for full-duplex talkdown — it carries, **per session**, everything needed
+the payload for full-duplex talkdown: it carries, **per session**, everything needed
 in one call:
 
 | attribute | meaning |
@@ -491,9 +491,9 @@ in one call:
 | `sid` / `cstet` | session id / session expiry |
 
 The port embedded in these URLs and the password `p` are **ephemeral /
-per-session** — never persist them; a fetched result may be reused only
+per-session**: never persist them; a fetched result may be reused only
 briefly (this project uses a 60 s in-memory TTL, `TALK_DOORBELL_CACHE_TTL_S`,
-with renegotiation as the self-correction on a stale hit — backlog E16).
+with renegotiation as the self-correction on a stale hit; backlog E16).
 Blank attributes normalise to none.
 
 #### `StartFullDuplex` / `EndLiveStream` / `EndFullDuplex`
@@ -513,13 +513,13 @@ tolerate a non-ok result. `StartFullDuplex` opens a real session server-side.
 ### 2.6 Talkdown transport (device-specific)
 
 For the older RTSP-only doorbell, the actual **upstream audio path is not carried in
-the MWS XML** at all — it is a chunked HTTP PUT directly to the doorbell:
+the MWS XML** at all: it is a chunked HTTP PUT directly to the doorbell:
 
 1. Mint a `SessionToken` (§2.1).
 2. `GetDoorbellCameraList` → read the `<cli>` PUT URL and Digest credentials.
 3. `StartFullDuplex&DeviceId=<did>` → `<sfdr ts=0 s=true>`.
 4. **Chunked HTTP PUT** to the chosen `PutAudioStream` URL (`duae`/`luae` on-LAN,
-   `puae`/`uae` off-LAN — the cloud/relay variant adds a `camera_id` routing token to
+   `puae`/`uae` off-LAN; the cloud/relay variant adds a `camera_id` routing token to
    the query). One small chunk per request on a keep-alive connection:
    - `Authorization: Digest username="vieweruser", realm="Alarm.com", algorithm=MD5,
      qop=auth`, per-request incrementing `nc`, password = the per-session `p`. The
@@ -528,7 +528,7 @@ the MWS XML** at all — it is a chunked HTTP PUT directly to the doorbell:
      are multiples of 80 bytes (10 ms). The bridge sends 40 ms (320 B) chunks;
      the app's exact observed chunk size is not reliably recorded. The doorbell
      serves HTTPS with a self-signed cert, so CA verification cannot apply;
-     this project pins the device certificate's SHA-256 instead — see backlog
+     this project pins the device certificate's SHA-256 instead; see backlog
      E12.
 5. `EndLiveStream` (and/or `EndFullDuplex`) to tear down.
 

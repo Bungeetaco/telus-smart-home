@@ -39,7 +39,7 @@
             "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
             "unknown": "[%key:common::config_flow::error::unknown%]",
             "invalid_otp": "كلمة المرور لمرة واحدة غير صالحة.",
-            "telus_sso_error": "أعادت عملية تسجيل الدخول الموحد الخاصة بـ TELUS استجابة غير متوقعة. يعني هذا عادةً أن TELUS قامت بتغيير شيء ما من جهة الخادم — وليس كلمة مرور خاطئة."
+            "telus_sso_error": "أعادت عملية تسجيل الدخول الموحد الخاصة بـ TELUS استجابة غير متوقعة. يعني هذا عادةً أن TELUS قامت بتغيير شيء ما من جهة الخادم، وليس كلمة مرور خاطئة."
         },
         "abort": {
             "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",

@@ -2,8 +2,8 @@
 
 A HAR capture of a full browsing session in the alarm.com web portal, inventoried
 the same way as [mobile-api-findings.md](mobile-api-findings.md). This is the
-**website API** — the one the integration already authenticates to via
-`pyalarmdotcomajax` (cookie session + `ajaxrequestuniquekey` header) — so
+**website API**, the one the integration already authenticates to via
+`pyalarmdotcomajax` (cookie session + `ajaxrequestuniquekey` header), so
 everything here is reachable with the session the integration already holds.
 
 ~180 distinct endpoints were observed. Most are read-only page data; the
@@ -11,8 +11,8 @@ interesting part is the **write surface**, which is large and was, when this
 survey was written, entirely unused by this project.
 
 **Status legend.** Entries marked **[implemented]** are now spoken by
-`camera-bridge/bridge/camera_settings.py` and exposed on the bridge's control API
-— see [control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)
+`camera-bridge/bridge/camera_settings.py` and exposed on the bridge's control API;
+see [control-api.md](control-api.md#camera-settings-diagnostics-siren-and-privacy)
 for the routes and [ha-integration.md](ha-integration.md#camera-settings-siren-and-diagnostics-entities)
 for the entities. Everything else here is still unused and still a survey finding.
 
@@ -26,42 +26,42 @@ for the entities. Everything else here is still unused and still a survey findin
 | `callVolumeFeatureSupport` | `2` = supported on this device |
 | `callVolumeValue` / `callVolumeMin` / `callVolumeMax` | **talk/call volume, range 0–10** |
 | `areMicrophoneAndSpeakerOn` | mic + speaker master toggle |
-| `isHalfDuplexAudio` | `false` here — confirms full duplex |
+| `isHalfDuplexAudio` | `false` here: confirms full duplex |
 | `canToggleAudioRecording` / `isAudioRecordingOn` | audio recording toggle |
 | `isNoiseFilteringOn`, `microphoneGain*` | present but `FeatureSupport: 0` on this device |
 
 This is the volume the talkdown audio plays at, and it is now settable through
 the bridge (`POST /control/cameras/{id}/settings/volume`, surfaced in Home
 Assistant as a speaker-volume number entity). It **contradicts the mobile API**,
-whose `<cli>` `<duav>` element reports `SupportsVolumeAdjustment="false"` — the
+whose `<cli>` `<duav>` element reports `SupportsVolumeAdjustment="false"`; the
 website exposes it as supported with a 0–10 range, and a live session was observed
 sweeping it. When the two APIs disagree, prefer the one that demonstrably works.
 
 The same call carries a `chimeToneSetting` object: `isIndoorChimeOn`,
 `selectedChimeType` (+`chimeTypeOptions`), `isOutdoorToneOn`, and
-`outdoorToneVolumeValue` with range 0–3 — i.e. the doorbell's own chime is
+`outdoorToneVolumeValue` with range 0–3, i.e. the doorbell's own chime is
 configurable too. **[implemented]** for `isIndoorChimeOn` / `isOutdoorToneOn` /
-`outdoorToneVolumeValue` via `POST …/settings/chime` — and `selectedChimeType`
+`outdoorToneVolumeValue` via `POST …/settings/chime`, and `selectedChimeType`
 too, settable as `chime_type` on the same route (validated against the
 device's offered options), with the option labels merged from the mobile API
-and an HA select entity — see backlog E27.
+and an HA select entity; see backlog E27.
 
 ## Other camera settings, all writable
 
 | Endpoint | Controls | Status |
 | --- | --- | --- |
-| `PUT /web/api/video/settings/imageSettings/{id}` | brightness, contrast, saturation, sharpness (each with min/max), HDR, image flip, max exposure, and a nested `infraredSetting` (IR LEDs, IR sensitivity, night vision) | **implemented** — `POST …/settings/image`; `max_exposure` is routed too but unsupported on both reference cameras (`canSetMaxExposure` false), so it is unexercised against hardware (E30). The image scalars have no HA entity |
-| `PUT /web/api/video/settings/videoConfigs/{id}` | clip resolution (`480x480` / `960x960` / `1440x1440`), clip quality, alarm-clip duration, camera-triggered clip duration, pre-trigger recording, keep-clips-for-days — all of them in the **`savedVideoSetting`** relationship, not in the document's own attributes (see the wire-shape section) | **implemented** — `POST …/settings/video`; `camera_triggered_clip_duration` is routed too but refused by the support gate on the reference cameras (E30). The same endpoint also backs the **live video resolution** control (`live_resolution`), which has an HA select entity (E34); the clip scalars have no HA entity |
-| `PUT /web/api/video/settings/generalSettings/{id}` | **the status LED** (`ledLightSetting`: `canTurnOnOffLedLight`, `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`, `ledBrightness`, `ledLightColor`), the doorbell's TELUS-side notification toggles (`doorbellNotificationSetting`), and solar-panel status. "General camera settings" undersold this one badly — see the note below | **implemented** — `POST …/settings/led` and `POST …/settings/notifications`, both with HA switches. `notificationFormat` is settable (`format` on `POST …/settings/notifications`, limited to the Text Only / Attach a Thumbnail values — E40) with an HA select; solar-panel status is read-only, surfaced as an enum sensor where supported (E39) |
+| `PUT /web/api/video/settings/imageSettings/{id}` | brightness, contrast, saturation, sharpness (each with min/max), HDR, image flip, max exposure, and a nested `infraredSetting` (IR LEDs, IR sensitivity, night vision) | **implemented**: `POST …/settings/image`; `max_exposure` is routed too but unsupported on both reference cameras (`canSetMaxExposure` false), so it is unexercised against hardware (E30). The image scalars have no HA entity |
+| `PUT /web/api/video/settings/videoConfigs/{id}` | clip resolution (`480x480` / `960x960` / `1440x1440`), clip quality, alarm-clip duration, camera-triggered clip duration, pre-trigger recording, keep-clips-for-days, all of them in the **`savedVideoSetting`** relationship, not in the document's own attributes (see the wire-shape section) | **implemented**: `POST …/settings/video`; `camera_triggered_clip_duration` is routed too but refused by the support gate on the reference cameras (E30). The same endpoint also backs the **live video resolution** control (`live_resolution`), which has an HA select entity (E34); the clip scalars have no HA entity |
+| `PUT /web/api/video/settings/generalSettings/{id}` | **the status LED** (`ledLightSetting`: `canTurnOnOffLedLight`, `canChangeLedBrightness`, `canChangeLedColor`, `isLedLightEnabled`, `ledBrightness`, `ledLightColor`), the doorbell's TELUS-side notification toggles (`doorbellNotificationSetting`), and solar-panel status. "General camera settings" undersold this one badly; see the note below | **implemented**: `POST …/settings/led` and `POST …/settings/notifications`, both with HA switches. `notificationFormat` is settable (`format` on `POST …/settings/notifications`, limited to the Text Only / Attach a Thumbnail values; E40) with an HA select; solar-panel status is read-only, surfaced as an enum sensor where supported (E39) |
 | `PUT /web/api/video/devices/cameras/{id}` | camera device properties | unused |
 
-> **`generalSettings` carries more than its name suggests** — the status LED, the
+> **`generalSettings` carries more than its name suggests**: the status LED, the
 > doorbell's TELUS-side notification toggles and the solar-panel status all live
 > there. A vague row in an endpoint inventory is an unread endpoint, not an empty
 > one; open it before concluding a capability is missing.
 
 Each `*FeatureSupport` field is an enum where `0` means unsupported and `2` means
-supported/editable — check it before offering a control, because the same payload
+supported/editable: check it before offering a control, because the same payload
 shape is returned for devices that cannot do the thing. `camera_settings.py`
 resolves these into plain `supports_*` booleans on every read and refuses an
 unsupported write with a `422`, rather than sending a `PUT` the device will
@@ -71,9 +71,9 @@ ignore.
 
 | Endpoint | Returns | Status |
 | --- | --- | --- |
-| `GET /web/api/video/signalStrengthInfos/{id}` | `normalizedSignalStrength` (a **0–100 score, not dBm**), a coarse `signalStrengthEnum`, plus `isConnected`, SSID, encryption type, connection type and frequency band | **implemented** — `GET …/diagnostics` |
-| `GET /web/api/video/batteryStatusInfos/{id}` | `batteryLevel` — but it is present and `0` on mains-powered cameras, so gate on `shouldDisplayBatteryLevel` or an entity built from it sits at a permanent 0% | **implemented** — `GET …/diagnostics` |
-| `GET /web/api/video/settings/deviceStatusInfos/{id}` | device status | **implemented** — `GET …/diagnostics` |
+| `GET /web/api/video/signalStrengthInfos/{id}` | `normalizedSignalStrength` (a **0–100 score, not dBm**), a coarse `signalStrengthEnum`, plus `isConnected`, SSID, encryption type, connection type and frequency band | **implemented**: `GET …/diagnostics` |
+| `GET /web/api/video/batteryStatusInfos/{id}` | `batteryLevel`, but it is present and `0` on mains-powered cameras, so gate on `shouldDisplayBatteryLevel` or an entity built from it sits at a permanent 0% | **implemented**: `GET …/diagnostics` |
+| `GET /web/api/video/settings/deviceStatusInfos/{id}` | device status | **implemented**: `GET …/diagnostics` |
 | `POST /web/WebServices/Video/DeviceCommands.asmx/GetVideoDeviceNetworkInfo` | camera network details | unused |
 | `POST …/DeviceCommands.asmx/GetExternalIpAddress`, `TestRemoteAccess`, `IsSecondRouterPresent` | connectivity diagnostics | unused |
 
@@ -81,7 +81,7 @@ ignore.
 plus the SSID, connection type and frequency band again.
 
 **`signalStrengthInfos` is not a cached read.** Measured live on one account, it
-answers in 1.6s on a doorbell but **25s** on an indoor camera — latency that
+answers in 1.6s on a doorbell but **25s** on an indoor camera, latency that
 suggests alarm.com queries the camera itself for the figure (inferred from the
 timing, not confirmed anywhere). Budget for tens of seconds when calling it: the
 bridge gives each of its three diagnostics reads a 35s per-request ceiling
@@ -105,8 +105,8 @@ ASP.NET web-service style, not JSON:API.
 
 | Endpoint | What it does |
 | --- | --- |
-| `POST /web/api/devices/partitions/{id}/bypassSensors` | **Selective** sensor bypass — a standalone partition action, NOT an arm-time option: the body carries `bypass` and `unbypass` as pipe-separated device-id strings, applied immediately. Gated by the partition's own `canBypassSensorWhenArmed` / `hasPermissionToChangeState`. **Implemented** as the manual `telus_smarthome.bypass_sensors` service; the integration's existing `CONF_FORCE_BYPASS` arm flag is a different mechanism and is untouched |
-| `PUT /web/api/devices/bluetoothArmingDevices/{id}` | Bluetooth arming device config (the phone-proximity auto-disarm path) — **genuinely unimplemented, see below** |
+| `POST /web/api/devices/partitions/{id}/bypassSensors` | **Selective** sensor bypass: a standalone partition action, NOT an arm-time option: the body carries `bypass` and `unbypass` as pipe-separated device-id strings, applied immediately. Gated by the partition's own `canBypassSensorWhenArmed` / `hasPermissionToChangeState`. **Implemented** as the manual `telus_smarthome.bypass_sensors` service; the integration's existing `CONF_FORCE_BYPASS` arm flag is a different mechanism and is untouched |
+| `PUT /web/api/devices/bluetoothArmingDevices/{id}` | Bluetooth arming device config (the phone-proximity auto-disarm path): **genuinely unimplemented, see below** |
 | `POST /web/api/systems/systems/{id}/connectPanelToWifi`, `GET /web/api/settings/panelWifi/wifiSettings/{id}`, `…/wifiNetworks` | panel Wi-Fi |
 | `POST …/DeviceCommands.asmx/SetStaticNetworkConfig`, `SetToFindIpAddressAutomatically` | camera IP configuration |
 | `DELETE /web/api/devices/mobileDevices/{id}` | de-register a mobile device |
@@ -157,7 +157,7 @@ so only a test catches it.
 
 1. **The read is JSON:API, the write is flat.** A `GET` returns
    `{"data": {"id", "type", "attributes", "relationships"}, "included": [...]}`.
-   The `PUT` body is a **single flat object** — *not* wrapped in `data`, and not
+   The `PUT` body is a **single flat object**: *not* wrapped in `data`, and not
    the `attributes` sub-object on its own.
 
 2. **The settings are in `included`, not in `data.attributes`.** This is the
@@ -170,7 +170,7 @@ so only a test catches it.
    To build the write body: take `data.attributes` plus `id`/`type`, then inline
    each relationship under its **relationship name** (not its type), carrying its
    own `id`/`type`. A relationship whose resource is absent from `included`
-   becomes an `{"id", "type"}` stub — which is what the browser sends for one it
+   becomes an `{"id", "type"}` stub, which is what the browser sends for one it
    did not load. Dropping it instead would delete that relationship, because the
    `PUT` replaces the whole document.
 
@@ -178,7 +178,7 @@ so only a test catches it.
    `video/settings/audio-setting`; the browser sends back
    `video/settings/audio-settings`. Consistently, for the document and every
    inlined relationship (an Ember Data convention showing through). Whether the
-   server validates it is untested — send what a working client sends.
+   server validates it is untested: send what a working client sends.
 
 4. **A settings `PUT` replaces the whole object**, never a patch: read, change
    one field, send it all back. A partial body risks resetting fields on a
@@ -190,12 +190,12 @@ Which one applies is decided by the key's **name**, not its value:
 
 | Spelling | Rule | Examples |
 | --- | --- | --- |
-| `<name>FeatureSupport` | an **enum** — only `2` means editable | `callVolumeFeatureSupport`, `clipResolutionFeatureSupport` |
+| `<name>FeatureSupport` | an **enum**: only `2` means editable | `callVolumeFeatureSupport`, `clipResolutionFeatureSupport` |
 | anything else | a plain truthy flag | `canSetBrightness`, `canFlipImage`, `canControlInfraredLeds`, `isKeepClipsForFeatureSupported` |
 
 `0` in the enum form means "has the field, cannot set it", and `1` is *not*
 supported however truthy it looks. In the flag form the value is not always a
-bool — `canSetHdr` arrives as the integer `1`. **An absent flag means
+bool: `canSetHdr` arrives as the integer `1`. **An absent flag means
 unsupported**: a device that cannot do a thing returns the same payload shape as
 one that can, so absence must fail closed.
 
@@ -204,10 +204,10 @@ one that can, so absence must fail closed.
 Bounds also use two spellings: **suffix** on the audio/video objects
 (`callVolumeMin`/`callVolumeMax`) and **prefix** on the image object
 (`minBrightness`/`maxBrightness`). An absent bound must be treated as *unknown*,
-never as `0` — reading it as 0 would reject every negative brightness on a camera
+never as `0`: reading it as 0 would reject every negative brightness on a camera
 whose real range is `-5..5`.
 
-Option lists are a JSON array *or* an object — and when it is an object, **which
+Option lists are a JSON array *or* an object, and when it is an object, **which
 half is the settable value differs per field**, in the same document, on the same
 device:
 
@@ -218,7 +218,7 @@ device:
 | `selectedWebOption` | `webOptions` = `{"1440x1440": "Full High Definition (1440x1440)"}` | the **key** |
 | `selectedCameraTriggeredClipsDuration` | `cameraTriggeredClipsDurationOptions` = `{"30": "30 seconds"}` | the **key** |
 
-None of that is inferable from the payload — `selectedClipQuality` is `"3"`,
+None of that is inferable from the payload: `selectedClipQuality` is `"3"`,
 which is *both* a key of its object and a value of it. It was settled by reading
 the portal's own dropdown builders out of its JavaScript (a public static asset;
 see the note on reading enums that way). The resolution builder pushes
@@ -229,7 +229,7 @@ any field that has not been resolved.
 
 ## Practical notes
 
-- Requests carry the `ajaxrequestuniquekey` header plus the session cookie — the
+- Requests carry the `ajaxrequestuniquekey` header plus the session cookie; the
   same pair `telus_auth.py` already assembles, so no new auth work is needed.
 - Request bodies are plain `application/json` even though many *responses* are
   `application/vnd.api+json`.

@@ -39,7 +39,7 @@
             "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
             "unknown": "[%key:common::config_flow::error::unknown%]",
             "invalid_otp": "Palavra-passe de utilização única inválida.",
-            "telus_sso_error": "O processo de início de sessão único da TELUS devolveu algo inesperado. Isto normalmente significa que a TELUS alterou algo do lado do servidor — não uma palavra-passe incorreta."
+            "telus_sso_error": "O processo de início de sessão único da TELUS devolveu algo inesperado. Isto normalmente significa que a TELUS alterou algo do lado do servidor, não uma palavra-passe incorreta."
         },
         "abort": {
             "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",

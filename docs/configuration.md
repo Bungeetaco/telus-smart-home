@@ -3,11 +3,11 @@
 This is the single place to look up any configurable knob across both halves of
 the project:
 
-- The **camera bridge** — a Docker container that logs in, pulls WebRTC video,
+- The **camera bridge**: a Docker container that logs in, pulls WebRTC video,
   re-publishes it as RTSP, and exposes a local control API. Configured through
   environment variables (files `.env` and `secrets.env`), with the authoritative
   defaults living in `bridge/config.py`.
-- The **Home Assistant integration** (`custom_components/telus_smarthome`) — a
+- The **Home Assistant integration** (`custom_components/telus_smarthome`): a
   HACS-installable custom component. Configured through the UI (config flow and
   options flow); a few build-time constants live in `hacs.json` and
   `manifest.json`.
@@ -24,12 +24,12 @@ For how these components talk to each other, see
 
 The bridge reads all configuration from environment variables at process start.
 Anything not listed as an environment variable below is a hard-coded module
-attribute in `bridge/config.py` — documented here so you know the value, but
+attribute in `bridge/config.py`, documented here so you know the value, but
 changing it means editing the source. Some of these module attributes are
 reassigned **at runtime** (credentials, see the note below), but they are not
 environment-tunable.
 
-### `secrets.env` — credentials (required)
+### `secrets.env`: credentials (required)
 
 Copy `secrets.env.example` to `secrets.env` and fill in real values. This file is
 gitignored; never commit it.
@@ -58,7 +58,7 @@ every login. A credential change therefore takes effect on the next login with n
 container restart. See [camera-bridge.md](camera-bridge.md) for the credential
 sync path.
 
-### `.env` — non-secret settings (all optional)
+### `.env`: non-secret settings (all optional)
 
 Copy `.env.example` to `.env`. Every setting here is optional; the defaults are
 what the project was built and tested against. The example file ships with all of
@@ -71,17 +71,17 @@ The environment variables the bridge actually reads, grouped by concern:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LOG_LEVEL` | `INFO` | Log verbosity (standard Python levels, e.g. `DEBUG`, `INFO`, `WARNING`). The bridge logs only to stdout/stderr; the Docker layer owns retention (`docker-compose.yml` caps the json-file log at 10 MB × 3 files), so `docker logs telus-cam-bridge` is the one place logs live and history is bounded at ~30 MB. |
-| `CONTROL_ACCESS_LOG` | `false` | Per-request access logging (`aiohttp.access`, INFO) for the control endpoint. Off by default: every request is loopback Home Assistant polling, and the lines measure at roughly a quarter of all log output — enough to age real warnings out of the bounded log window within days. Handler-level warning/error logging is unaffected; set `true` to watch individual requests. With the default, `grep aiohttp.access` over the container log finds nothing. |
-| `CONTROL_PORT` | `8199` | TCP port for the local control API. Bound to loopback (`127.0.0.1`) only — never reachable from off-host, since both this container and the HA container run `--network host`. |
-| `JANUS_REQUEST_AUDIO` | `false` | **An experiment, not a feature**, and **per-camera**. Adds `audio`/`audioport`/`audiopt`/`audiortpmap` (Opus, payload type 111) to the Janus mountpoint-create body for the cameras it names, so the offer-media diagnostic below reveals whether the upstream will serve a *downstream* audio track at all. Accepted values: `false`/`0`/`no`/`off` or unset — **off for every camera** (the default, and the create body stays byte-identical to the video-only one the bridge has always sent); `true`/`1`/`yes`/`on`/`all` — on for every camera; a **comma-separated list of camera ids** (`<camera-id>,<camera-id>` — exact id match, surrounding whitespace ignored) — on for exactly those. The keywords are only recognised as the *whole* value, never as one entry of a list. Which mode applied is logged once per camera at session start. It is per-camera because asking is not free for every camera: with audio requested the gateway offers the audio m-line *first*, and cameras differ in whether they then deliver video (see [camera-bridge.md](camera-bridge.md)). Safe to leave on for a camera that tolerates it: a rejected create is logged and retried once with the unchanged video-only body, so it cannot fail a session or count toward the restart escape hatch. **On its own it does not make the RTSP feed carry sound** — it only asks for the track. Publishing what comes back is the separate `JANUS_CONSUME_AUDIO` knob below; with that off, an offered audio track is drained and discarded. Talkdown, the separate path that plays audio *out* of a doorbell, is unaffected either way. |
-| `JANUS_CONSUME_AUDIO` | `false` | **Publish the downstream audio track on the camera's RTSP path**, alongside the video. Per-camera, with exactly the same three value forms and the same whole-value keyword rule as `JANUS_REQUEST_AUDIO` above: `false`/`0`/`no`/`off` or unset — off everywhere (the default); `true`/`1`/`yes`/`on`/`all` — on for every camera; a comma-separated list of camera ids — on for exactly those (exact id match, surrounding whitespace ignored). **It requires `JANUS_REQUEST_AUDIO` to name the same camera.** A camera named here but not there is never offered an audio track at all, so the combination is reported once in the log and treated as **off** rather than silently building a publisher whose audio input can only ever carry silence. For a camera it applies to, the ffmpeg publisher gains a second raw-PCM input and the output carries **mono AAC** (`-c:a aac -ac 1`) at the sample rate the decoded frames actually arrive at. AAC is not a free choice: Home Assistant's HLS stream worker accepts only aac/mp3 for audio, and Frigate's `-c copy` recording preset needs a codec that is legal in an mp4 container — AAC is the only codec both accept, so the gateway's Opus is transcoded rather than passed through. The *video* input is unaffected — it is the same on both command lines, and its rate is declared with `-framerate <fps>` (never `-r`, which would override `-use_wallclock_as_timestamps` and make the video timeline advance per frame written rather than per second elapsed) — see [camera-bridge.md](camera-bridge.md) for the measurements and for the audio path itself. To check that it actually worked, read the camera's `decoded_audio_frames` and `audio_format` in [`/control/status`](control-api.md#get-controlstatus) — or, with the Home Assistant integration installed, that camera's **Audio state** entity, which compares that counter across polls for you and reports `not_consuming` / `no_audio_yet` / `flowing` / `stalled` (see [ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity)). This matters: a stream that decodes nothing still publishes a valid, entirely silent AAC track, because the publisher's audio input is kept alive with generated silence whether or not the camera's audio ever arrives. |
+| `CONTROL_ACCESS_LOG` | `false` | Per-request access logging (`aiohttp.access`, INFO) for the control endpoint. Off by default: every request is loopback Home Assistant polling, and the lines measure at roughly a quarter of all log output, enough to age real warnings out of the bounded log window within days. Handler-level warning/error logging is unaffected; set `true` to watch individual requests. With the default, `grep aiohttp.access` over the container log finds nothing. |
+| `CONTROL_PORT` | `8199` | TCP port for the local control API. Bound to loopback (`127.0.0.1`) only; never reachable from off-host, since both this container and the HA container run `--network host`. |
+| `JANUS_REQUEST_AUDIO` | `false` | **An experiment, not a feature**, and **per-camera**. Adds `audio`/`audioport`/`audiopt`/`audiortpmap` (Opus, payload type 111) to the Janus mountpoint-create body for the cameras it names, so the offer-media diagnostic below reveals whether the upstream will serve a *downstream* audio track at all. Accepted values: `false`/`0`/`no`/`off` or unset: **off for every camera** (the default, and the create body stays byte-identical to the video-only one the bridge has always sent); `true`/`1`/`yes`/`on`/`all`: on for every camera; a **comma-separated list of camera ids** (`<camera-id>,<camera-id>`; exact id match, surrounding whitespace ignored): on for exactly those. The keywords are only recognised as the *whole* value, never as one entry of a list. Which mode applied is logged once per camera at session start. It is per-camera because asking is not free for every camera: with audio requested the gateway offers the audio m-line *first*, and cameras differ in whether they then deliver video (see [camera-bridge.md](camera-bridge.md)). Safe to leave on for a camera that tolerates it: a rejected create is logged and retried once with the unchanged video-only body, so it cannot fail a session or count toward the restart escape hatch. **On its own it does not make the RTSP feed carry sound**: it only asks for the track. Publishing what comes back is the separate `JANUS_CONSUME_AUDIO` knob below; with that off, an offered audio track is drained and discarded. Talkdown, the separate path that plays audio *out* of a doorbell, is unaffected either way. |
+| `JANUS_CONSUME_AUDIO` | `false` | **Publish the downstream audio track on the camera's RTSP path**, alongside the video. Per-camera, with exactly the same three value forms and the same whole-value keyword rule as `JANUS_REQUEST_AUDIO` above: `false`/`0`/`no`/`off` or unset: off everywhere (the default); `true`/`1`/`yes`/`on`/`all`: on for every camera; a comma-separated list of camera ids: on for exactly those (exact id match, surrounding whitespace ignored). **It requires `JANUS_REQUEST_AUDIO` to name the same camera.** A camera named here but not there is never offered an audio track at all, so the combination is reported once in the log and treated as **off** rather than silently building a publisher whose audio input can only ever carry silence. For a camera it applies to, the ffmpeg publisher gains a second raw-PCM input and the output carries **mono AAC** (`-c:a aac -ac 1`) at the sample rate the decoded frames actually arrive at. AAC is not a free choice: Home Assistant's HLS stream worker accepts only aac/mp3 for audio, and Frigate's `-c copy` recording preset needs a codec that is legal in an mp4 container: AAC is the only codec both accept, so the gateway's Opus is transcoded rather than passed through. The *video* input is unaffected: it is the same on both command lines, and its rate is declared with `-framerate <fps>` (never `-r`, which would override `-use_wallclock_as_timestamps` and make the video timeline advance per frame written rather than per second elapsed); see [camera-bridge.md](camera-bridge.md) for the measurements and for the audio path itself. To check that it actually worked, read the camera's `decoded_audio_frames` and `audio_format` in [`/control/status`](control-api.md#get-controlstatus), or, with the Home Assistant integration installed, that camera's **Audio state** entity, which compares that counter across polls for you and reports `not_consuming` / `no_audio_yet` / `flowing` / `stalled` (see [ha-integration.md](ha-integration.md#stream-health-and-bridge-connectivity)). This matters: a stream that decodes nothing still publishes a valid, entirely silent AAC track, because the publisher's audio input is kept alive with generated silence whether or not the camera's audio ever arrives. |
 
 #### Video / encode
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MEDIAMTX_RTSP_PORT` | `8554` | Port the bundled MediaMTX listens on for RTSP, and the port the bridge publishes to and reports to Home Assistant. Host is fixed at `127.0.0.1`. |
-| `ENCODE_BACKEND` | `vaapi` | Hardware encode path tried before falling back to software `libx264`. One of `vaapi` (Intel QuickSync or AMD via `/dev/dri` — the project's own deployment), `nvenc` (NVIDIA via nvidia-container-toolkit — see the commented-out NVIDIA section in `docker-compose.yml`, not verified against real NVIDIA hardware), or `software` (skip hardware entirely). Deliberately not `auto`: probing an unavailable backend still costs a real failed subprocess launch on every reconnect. Value is lower-cased. |
+| `ENCODE_BACKEND` | `vaapi` | Hardware encode path tried before falling back to software `libx264`. One of `vaapi` (Intel QuickSync or AMD via `/dev/dri`; the project's own deployment), `nvenc` (NVIDIA via nvidia-container-toolkit; see the commented-out NVIDIA section in `docker-compose.yml`, not verified against real NVIDIA hardware), or `software` (skip hardware entirely). Deliberately not `auto`: probing an unavailable backend still costs a real failed subprocess launch on every reconnect. Value is lower-cased. |
 | `VAAPI_DEVICE` | `/dev/dri/renderD128` | The render node handed to ffmpeg's `-vaapi_device`. Requires the host's `/dev/dri` be passed into the container. Overridable because render-node numbering is not stable across hosts/reboots when more than one GPU is present. |
 | `RTSP_PASSWORD` | `""` (empty) | Password for the bundled MediaMTX's `bridge` user. Normally generated by `entrypoint.sh` and shared via `/shared/rtsp_password`; you do not set this by hand. If empty, published/reported RTSP URLs omit credentials rather than emit a guaranteed-rejected form. |
 
@@ -93,7 +93,7 @@ needs no URL-escaping when threaded into the RTSP URL.
 
 | Setting | Value | Meaning |
 | --- | --- | --- |
-| `MAX_ENCODE_DIMENSION` | `960` | Upper bound on the larger side of the published H.264 frame. Some cameras (the doorbell) publish natively at 1440x1440; decoding that continuously can exceed what a modest viewer's browser/iGPU can sustain alongside a second camera (confirmed live: RTP kept arriving while the picture froze — a decoder/paint stall on the viewer, not the network). Downscaling at encode cuts pixel throughput at the cost of some detail. |
+| `MAX_ENCODE_DIMENSION` | `960` | Upper bound on the larger side of the published H.264 frame. Some cameras (the doorbell) publish natively at 1440x1440; decoding that continuously can exceed what a modest viewer's browser/iGPU can sustain alongside a second camera (confirmed live: RTP kept arriving while the picture froze, a decoder/paint stall on the viewer, not the network). Downscaling at encode cuts pixel throughput at the cost of some detail. |
 
 **Container resource caps.** These are read by `docker-compose.yml`, not by the
 bridge process itself, but they are documented in `.env.example` because they live
@@ -116,29 +116,29 @@ for the full talk mechanism.
 
 | Setting | Env var? | Default | Meaning |
 | --- | --- | --- | --- |
-| `TALKDOWN_ENABLED` | **yes** (`TALKDOWN_ENABLED`) | `true` | Master switch for two-way audio. Set it to a false value and the talk endpoint returns `403`. Truthy values: `1`, `true`, `yes`, `on` (case-insensitive, whitespace-trimmed). It gates **only** talkdown — the camera settings, diagnostics, siren and privacy routes are unaffected by it. |
+| `TALKDOWN_ENABLED` | **yes** (`TALKDOWN_ENABLED`) | `true` | Master switch for two-way audio. Set it to a false value and the talk endpoint returns `403`. Truthy values: `1`, `true`, `yes`, `on` (case-insensitive, whitespace-trimmed). It gates **only** talkdown: the camera settings, diagnostics, siren and privacy routes are unaffected by it. |
 | `TALK_PREFER_WEBRTC` | no | `True` | Prefer the `<webrtc>` endpoint (aiortc, clean sendrecv Opus) over `<srtp>` (ffmpeg) for cameras that offer both. |
 | `TALK_PREFER_FULL_DUPLEX` | no | `True` | Prefer the full-duplex HTTP-PUT path when the device advertises upstream audio (`susa=true`). This is the only working talk path for the ADC-VDB750 doorbell, which returns only an `<rtsp>` (video + listen) endpoint. |
 | `TALK_PUT_ENDPOINT_ORDER` | no | `("direct", "local", "public", "cloud")` | Order in which the full-duplex `PutAudioStream` endpoint variants are tried. The bridge shares the doorbell LAN, so the direct/local LAN URL is fastest and relay-free; public then cloud relay are WAN fallbacks. Values are keys in the parsed doorbell camera list `put_urls`. |
-| `TALK_CODEC` | no (per-request override via POST `codec`) | `mulaw` | Audio codec for the full-duplex PUT path. On the VDB750 (fw 02091) the PUT path is mu-law only — L16 was tested and came out as noise, because that device decodes the body as mu-law regardless of Content-Type. A per-model/firmware limit, not project-wide; the codec plumbing is kept so a working codec can be added per device later. |
+| `TALK_CODEC` | no (per-request override via POST `codec`) | `mulaw` | Audio codec for the full-duplex PUT path. On the VDB750 (fw 02091) the PUT path is mu-law only: L16 was tested and came out as noise, because that device decodes the body as mu-law regardless of Content-Type. A per-model/firmware limit, not project-wide; the codec plumbing is kept so a working codec can be added per device later. |
 | `TALK_CODEC_FALLBACK` | no | `mulaw` | Fallback codec if the primary fails. Currently also mu-law for the same reason. |
 | `TALK_AUDIO_FILTER` | no | see below | ffmpeg audio-conditioning filter applied to **all** talkdown audio before encoding to the doorbell codec. Set to `""` to pass audio through untouched (e.g. for already-conditioned sources). Applied to every talk path (full-duplex folds it into its encode pass; the webrtc/srtp fallback applies it up front), and overridable per request via the `audio_filter` body field. |
 | `TALK_CHUNK_MS` | no | `40` | Milliseconds of audio per PUT. Also the granularity at which a stop request takes effect. Larger = fewer round trips but coarser stop response; the value matches what the app was observed sending. |
 | `TALK_PREBUFFER_MS` | no | `500` | How far ahead of real time the stream stays, so the doorbell always holds a jitter buffer. Delivering chunks exactly at playback time underruns into audible gaps. Raising it delays how quickly a stop is heard. |
 | `TALK_DOORBELL_CACHE_TTL_S` | no | `60` | How long a `GetDoorbellCameraList` result may be reused across talks, saving that round trip (~0.3 s before audio starts) on back-to-back talks. The session it carries is not per-talk in practice, and a stale hit self-corrects via renegotiation. Dropped on any talk failure and on every renegotiation. `0` disables it. |
-| `TALK_PUT_ENDPOINT` | **yes** (`TALK_PUT_ENDPOINT`) | *(empty — auto-detect)* | Pin the full-duplex PUT to one endpoint kind (`direct`, `local`, `public`, `cloud`) instead of letting reachability detection choose. Set it when detection is wrong: a firewall that drops the probe but would pass the real PUT, or an endpoint that accepts a connection but cannot carry audio. A value this doorbell does not advertise is ignored with a warning and auto-detection runs anyway — a mistyped knob must not silence the doorbell. |
-| `TALK_ENDPOINT_PROBE_TIMEOUT_S` | **yes** (`TALK_ENDPOINT_PROBE_TIMEOUT_S`) | `1.0` | How long the reachability probe may take per candidate. `TALK_PUT_ENDPOINT_ORDER` above is a *preference*, not a reachability claim — off the doorbell's LAN its first two entries are RFC1918 addresses that simply do not answer — so the candidates are probed concurrently and consumed in preference order, and only unreachable ones are skipped. A probe is a bare TCP connect: no TLS, no HTTP, nothing written, so it cannot disturb the audio path. Raise it if the doorbell is across a link that legitimately takes longer than a second to accept a connection; `0` disables probing and restores a blind walk down the order. If nothing answers, the first preferred URL is used anyway so the PUT itself produces the real error. |
-| `TALK_STREAMING_ENCODE` | **yes** (`TALK_STREAMING_ENCODE`) | `true` | Feed the PUT loop from ffmpeg's stdout as it decodes instead of encoding the whole clip into memory first. The doorbell starts speaking after one chunk is ready rather than after the entire file is transcoded, and encoded-audio memory is bounded by the lookahead below rather than by the clip. Set it false to restore buffer-then-send — the switch exists so a field regression in a live audio path is an `.env` change rather than a code change. Both modes run the same send/pacing loop. |
-| `TALK_ENCODE_LOOKAHEAD_S` | no | `30` | How far ahead of the send schedule the streaming encoder may run. This is what makes streaming safe: ffmpeg decodes far faster than real time, so without a bound it would simply re-buffer the whole clip. It doubles as a jitter buffer for the *encoder* — a decode hiccup with tens of seconds already queued is inaudible. Approximate; the OS pipe buffer adds a little more. |
+| `TALK_PUT_ENDPOINT` | **yes** (`TALK_PUT_ENDPOINT`) | *(empty, auto-detect)* | Pin the full-duplex PUT to one endpoint kind (`direct`, `local`, `public`, `cloud`) instead of letting reachability detection choose. Set it when detection is wrong: a firewall that drops the probe but would pass the real PUT, or an endpoint that accepts a connection but cannot carry audio. A value this doorbell does not advertise is ignored with a warning and auto-detection runs anyway: a mistyped knob must not silence the doorbell. |
+| `TALK_ENDPOINT_PROBE_TIMEOUT_S` | **yes** (`TALK_ENDPOINT_PROBE_TIMEOUT_S`) | `1.0` | How long the reachability probe may take per candidate. `TALK_PUT_ENDPOINT_ORDER` above is a *preference*, not a reachability claim (off the doorbell's LAN its first two entries are RFC1918 addresses that simply do not answer) so the candidates are probed concurrently and consumed in preference order, and only unreachable ones are skipped. A probe is a bare TCP connect: no TLS, no HTTP, nothing written, so it cannot disturb the audio path. Raise it if the doorbell is across a link that legitimately takes longer than a second to accept a connection; `0` disables probing and restores a blind walk down the order. If nothing answers, the first preferred URL is used anyway so the PUT itself produces the real error. |
+| `TALK_STREAMING_ENCODE` | **yes** (`TALK_STREAMING_ENCODE`) | `true` | Feed the PUT loop from ffmpeg's stdout as it decodes instead of encoding the whole clip into memory first. The doorbell starts speaking after one chunk is ready rather than after the entire file is transcoded, and encoded-audio memory is bounded by the lookahead below rather than by the clip. Set it false to restore buffer-then-send: the switch exists so a field regression in a live audio path is an `.env` change rather than a code change. Both modes run the same send/pacing loop. |
+| `TALK_ENCODE_LOOKAHEAD_S` | no | `30` | How far ahead of the send schedule the streaming encoder may run. This is what makes streaming safe: ffmpeg decodes far faster than real time, so without a bound it would simply re-buffer the whole clip. It doubles as a jitter buffer for the *encoder*: a decode hiccup with tens of seconds already queued is inaudible. Approximate; the OS pipe buffer adds a little more. |
 | `TALK_ENCODE_READ_TIMEOUT_S` | no | `15` | A read from the encoder that blocks this long means ffmpeg is wedged rather than merely slow (it normally runs hundreds of chunks ahead), and fails the talk instead of letting the doorbell run dry with the session held open. |
-| `TALK_PREBUFFER_ADAPTIVE` | **yes** (`TALK_PREBUFFER_ADAPTIVE`) | `false` | Let the jitter-buffer lead grow to cover the worst observed PUT round trip. **Leave it off until someone has listened to a talk with it on** — `TALK_PREBUFFER_MS` was tuned by ear against the real speaker, and nothing available offline justifies moving it. The *measurement* is always on regardless (see the talk response's `put_rtt_*` / `late_chunks`), so a later tuning has data rather than a guess. The adaptation is one-directional by design: it may only raise the lead, never lower it below the tuned value. |
-| `TALK_PREBUFFER_MAX_MS` | no | `2000` | Ceiling on the adaptive lead, and therefore also the ceiling on how much audio the doorbell may still be holding when a stop arrives — which is why it is not larger. |
-| `TALK_MAX_RECONNECTS` | no | `2` | Consecutive in-place retries — same credentials, new socket, fresh Digest handshake — before escalating to a full renegotiation. Two failures do not need new credentials: a dropped keep-alive connection, and a `401` the Digest middleware could not clear by itself. Renegotiation is three round trips of dead air and is bounded, so spending one on a problem a new socket fixes can cost the talk later. Any successful chunk resets the counter, and the safety deadline is deliberately *not* extended for a reconnect, so a link that blips forever still terminates. `0` sends every failure straight to renegotiation. |
+| `TALK_PREBUFFER_ADAPTIVE` | **yes** (`TALK_PREBUFFER_ADAPTIVE`) | `false` | Let the jitter-buffer lead grow to cover the worst observed PUT round trip. **Leave it off until someone has listened to a talk with it on**: `TALK_PREBUFFER_MS` was tuned by ear against the real speaker, and nothing available offline justifies moving it. The *measurement* is always on regardless (see the talk response's `put_rtt_*` / `late_chunks`), so a later tuning has data rather than a guess. The adaptation is one-directional by design: it may only raise the lead, never lower it below the tuned value. |
+| `TALK_PREBUFFER_MAX_MS` | no | `2000` | Ceiling on the adaptive lead, and therefore also the ceiling on how much audio the doorbell may still be holding when a stop arrives, which is why it is not larger. |
+| `TALK_MAX_RECONNECTS` | no | `2` | Consecutive in-place retries (same credentials, new socket, fresh Digest handshake) before escalating to a full renegotiation. Two failures do not need new credentials: a dropped keep-alive connection, and a `401` the Digest middleware could not clear by itself. Renegotiation is three round trips of dead air and is bounded, so spending one on a problem a new socket fixes can cost the talk later. Any successful chunk resets the counter, and the safety deadline is deliberately *not* extended for a reconnect, so a link that blips forever still terminates. `0` sends every failure straight to renegotiation. |
 | `TALK_MAX_RENEGOTIATIONS` | no | `2` | How many times a talk may fetch a fresh doorbell session and resume from the exact byte offset it reached. The PUT URL, port and password are per-session, so a long clip or a network blip can outlive one; bounded so a persistently broken session fails the request instead of looping. |
-| `TALK_RENEGOTIATE_MARGIN_S` | no | `20` | When a session expiry can be determined, swap this many seconds early rather than waiting for the first failed PUT — a proactive swap costs one silent gap of a few hundred ms instead of a failed chunk plus a teardown/setup round trip. |
-| `TALK_DEVICE_CERT_SHA256` | **yes** (`TALK_DEVICE_CERT_SHA256`) | the fingerprint observed on one ADC-VDB750 (the literal is in `config.py`) | SHA-256 of the DER certificate the doorbell presents on its audio endpoint. Change it after a firmware update, a factory reset or a replacement unit — all three legitimately change the certificate, and a mismatch logs the presented fingerprint so it can be pasted here. Set it empty to run unpinned; a value that is not a 32-byte hex digest is rejected with a logged error when a talk first constructs the pin (not at startup), and the talk continues unpinned. |
+| `TALK_RENEGOTIATE_MARGIN_S` | no | `20` | When a session expiry can be determined, swap this many seconds early rather than waiting for the first failed PUT: a proactive swap costs one silent gap of a few hundred ms instead of a failed chunk plus a teardown/setup round trip. |
+| `TALK_DEVICE_CERT_SHA256` | **yes** (`TALK_DEVICE_CERT_SHA256`) | the fingerprint observed on one ADC-VDB750 (the literal is in `config.py`) | SHA-256 of the DER certificate the doorbell presents on its audio endpoint. Change it after a firmware update, a factory reset or a replacement unit: all three legitimately change the certificate, and a mismatch logs the presented fingerprint so it can be pasted here. Set it empty to run unpinned; a value that is not a 32-byte hex digest is rejected with a logged error when a talk first constructs the pin (not at startup), and the talk continues unpinned. |
 | `TALK_TLS_PIN_MODE` | **yes** (`TALK_TLS_PIN_MODE`) | `warn` | `warn` verifies the fingerprint, logs loudly on a mismatch (with both values and the fix) and **connects anyway**; `enforce` refuses the connection on a mismatch; `off` disables the check. See below. |
-| `TALK_TLS_PIN_ENDPOINT_KINDS` | no | `("direct", "local", "public")` | Which endpoint kinds the pin applies to. The fingerprint is the *device's* own, so it is only meaningful where TLS terminates at the device: the two LAN URLs and the site's WAN address. The `cloud` endpoint is the vendor relay — a different host with its own CA-signed certificate — and pinning the doorbell's fingerprint there would break WAN talkdown outright. |
+| `TALK_TLS_PIN_ENDPOINT_KINDS` | no | `("direct", "local", "public")` | Which endpoint kinds the pin applies to. The fingerprint is the *device's* own, so it is only meaningful where TLS terminates at the device: the two LAN URLs and the site's WAN address. The `cloud` endpoint is the vendor relay (a different host with its own CA-signed certificate) and pinning the doorbell's fingerprint there would break WAN talkdown outright. |
 
 The default `TALK_AUDIO_FILTER` is tuned by ear for the doorbell's small speaker,
 which clips and sounds harsh on raw full-range music/TTS:
@@ -160,7 +160,7 @@ check instead of a connection with verification switched off.
 The shipped fingerprint was observed on **one** ADC-VDB750, and it is not a
 vendor-wide constant: a firmware update, a factory reset or a replacement unit all
 legitimately present a different certificate. That is exactly why `warn` is the
-default — it detects and reports, printing both fingerprints and the fix, and
+default: it detects and reports, printing both fingerprints and the fix, and
 still connects, so a routine firmware update cannot turn into a silent doorbell
 with an obscure TLS error. Move to `enforce` once the pin is known good for *your*
 device, and re-pin after any firmware update. With no pin configured at all,
@@ -168,7 +168,7 @@ device, and re-pin after any firmware update. With no pin configured at all,
 logged once so it can be adopted, and the talk proceeds.
 
 The check runs once per connection rather than per request, so a keep-alive chunk
-stream pays for it once, and it never applies to the `cloud` endpoint — see
+stream pays for it once, and it never applies to the `cloud` endpoint; see
 `TALK_TLS_PIN_ENDPOINT_KINDS` above.
 
 **The jitter-buffer lead is tuned by ear.** `TALK_PREBUFFER_MS` is how far ahead
@@ -176,8 +176,8 @@ of real time the stream stays so the doorbell always holds a jitter buffer;
 delivering chunks exactly at playback time underruns into audible gaps. It was set
 by listening to the real speaker, which is why `TALK_PREBUFFER_ADAPTIVE` ships off
 and why raising the lead is the only direction the adaptation is allowed to move
-it. A larger lead cannot cause an underrun — it only delays how quickly a stop is
-heard and leaves more audio buffered at the doorbell — whereas a smaller one can.
+it. A larger lead cannot cause an underrun (it only delays how quickly a stop is
+heard and leaves more audio buffered at the doorbell) whereas a smaller one can.
 What is always on is the measurement: every talk reports the observed PUT
 round-trip distribution and how many chunks missed their slot, in the talk
 response (see [control-api.md](control-api.md#post-controlcamerascamera_idtalk)).
@@ -202,7 +202,7 @@ crash-restart guard.
 | --- | --- | --- |
 | `RECONNECT_BACKOFF_INITIAL_S` | `2` | Initial reconnect backoff. |
 | `RECONNECT_BACKOFF_MAX_S` | `30` | Maximum reconnect backoff (sequence 2, 4, 8, 16, 30, …). |
-| `RATE_LIMIT_RETRY_MAX_S` | `30 * 60` (30 min) | Absolute ceiling on a single `Retry-After`-driven sleep. A sanity clamp on a garbage header value, not a second-guess of a reasonable one — observed real values are ~101s. Used to be 300s applied as a plain `min()`, which had the bridge coming back sooner than the server asked and re-entering the rate-limit window. |
+| `RATE_LIMIT_RETRY_MAX_S` | `30 * 60` (30 min) | Absolute ceiling on a single `Retry-After`-driven sleep. A sanity clamp on a garbage header value, not a second-guess of a reasonable one: observed real values are ~101s. Used to be 300s applied as a plain `min()`, which had the bridge coming back sooner than the server asked and re-entering the rate-limit window. |
 | `RATE_LIMIT_RETRY_MARGIN_S` | `2` | Margin added on top of the server's stated wait so clock/rounding skew can't land the retry just inside the window again. |
 | `MAX_CONSECUTIVE_SESSION_FAILURES` | `5` | If one camera's session fails this many times in a row with no successful frame batch in between, the bridge hard-exits (`os._exit`) so Docker's `restart: unless-stopped` brings up a clean process. With the backoff above, 5 failures is ≥~60s of continuous failure. |
 | `SESSION_CLOSE_TIMEOUT_S` | `5` | Bounds aiortc's `pc.close()`, which has no timeout of its own and can hang under certain ICE states. |
@@ -219,9 +219,9 @@ the diagnostics reads it bounds:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `DIAGNOSTICS_READ_TIMEOUT_S` | `35` | Per-request ceiling on each of the three upstream reads behind `/control/cameras/<id>/diagnostics`, overriding the shared upstream session's 15s default for those requests only. The signal read is answered by alarm.com querying the camera live and measures up to 25s on some models; the value sits above that and under the HA side's 45s route budget (`CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS`). The settings getters keep the session default — their document reads are fast. |
+| `DIAGNOSTICS_READ_TIMEOUT_S` | `35` | Per-request ceiling on each of the three upstream reads behind `/control/cameras/<id>/diagnostics`, overriding the shared upstream session's 15s default for those requests only. The signal read is answered by alarm.com querying the camera live and measures up to 25s on some models; the value sits above that and under the HA side's 45s route budget (`CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS`). The settings getters keep the session default; their document reads are fast. |
 
-**Restart-frequency guard** (`restart_guard.py`) — throttles the hard-exit escape
+**Restart-frequency guard** (`restart_guard.py`): throttles the hard-exit escape
 hatch above so a sustained upstream outage doesn't become an unbounded
 crash-restart loop (measured once at 89 restarts in 7 days). State lives on disk
 because the hatch kills the process:
@@ -230,7 +230,7 @@ because the hatch kills the process:
 | --- | --- | --- |
 | `RESTART_GUARD_WINDOW_S` | `60 * 60` (1 h) | Rolling window over which hatch exits are counted; older exits are dropped, so genuine one-off wedges weeks apart never accumulate. |
 | `RESTART_GUARD_MAX_EXITS` | `3` | Exits allowed inside the window before throttling starts. The first few stay immediate, preserving fast recovery; only a repeating pattern is held back. |
-| `RESTART_GUARD_BACKOFF_INITIAL_S` | `60` | First throttled sleep-before-exit (then 120s, 240s, … capped). The sleep runs in-process, so Docker cannot restart until it finishes — this is the hard floor on restart frequency. |
+| `RESTART_GUARD_BACKOFF_INITIAL_S` | `60` | First throttled sleep-before-exit (then 120s, 240s, … capped). The sleep runs in-process, so Docker cannot restart until it finishes: this is the hard floor on restart frequency. |
 | `RESTART_GUARD_BACKOFF_MAX_S` | `15 * 60` (15 min) | Cap on that backoff. Well past the ~101s `Retry-After`, so a sustained failure stops re-hammering the limiter that caused it. |
 
 #### Media pipeline: frame rate, video queue and audio pacing (module constants)
@@ -238,30 +238,30 @@ because the hatch kills the process:
 Not environment variables. These live in `config.py`, `janus_client.py` and
 `ffmpeg_sink.py`, and they are the numbers that decide whether the doorbell keeps
 its frames. The `RATE_*` group governs how the bridge notices that a camera's
-**frame rate has changed** — it is a device setting, changeable at any time from
-Home Assistant, the TELUS app or the portal — and how rarely it is willing to
+**frame rate has changed** (it is a device setting, changeable at any time from
+Home Assistant, the TELUS app or the portal) and how rarely it is willing to
 rebuild the publisher for it. **`AUDIO_SILENCE_TOPUP_S` and `_AUDIO_SILENCE_MAX_BURST_S` are paced
-against `_AUDIO_PRIME_MS`** — the audio input has to stay ahead of the video or
+against `_AUDIO_PRIME_MS`**: the audio input has to stay ahead of the video or
 ffmpeg stops reading the video pipe; see
 [camera-bridge.md](camera-bridge.md#the-audio-path) for the mechanism and the
 measured table.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `VIDEO_QUEUE_TARGET_MS` (`janus_client`) | `500` | Depth of the decoded-video queue, in **time**. The frame count is `round(fps × this / 1000)`, from the camera's own measured rate, so one number means one thing on every camera — a flat 4 frames was 267 ms at 15 fps and 667 ms at 6 fps. Defence in depth only: a deeper queue converts dropped frames into latency, it does not remove a stall. |
-| `VIDEO_QUEUE_MIN_FRAMES` / `VIDEO_QUEUE_MAX_FRAMES` (`janus_client`) | `4` / `8` | Floor and ceiling on that count. The ceiling is memory: a decoded 1440×1440 yuv420p frame is 3.11 MB, so 8 frames is 24.9 MB per camera (container `mem_limit` 768 MiB, ~435 MiB in use) and 16 would be 49.8 MB. Above ~16 fps the ceiling binds before the time target does — so any rate change between 16 and 30 fps leaves the depth unchanged at 8. |
-| `RATE_RESAMPLE_SETTLE_S` | `10.0` | How long a session must have been delivering frames before any of them are re-measured. The frame rate is a **device setting** that can change with no restart (see [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched)), so it is re-measured while the stream runs — but never across the buffered burst at a session start, which has produced 544, 215 and 62 fps readings for cameras really running at 15 and 30. Leaves ~155 s of every 165 s session measurable. |
+| `VIDEO_QUEUE_TARGET_MS` (`janus_client`) | `500` | Depth of the decoded-video queue, in **time**. The frame count is `round(fps × this / 1000)`, from the camera's own measured rate, so one number means one thing on every camera: a flat 4 frames was 267 ms at 15 fps and 667 ms at 6 fps. Defence in depth only: a deeper queue converts dropped frames into latency, it does not remove a stall. |
+| `VIDEO_QUEUE_MIN_FRAMES` / `VIDEO_QUEUE_MAX_FRAMES` (`janus_client`) | `4` / `8` | Floor and ceiling on that count. The ceiling is memory: a decoded 1440×1440 yuv420p frame is 3.11 MB, so 8 frames is 24.9 MB per camera (container `mem_limit` 768 MiB, ~435 MiB in use) and 16 would be 49.8 MB. Above ~16 fps the ceiling binds before the time target does, so any rate change between 16 and 30 fps leaves the depth unchanged at 8. |
+| `RATE_RESAMPLE_SETTLE_S` | `10.0` | How long a session must have been delivering frames before any of them are re-measured. The frame rate is a **device setting** that can change with no restart (see [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched)), so it is re-measured while the stream runs, but never across the buffered burst at a session start, which has produced 544, 215 and 62 fps readings for cameras really running at 15 and 30. Leaves ~155 s of every 165 s session measurable. |
 | `RATE_RESAMPLE_FRAMES` | `90` | Inter-frame deltas per settled measurement, taken as a median: 3 s at 30 fps, 15 s at 6 fps. Long enough that no single late or bunched frame moves the result, short enough for several independent measurements per session even on the slowest camera here. |
-| `RATE_CHANGE_TOLERANCE_DOWN` / `RATE_CHANGE_TOLERANCE_UP` | `0.20` / `0.35` | Hysteresis band around the rate ffmpeg was **declared** with, below which a measurement is jitter rather than a change. **Asymmetric on purpose**: declaring below what the camera delivers makes ffmpeg *drop* real frames (1201 written → 1002 encoded, 199 lost), while declaring above it only pads with duplicates — and burst contamination biases a reading *high*, never low, so "the camera sped up" is the claim an artifact makes and gets the wider band. Both clear the observed jitter (6↔7 across restarts, 17%; a camera set to 15 delivering ~13.4, 11%) without swallowing a real change (−53%, +100%, −24%). |
-| `RATE_REBUILD_MIN_INTERVAL_S` | `300` | Floor between two rate-driven publisher rebuilds — a little under two session rotations. A rebuild kicks every RTSP reader, so even a source that defeats the settle window, the median, the band and the two-measurements-must-agree confirmation cannot cost more than one glitch per window. It delays a correction; it never cancels one — the confirmed evidence is kept through the hold, and the first agreeing batch past the floor acts on it. |
-| `RATE_FLAP_WINDOW_S` | `1800` | A confirmed change **back to the rate the last rate rebuild moved away from**, within this long of that rebuild, is the flapping signature: a delivered rate swinging with no setting change (observed live — the 30 fps camera halves its delivered rate under marginal light and comes back, dwelling minutes at each end, so both ends confirm and the two-batch gate cannot help). The flap is resolved once, to the **higher** rate — held high the output pads with duplicates; held low it drops real frames — and then held. See [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched). |
-| `RATE_FLAP_HOLD_S` | `3600` | How long the flap memory lives past the last settled sighting of the flap's high rate. While the source keeps visiting the high rate the memory keeps renewing and confirmed changes down to the flap's low rate are refused. A **real** setting change to the low rate stops the sightings, outlives the hold, and is applied late rather than never — an hour of duplicate padding, chosen over a night of reader-kicking rebuilds. |
-| `AUDIO_DEFAULT_FORMAT` | `("s16", 48000, 2)` | Shape the audio input is sized with while no frame has been decoded yet — a bootstrap only. The first real frame's shape wins, rebuilding the publisher if this guess was wrong. |
+| `RATE_CHANGE_TOLERANCE_DOWN` / `RATE_CHANGE_TOLERANCE_UP` | `0.20` / `0.35` | Hysteresis band around the rate ffmpeg was **declared** with, below which a measurement is jitter rather than a change. **Asymmetric on purpose**: declaring below what the camera delivers makes ffmpeg *drop* real frames (1201 written → 1002 encoded, 199 lost), while declaring above it only pads with duplicates, and burst contamination biases a reading *high*, never low, so "the camera sped up" is the claim an artifact makes and gets the wider band. Both clear the observed jitter (6↔7 across restarts, 17%; a camera set to 15 delivering ~13.4, 11%) without swallowing a real change (−53%, +100%, −24%). |
+| `RATE_REBUILD_MIN_INTERVAL_S` | `300` | Floor between two rate-driven publisher rebuilds, a little under two session rotations. A rebuild kicks every RTSP reader, so even a source that defeats the settle window, the median, the band and the two-measurements-must-agree confirmation cannot cost more than one glitch per window. It delays a correction; it never cancels one: the confirmed evidence is kept through the hold, and the first agreeing batch past the floor acts on it. |
+| `RATE_FLAP_WINDOW_S` | `1800` | A confirmed change **back to the rate the last rate rebuild moved away from**, within this long of that rebuild, is the flapping signature: a delivered rate swinging with no setting change (observed live: the 30 fps camera halves its delivered rate under marginal light and comes back, dwelling minutes at each end, so both ends confirm and the two-batch gate cannot help). The flap is resolved once, to the **higher** rate (held high the output pads with duplicates; held low it drops real frames) and then held. See [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched). |
+| `RATE_FLAP_HOLD_S` | `3600` | How long the flap memory lives past the last settled sighting of the flap's high rate. While the source keeps visiting the high rate the memory keeps renewing and confirmed changes down to the flap's low rate are refused. A **real** setting change to the low rate stops the sightings, outlives the hold, and is applied late rather than never: an hour of duplicate padding, chosen over a night of reader-kicking rebuilds. |
+| `AUDIO_DEFAULT_FORMAT` | `("s16", 48000, 2)` | Shape the audio input is sized with while no frame has been decoded yet, a bootstrap only. The first real frame's shape wins, rebuilding the publisher if this guess was wrong. |
 | `AUDIO_QUEUE_MAXSIZE` | `50` | Decoded-audio queue depth (~1 s at 20 ms frames). Drop-oldest with its own counter, like the video queue. |
-| `AUDIO_SILENCE_TOPUP_S` | `0.05` | How long the audio pump waits for a decoded frame before topping the publisher up with silence — and therefore the **cadence of that top-up**. It must stay comfortably under the 100 ms lead the pipe is primed with. It shipped at `0.5`, five times the lead, which stalled 120 of every 900 frames (13.3%) on the doorbell; `0.1` — exactly the lead — stalled 162. Not a failure timeout: nothing is declared dead. |
+| `AUDIO_SILENCE_TOPUP_S` | `0.05` | How long the audio pump waits for a decoded frame before topping the publisher up with silence, and therefore the **cadence of that top-up**. It must stay comfortably under the 100 ms lead the pipe is primed with. It shipped at `0.5`, five times the lead, which stalled 120 of every 900 frames (13.3%) on the doorbell; `0.1` (exactly the lead) stalled 162. Not a failure timeout: nothing is declared dead. |
 | `AUDIO_PUMP_MAX_BURST_S` | `0.1` | How much audio the pump may write in one uninterrupted pass before yielding to the event loop, so draining a backlog cannot monopolise the loop or the executor `write_frame`'s pixel copy shares. A **yield**, not a real-time pace: audio that lags the video is what stalls the video pipe, so a backlog must be delivered as fast as the loop allows. |
 | `_AUDIO_PRIME_MS` (`ffmpeg_sink`) | `100` | Silence written into the audio pipe the instant it opens. Two jobs: it lets `avformat_find_stream_info` complete on a raw input, and it is the **lead** the audio timeline keeps over the wallclock-stamped video. Every cadence above is chosen against it. |
-| `_AUDIO_SILENCE_MAX_BURST_S` (`ffmpeg_sink`) | `0.1` | Ceiling on a single silence top-up. What it clips is still owed — the fill is derived from elapsed wallclock, so the next call recomputes it and keeps repaying, and A/V sync is unaffected. |
+| `_AUDIO_SILENCE_MAX_BURST_S` (`ffmpeg_sink`) | `0.1` | Ceiling on a single silence top-up. What it clips is still owed: the fill is derived from elapsed wallclock, so the next call recomputes it and keeps repaying, and A/V sync is unaffected. |
 | `_AUDIO_PIPE_MAX_BUFFER` (`ffmpeg_sink`) | `512 * 1024` | Unwritten audio the pipe transport may hold (~2.7 s) before the sink gives up on **audio only** and keeps publishing video (`audio_dropped` in `/control/status`). |
 | `_VIDEO_DRAIN_TIMEOUT_S` (`ffmpeg_sink`) | `5.0` | How long a frame may sit unread in the video pipe before the publisher is treated as gone and rebuilt. A healthy write is ~2 ms, so this is ~75 frames' worth of not being read. It is also what stops an ffmpeg that has stopped reading from parking the camera's loop forever. |
 
@@ -285,7 +285,7 @@ configurable.
 
 **Rotating the shared secrets.** The control secret rotates automatically every
 `CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days); to rotate it manually, delete
-`/shared/control_secret` and restart the bridge container — it regenerates the
+`/shared/control_secret` and restart the bridge container; it regenerates the
 file, and HA reads the secret fresh off disk on every request, so no HA-side
 action is needed. To rotate the RTSP password, delete `/shared/rtsp_password`,
 restart the bridge (`entrypoint.sh` regenerates it), then restart Home
@@ -321,7 +321,7 @@ Assistant UI. There are no YAML settings.
 | `iot_class` | `cloud_polling` | Talks to a cloud service by polling (plus a websocket, see the options below). |
 | `dependencies` | `[]` | No other HA integrations required. |
 | `requirements` | `pyalarmdotcomajax==0.5.13` | Python packages installed on setup. |
-| `version` | the current release | Integration version — the single source of truth, kept in lockstep with the git tag (see [development.md](development.md)). |
+| `version` | the current release | Integration version: the single source of truth, kept in lockstep with the git tag (see [development.md](development.md)). |
 
 The config-entry schema is at **version 4** (`ADCFlowHandler.VERSION`); older
 entries are migrated forward.
@@ -343,7 +343,7 @@ account.
 
 On first entry creation the integration also, best-effort, writes the
 camera-bridge credential fallback file and pushes credentials to the bridge's
-control endpoint — see [camera-bridge.md](camera-bridge.md). A bridge that is
+control endpoint; see [camera-bridge.md](camera-bridge.md). A bridge that is
 unreachable never fails the config flow.
 
 ### Reauth and reconfigure
@@ -356,7 +356,7 @@ unreachable never fails the config flow.
   username field is pre-filled; the password is intentionally never pre-filled.
 
 Both update the entry with `data_updates` (a merge), not a wholesale `data`
-replace, so non-credential data such as the clip-link secret survives — critical
+replace, so non-credential data such as the clip-link secret survives, critical
 because that secret must never rotate or every clip link already delivered to a
 phone would break.
 
@@ -364,7 +364,7 @@ phone would break.
 
 Reached from the integration card's gear icon. Two screens.
 
-**Screen 1 — arm code and intervals (`init`):**
+**Screen 1: arm code and intervals (`init`):**
 
 | Option | Key | Default | Meaning |
 | --- | --- | --- | --- |
@@ -372,7 +372,7 @@ Reached from the integration card's gear icon. Two screens.
 | Update interval | `update_interval` | `300` seconds (5 min) | How often the integration polls Alarm.com for state. Entered as a number in seconds. |
 | Websocket reconnect timeout | `ws_reconnect_timeout` | `30` seconds | How long to wait before reconnecting the realtime websocket after it drops. Entered as a number in seconds. |
 
-**Screen 2 — arm-mode profiles (`modes`):**
+**Screen 2: arm-mode profiles (`modes`):**
 
 Each arm mode is a multi-select of extra arming flags applied when that mode is
 engaged. All three default to an empty selection.
@@ -442,15 +442,15 @@ patch these).
 | --- | --- | --- |
 | `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the status-LED and TELUS-notification switches, the privacy switch, the siren buttons and the camera diagnostic sensors. |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | `900` | How often the Bluetooth arming devices are re-read, backing the per-phone "Disarm alarm on arrival" switches. Deliberately far slower than the camera settings: nothing but a person can change these records, the poll is not the feedback path for a user's own toggle (the write adopts the record the response echoes), and each cycle is a live round trip competing for the same undocumented rate-limit budget. The cost is that a change made in the TELUS app, or a newly paired phone, takes up to 15 minutes to appear. |
-| `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | see `const.py` | How often the camera list is re-read from the bridge. Cheap — a local read of an in-memory dict, not a TELUS round trip. |
+| `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | see `const.py` | How often the camera list is re-read from the bridge. Cheap: a local read of an in-memory dict, not a TELUS round trip. |
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | see `const.py` | How often clip/event history is re-read, backing the recent-activity sensors and event entities. |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | see `const.py` | How often the automation rules are re-read, backing the rule pause/resume switches. |
 | `TALK_METRICS_POLL_INTERVAL_SECONDS` | see `const.py` | How often the bridge's talkdown counters are re-read, backing the talkdown status and failure sensors. |
-| `STREAM_HEALTH_POLL_INTERVAL_SECONDS` | `30` | How often the bridge's `/control/status` per-camera pipeline diagnostics are re-read, backing the per-camera stream-health sensors and the camera-bridge connectivity entity. Deliberately short where the TELUS-backed polls are cautious, and safely so: the route answers from an in-memory dict the bridge's own camera loops keep current, entirely over loopback — zero Alarm.com requests per cycle. |
+| `STREAM_HEALTH_POLL_INTERVAL_SECONDS` | `30` | How often the bridge's `/control/status` per-camera pipeline diagnostics are re-read, backing the per-camera stream-health sensors and the camera-bridge connectivity entity. Deliberately short where the TELUS-backed polls are cautious, and safely so: the route answers from an in-memory dict the bridge's own camera loops keep current, entirely over loopback: zero Alarm.com requests per cycle. |
 
 Deliberately slow, and the one knob here worth understanding before changing.
-Unlike the camera-list poll — a local read of an in-memory dict on the bridge —
-each cycle is a real round trip to TELUS per camera — two bridge requests, and
+Unlike the camera-list poll (a local read of an in-memory dict on the bridge)
+each cycle is a real round trip to TELUS per camera: two bridge requests, and
 nine upstream reads behind them (four website settings documents, two mobile
 reads for the siren and privacy records, and three diagnostics reads). These values only change when someone edits them in the app or
 the portal, and Alarm.com's rate limits are undocumented and can lock an account
@@ -463,5 +463,5 @@ The siren, privacy, image and video routes have **no interval of their own**:
 they are only ever called from an explicit user action. Nothing in either half of
 the project polls a write route.
 
-The bridge side needs no new configuration for any of this — the routes reuse the
+The bridge side needs no new configuration for any of this: the routes reuse the
 website session and the MWS session it already maintains.

@@ -4,7 +4,7 @@ Unpairs a phone from the alarm panel's Bluetooth disarming, so it can no longer
 disarm the alarm on approach.
 
 **This cannot be undone from Home Assistant.** Re-pairing requires physical
-access to both the phone and the panel — walking to the keypad and running the
+access to both the phone and the panel: walking to the keypad and running the
 pairing flow again. There is no cloud-side undo and nothing this integration can
 call to reverse it.
 
@@ -15,7 +15,7 @@ from that: it takes exactly one device, it refuses anything it is not certain
 about, and it names what it removed in the log while the name is still knowable.
 
 The panel-wide `deleteAll` the vendor's portal also offers is deliberately not
-exposed at any level — one mis-aimed call would unpair every phone in the
+exposed at any level; one mis-aimed call would unpair every phone in the
 household at once.
 """
 from __future__ import annotations

@@ -12,7 +12,7 @@
       "invalid_auth": "Invalid authentication",
       "invalid_otp": "Invalid one-time password.",
       "unknown": "Unexpected error",
-      "telus_sso_error": "The TELUS single sign-on flow returned something unexpected. This usually means TELUS changed something server-side — not a wrong password."
+      "telus_sso_error": "The TELUS single sign-on flow returned something unexpected. This usually means TELUS changed something server-side, not a wrong password."
     },
     "step": {
       "otp_submit": {

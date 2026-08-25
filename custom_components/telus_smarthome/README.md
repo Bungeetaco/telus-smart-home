@@ -1,12 +1,12 @@
 # TELUS Smart Home (custom_components/telus_smarthome)
 
-**This is a permanent, hand-maintained fork — not tracked against the
+**This is a permanent, hand-maintained fork, not tracked against the
 upstream `alarmdotcom` project it started from.** It's installable via HACS
 as a custom repository (see the top-level README's "Installing" section),
 which gives you a convenient install/update mechanism against *this* repo's
 own git tags, but there's no automatic sync with upstream `alarmdotcom` or
 any other package manager. Do not delete/replace this directory expecting
-some other tool to bring it back "clean" — any future changes need to be
+some other tool to bring it back "clean"; any future changes need to be
 made directly to the files here (or in this project's own repo), the same
 way this fork itself was built.
 
@@ -17,33 +17,33 @@ A fork of the community `alarmdotcom` Home Assistant integration
 white-labeled Alarm.com system that uses its own SSO handoff instead of
 Alarm.com's normal login flow. The domain is `telus_smarthome`.
 
-- `telus_auth_patch.py` — monkeypatches `pyalarmdotcomajax` at import time
+- `telus_auth_patch.py`: monkeypatches `pyalarmdotcomajax` at import time
   (imported for its side effect from `__init__.py` and `config_flow.py`) to
   perform the TELUS-specific SSO handoff before falling into the normal
   Alarm.com login/session code. If TELUS ever changes this SSO flow
-  server-side, this is the first place to look — errors from it surface in
+  server-side, this is the first place to look; errors from it surface in
   the config flow as `telus_sso_error` (distinct from `invalid_auth`, which
   means the library got a normal "wrong password" response).
-- `controller.py` — owns the `pyalarmdotcomajax` `AlarmController`, the
+- `controller.py`: owns the `pyalarmdotcomajax` `AlarmController`, the
   `DataUpdateCoordinator`, the websocket keep-alive, and simple auth-health
   tracking (`auth_health` / `auth_health_detail` / `last_auth_success`)
   surfaced via the diagnostic sensor in `sensor.py`.
-- `config_flow.py` — login (`user`), 2FA (`otp_select_method` /
+- `config_flow.py`: login (`user`), 2FA (`otp_select_method` /
   `otp_submit`), reauth (`reauth` / `reauth_confirm`), and **reconfigure**
   (`reconfigure`) flows. The reconfigure flow (Settings → Devices & Services
   → this integration's card → ⋮ → *Reconfigure*) lets you update the TELUS
-  username/password in place — it does **not** delete/recreate the config
+  username/password in place; it does **not** delete/recreate the config
   entry, so all existing entities/devices/automations referencing them are
   preserved (removing and re-adding the integration would regenerate every
   entity ID).
-- `sensor.py` — the "Auth Health" diagnostic sensor (`ok` /
+- `sensor.py`: the "Auth Health" diagnostic sensor (`ok` /
   `reauth_required` / `telus_error`), so auth problems are visible as a
   normal HA entity/history graph instead of only in logs or via the reauth
   notification; plus the Recent Events activity-feed sensor, the talkdown
   status/failure sensors, the bridge-served per-camera diagnostic
   (signal / battery / status) and solar-panel sensors, and the per-camera
   stream-health sensors (stream state / dropped frames / audio state, off
-  the bridge's `/control/status`) — see `docs/ha-integration.md` for the full
+  the bridge's `/control/status`); see `docs/ha-integration.md` for the full
   entity list.
 - `alarm_control_panel.py`, `lock.py`, `binary_sensor.py`, `cover.py`,
   `light.py`, and `climate.py` mirror the upstream integration's entity
@@ -79,7 +79,7 @@ push updated credentials to the bridge's local control endpoint
 (`http://127.0.0.1:8199/control/credentials`, both containers run with
 `--network host` so this is real loopback), authenticated with a shared
 secret read from `/share/telus_cam_bridge/control_secret`. This push is
-**best-effort and non-blocking** — a fallback credentials file is always
+**best-effort and non-blocking**: a fallback credentials file is always
 written to `/share/telus_cam_bridge/credentials.json` first (via
 `hass.async_add_executor_job`, since this is blocking file I/O), which the
 bridge also watches/loads on its own, so a credential update is never lost
@@ -93,6 +93,6 @@ the bridge's own README for the other half of this contract.
 
 - Wrong-password vs. MFA-challenge vs. server-error differentiation is done
   at the exception-type level (`invalid_auth` / `telus_sso_error` /
-  `cannot_connect`), not by inspecting TELUS's actual response bodies —
+  `cannot_connect`), not by inspecting TELUS's actual response bodies;
   doing that safely would require deliberately triggering those responses
   against a live account, which risks rate-limiting/lockout.
