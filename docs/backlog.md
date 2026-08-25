@@ -23,8 +23,6 @@ evidence), **BLOCKED** (needs hardware/access this account does not have),
 Everything not listed here is settled; each entry below carries its own status
 and evidence.
 
-- **E6** (second half) — whether adaptive prebuffer *helps* on a degraded link;
-  needs a talkdown made from outside the house over the `cloud` relay.
 - **E13** — validate the webrtc/srtp fallback path; blocked on hardware this
   account does not have.
 - **E20** — the audio-conditioning chain is tuned for the VDB750's speaker;
@@ -39,6 +37,9 @@ and evidence.
 - **E54** (follow-up) — audio consumption works and MediaMTX accepts it, but no
   real camera has been through it end to end, and the frame-silence watchdog is
   video-only, so audio can die while a camera still reports `streaming`.
+- **E62** (BLOCKING) — audio consumption took the doorbell off the air after
+  ~14 minutes and the bridge still reported `streaming`; both audio knobs are
+  off. Blocked on E60.
 - **E60** (open) — `dropped ... consumer falling behind` runs at ~300 frames
   per session (~12%) on the doorbell. Whether the CFR-25 re-rate E58 fixed was
   the cause is unproven; re-measure now that it publishes at its real rate.
@@ -46,8 +47,6 @@ and evidence.
   µ-law on the Opus payload type. Why the gateway emits it is unverified.
 - **E61** — silent audio is invisible from Home Assistant; the fields that
   expose it live only on `/control/status`.
-- **E55** — the device-direct listen path's format is unrecorded; one
-  read-only capture would settle whether it is viable at all.
 - **E56** — the doorbell button press is not a first-class event, which blocks
   every ring-triggered automation.
 - **E57** (watch-only) — `pyalarmdotcomajax` maintenance is paused upstream.
@@ -196,7 +195,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   `TALK_STREAMING_ENCODE` (default true) selects it; both modes run the same
   loop and both are tested for byte- and chunk-identity.
 
-- **E6 (measurement DONE; tuning open) Adaptive prebuffer.**
+- **E6 (CLOSED — accepted as insurance; benefit unmeasured) Adaptive prebuffer.**
   Every talk reports `put_rtt_p50/p95/max/stdev_ms`, `late_chunks`,
   `max_late_ms` and `prebuffer_ms` **in the talk result**. They are deliberately
   not aggregated into `/control/metrics`, which counts outcomes rather than
@@ -1317,6 +1316,42 @@ when it ships.
   per audio-consuming camera would close that gap; it is small, and the value is
   precisely that nobody had to notice eleven silent sessions by hand.
 
+- **E62 (open, BLOCKING audio consumption) Audio consumption took the doorbell
+  off the air, and the bridge reported `streaming` throughout.** Enabled on the
+  doorbell it ran correctly for about fourteen minutes — real decoded audio,
+  measured — and then collapsed. The sequence, from the container log:
+
+  ```
+  22:11:24  ffmpeg publishing 960x960@15fps ... audio aac mono from 48000Hz/2ch/s16
+  22:12:54  ffmpeg: More than 1000 frames duplicated
+  22:25:57  ffmpeg has stopped reading the audio pipe (636928 bytes queued); restarting the encoder
+  22:25:58  ffmpeg: More than 10000 frames duplicated   +  a second pipe stall
+  23:14-17  dropped 600 ... 2550 frame(s) -- consumer falling behind (queue maxsize=4)
+  23:17:06  session marked dead: track ended: MediaStreamError()
+  thereafter  MediaMTX: "no stream is available on path telus_...-2048"
+  ```
+
+  **The `-framerate` fix (E58) did not eliminate the pipe stall — it delayed
+  it.** The underlying condition is E60: the per-frame pixel copy cannot keep up
+  at 1440x1440, so `janus_client` drops frames before they reach ffmpeg, ffmpeg
+  starves and pads to CFR (10,000+ duplicated frames), and the audio timeline —
+  which really is wallclock — outruns the starved video until the interleaver
+  stops accepting audio. The encoder restarts that follow eventually left the
+  camera with **no publisher at all**.
+
+  **The worst part is the reporting.** Throughout the outage `/control/status`
+  said `state: streaming`, `consecutive_failures: 0`, with a fresh
+  `last_frame_at` — while MediaMTX had no path and every reader was being
+  refused. The frame-silence watchdog watches frames arriving from Janus, not
+  whether the publisher still exists, so a dead publisher is invisible. That is
+  its own defect and arguably the more dangerous one: **the bridge cannot
+  currently tell "publishing" from "publishing to nowhere."**
+
+  So: **audio consumption stays off until E60 is fixed**, and both knobs are
+  back to `false` on the live deployment. Fixing the ordering does not help —
+  the fix is to stop starving the video path. Add a publisher-liveness check
+  that actually asks whether the RTSP path exists, rather than inferring it.
+
 - **E60 (open) The doorbell drops ~12% of its frames to "consumer falling
   behind".** `dropped ... frame(s) -- consumer falling behind` climbs to roughly
   300 per session on the doorbell, every rotation. It was noticed while
@@ -1334,3 +1369,54 @@ when it ships.
   drops; at 1440x1440 that is roughly 6 MB of copying per second before the
   encoder sees anything. Worth measuring where the time actually goes before
   changing anything.
+
+## Entries restored after an editing slip
+
+These three lost their bodies to a bad splice while E54 was being closed, and
+the loss went unnoticed across several commits — only their one-line summaries
+survived. Restored here with their current status rather than as they were.
+
+- **E55 (CLOSED — not worth pursuing) Device-direct listen audio.** Superseded:
+  downstream audio comes over the website/Janus path (E53/E54), so a second
+  source buys nothing operational.
+
+  One correction worth keeping, because the opposite is the natural assumption.
+  The doorbell **does** expose a device-direct HTTP API on the LAN, and talkdown
+  uses it on every call: the `<cli>` element's `duae`/`luae` are
+  `https://<doorbell-ip>:41925/api/PutAudioStream`, and the bridge PUTs audio
+  straight there whenever it shares the LAN with the device — that traffic never
+  traverses alarm.com. What was never characterised is the *downstream* half.
+  `GET /api/GetStream?streamID=0` on the same port returns something, but its
+  container, and whether it carries audio at all, are unrecorded — and the URLs
+  are published with an `rtsp://` scheme the device does not serve (it answers
+  RTSP with an HTTP 400 from lighttpd). Reopen only if the Janus path is
+  abandoned.
+
+- **E56 (DONE) The doorbell button press is a first-class event.** A press
+  carries `event_type_name="DoorbellButtonPress"` — a stable server-side enum —
+  alongside `description="Button Push"`. Each doorbell gets an event entity with
+  HA's `doorbell` device class, matching **the enum, never the description**:
+  this account's activity feed renders text in the account's language and has
+  produced both French and English for the same event kinds, so a text match is
+  an automation that silently stops working with no error anywhere. Cameras are
+  selected by chime support; dedup is the current page's id set (not a
+  high-water mark — activity ids are opaque and one press yields
+  timestamp-siblings); a restart cannot re-fire an old press; and it
+  deliberately does not fire again when the clip is attached a poll later.
+
+- **E57 (open, watch-only) `pyalarmdotcomajax` maintenance is paused.** The
+  upstream maintainer has moved and no longer has an Alarm.com system to test
+  against, on an indefinite timeline. The repository is not archived, and its
+  last functional commit predates the notice by over a year — so the library has
+  been dormant for as long as this project has been active, and the notice
+  formalises the status quo.
+
+  No action is required, and pinning is why: `manifest.json` pins an exact
+  version, Renovate never auto-merges it, and CI imports all three monkeypatches
+  and asserts the private instance attributes the replaced `async_login` depends
+  on. Triggers that should reopen this: the pinned version failing on a Python
+  version the runtime moves to, a security advisory, or wanting to change code
+  currently reached by monkeypatch. **Vendoring, not forking, is the likely
+  answer** when one fires — three internals are already monkeypatched precisely
+  because they cannot be changed in place, and vendoring would turn those into
+  ordinary edits and delete the guard machinery with them.
