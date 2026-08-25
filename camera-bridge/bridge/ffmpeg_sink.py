@@ -796,6 +796,18 @@ class FfmpegSink:
         except (BrokenPipeError, ConnectionResetError):
             return False
 
+    def drop_audio(self, reason: str):
+        """Give up on this sink's audio input from OUTSIDE the sink.
+
+        The same one-way degradation the write paths below apply to a pipe that
+        has gone bad, exposed for the one caller that can know something the
+        sink cannot: camera_session gives up on a camera whose decoded audio
+        shape keeps moving (see config.AUDIO_FORMAT_REBUILD_LIMIT), because the
+        alternative is a publisher rebuild -- and every RTSP reader kicked --
+        each time it moves. Idempotent, and it never touches the video half.
+        """
+        self._drop_audio(reason)
+
     def _drop_audio(self, reason: str):
         """Give up on this sink's audio input and keep publishing video.
 
@@ -866,6 +878,14 @@ class FfmpegSink:
         video publish untouched. A one-off malformed frame is neither: it is
         skipped, its span filled with silence, and the call reports True.
 
+        The format check is a BACKSTOP rather than the primary path: the caller
+        compares each decoded frame's shape against `audio_format` before
+        offering it here, so that it can log once per session rather than once
+        per frame and can keep the audio timeline advancing with silence while
+        the rebuild waits for a rotation (camera_session, E81). "Needs a
+        rebuild" never means "fail the session"; the caller applies it at its
+        next rotation, where the frame hold bridges the gap.
+
         The format check is the exact audio analogue of write_frame's frame-size
         check, and exists for the identical reason: ffmpeg was told the input's
         sample format, rate and channel count once, on the command line, and reads
@@ -880,7 +900,8 @@ class FfmpegSink:
         fmt = audio_format_of(frame)
         if fmt != self.audio_format:
             log.warning("%s: audio format changed mid-session (%s -> %s); "
-                        "restarting the encoder rather than corrupting the stream",
+                        "refusing the frame rather than corrupting the stream, "
+                        "and leaving the rebuild to the caller's next rotation",
                         self.camera_id, self.audio_format, fmt)
             return False
         loop = asyncio.get_running_loop()

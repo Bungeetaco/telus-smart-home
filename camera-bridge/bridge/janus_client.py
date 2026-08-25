@@ -629,8 +629,10 @@ class JanusCameraSession:
                 return
             if self._audio_format is None:
                 # Recorded on arrival so camera_session can size the ffmpeg audio
-                # input from a REAL frame rather than an assumption, without having
-                # to consume one to find out (see config.AUDIO_DEFAULT_FORMAT).
+                # input from a REAL frame rather than an assumption, without
+                # having to consume one to find out. It is the only shape that
+                # input is ever built from: a camera with nothing decoded yet
+                # gets a video-only publisher rather than a guessed one.
                 try:
                     self._audio_format = audio_format_of(frame)
                 except Exception:

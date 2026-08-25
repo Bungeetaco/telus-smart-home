@@ -1374,6 +1374,14 @@ surface it: read `audio_codec` and the process-wide `audio_decoder` counters on
 [`/control/status`](control-api.md#get-controlstatus), or watch
 `decoded_audio_frames` move by ~1500 across a 30 s poll rather than by tens.
 
+Nor whether the audio is on the **published stream** yet. `decoded_audio_frames`
+counts what the bridge decodes, and a publisher that came up video-only (which
+is what a camera gets until one of its audio frames has actually been decoded)
+gains its audio input at the next session rotation, so for up to one rotation
+this sensor reads `flowing` while the RTSP stream still carries no audio track.
+The bridge's `publisher_audio_format` is the field that distinguishes them; the
+integration does not surface it (backlog E82).
+
 Reading the state honestly: `stalled` reflects **one poll window** (30 s).
 Session rotation and a reconnect can each span one, so trigger on the state
 *persisting*, not on the first sample:

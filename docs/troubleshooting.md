@@ -28,6 +28,7 @@ the component READMEs.
 - [Hardware encode falls back to software (or fails to start)](#hardware-encode-falls-back-to-software-or-fails-to-start)
 - [A camera's stream carries no audio, or the audio stops](#a-cameras-stream-carries-no-audio-or-the-audio-stops)
 - [Audio plays in fragments that jump around](#audio-plays-in-fragments-that-jump-around)
+- [A camera publishes video but never gains an audio track](#a-camera-publishes-video-but-never-gains-an-audio-track)
 - [Talkdown returns 403 / 409 / 422](#talkdown-returns-403--409--422)
 - [Talkdown audio sounds bad on the doorbell speaker](#talkdown-audio-sounds-bad-on-the-doorbell-speaker)
 - [Talkdown logs a certificate fingerprint mismatch](#talkdown-logs-a-certificate-fingerprint-mismatch)
@@ -677,11 +678,14 @@ If `audio_consumed` is `true` and there is still no sound:
   with `decoded_audio_frames` pinned at `0`. See
   [camera-bridge.md](camera-bridge.md#the-audio-track-is-decoded-as-the-codec-that-arrives-not-the-one-advertised).
 - **The camera may not be sending any.** The gateway offers the track whether or
-  not the camera fills it. The stream still carries an audio track (the bridge
-  keeps it alive with silence) so a silent track is not a broken one. This is
-  the case `decoded_audio_frames` separates from the one above: a camera that
-  sends nothing and a decoder that died both publish silence, and before that
-  counter existed nothing in the status could tell them apart.
+  not the camera fills it. A camera that has never decoded a frame is published
+  **video-only**, with no audio track at all: the publisher's audio input is
+  built from an observed frame or not at all, so there is nothing to keep alive
+  with silence and nothing to be wrong about (see
+  [A camera publishes video but never gains an audio track](#a-camera-publishes-video-but-never-gains-an-audio-track)).
+  `decoded_audio_frames` is what separates this from the decoder-death case
+  above: both leave the camera without sound, and before that counter existed
+  nothing in the status could tell them apart.
 - **The consumer may not accept the codec.** The bridge publishes mono **AAC**
   specifically because HA's HLS worker takes only aac/mp3 and Frigate's `-c copy`
   preset needs an mp4-legal codec. A consumer configured to expect something else
@@ -720,9 +724,17 @@ show itself, and it is throttled, so read the running total from
 publisher keeps publishing video; the line ends `publishing VIDEO ONLY from this
 encoder`, and `/control/status` then carries `audio_dropped: true` with the
 reason) and
-`audio format changed mid-session` (the decoded PCM shape changed, so the
-encoder is relaunched with the real one; expected at most once, on the first
-session that ever carries audio).
+`the publisher's audio input is now <shape>, was <shape>` (the publisher was
+rebuilt at a rotation to read the shape the frames really carry; expected at
+most `AUDIO_FORMAT_REBUILD_LIMIT` times per camera per process, and normally
+exactly once, when a video-only publisher first gains audio). Its two
+neighbours are `the publisher's audio input was launched for ... and the decoded
+frames now carry ...` (said once per session while a rebuild is owed: the
+mismatched frames are being skipped and their span filled with silence, so the
+video is unaffected) and `the decoded audio shape keeps changing ... publishing
+VIDEO ONLY for the rest of this process` (the bound was reached and the audio
+input was given up on; `/control/status` then carries `audio_dropped: true` with
+that reason).
 
 **If `ffmpeg has stopped reading the audio pipe` appears at all**, the two
 inputs' timelines have come apart: the audio timeline is real time, so if the
@@ -843,6 +855,72 @@ actually reads the stream, and it logs the decision once
 the commit line, which carries the counts it decided on and the first packet
 libopus rejected, and see
 [camera-bridge.md](camera-bridge.md#the-audio-track-is-decoded-as-the-codec-that-arrives-not-the-one-advertised).
+
+---
+
+## A camera publishes video but never gains an audio track
+
+**Symptom.** A camera named by both audio knobs publishes video normally, but
+`/control/status` shows `publisher_audio_format: null` and the RTSP stream
+carries no audio track. Or: the audio track appears, but only after a couple of
+minutes of streaming, and readers are disconnected once when it does.
+
+**This is the design, and the second half of it is convergence, not a fault.**
+The publisher's audio input is built from a shape the bridge has actually
+**observed** in a decoded frame, and from nothing else. Until there is one the
+publisher is video-only. The decoder needs 20 audio packets to work out which
+codec is really arriving (the track is advertised as Opus and carries G.711
+mu-law), which is 1.28 s of continuous audio at the packetisation these cameras
+use, and a quiet room does not send that inside the ~670 ms window in which the
+publisher is sized. So on a sparse-audio camera the first session publishes
+video only, real frames arrive later in that session, and the publisher is
+rebuilt **once, at the next session rotation** to carry them.
+
+What that looks like in the log, in order:
+
+```
+<id>: ffmpeg publishing 960x960@15fps ... (hw/vaapi, video only)
+<id>: proactive session rotation
+<id>: the publisher's audio input is now ('s16', 8000, 1), was absent -- audio-format rebuild 1 of the 1 this camera may spend in one process
+<id>: ffmpeg publishing 960x960@15fps ... (hw/vaapi, audio aac mono from 8000Hz/1ch/s16)
+```
+
+and in `/control/status`, in the same order: `audio_format: null` →
+`audio_format: "8000Hz/1ch/s16"` with `publisher_audio_format` still `null` (the
+camera has been heard, the publisher has not been rebuilt yet) →
+both set, with `audio_format_rebuilds: 1`. The one reader interruption is the
+rebuild; there is no second one.
+
+**A camera that never sends a single audio packet stays video-only forever**, and
+that is correct rather than stuck: no frame decoded means no shape, no shape
+means no audio input, and nothing fails. `audio_dropped` stays `false`, because
+nothing was dropped. Check `decoded_audio_frames`: `0` and not moving is a
+camera sending nothing (or a dead decoder thread; see
+[A camera's stream carries no audio](#a-cameras-stream-carries-no-audio-or-the-audio-stops)).
+
+**What failure looks like.** Two shapes, both visible in the log:
+
+- **`the decoded audio shape keeps changing ... publishing VIDEO ONLY for the
+  rest of this process`.** The bound (`AUDIO_FORMAT_REBUILD_LIMIT`) was reached:
+  the shape moved again after the one rebuild it is allowed, so the audio input
+  was given up on rather than rebuilding the publisher (and kicking every RTSP
+  reader) once per rotation. `/control/status` carries `audio_dropped: true`
+  with that reason and `audio_format_rebuilds` at the limit. A shape that moves
+  between sessions means the codec sniff is deciding differently on different
+  sessions; the `audio decoder <tag>: committing this session to` lines carry
+  the counts each decision was made on, and the
+  `audio_decoder` block's `discarded` says whether either decoder is really
+  reading the stream.
+- **`audio-format rebuild N of the 1`, more than once per camera per process.**
+  It cannot exceed the limit, so this means the process has restarted, and the
+  reason is elsewhere (the container restart-loop and consecutive-failure
+  sections above).
+
+**What it must NOT look like**, and what to grep for if audio ever goes wrong
+again here: a camera failing session after session with `camera session failed`
+while never publishing. Failing a session to repair audio is what this design
+removes, because the codec sniff is per session, so a restart destroys the
+evidence the repair is waiting on and the camera never converges.
 
 ---
 

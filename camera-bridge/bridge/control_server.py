@@ -51,6 +51,8 @@ Contract (as implemented -- this is what callers must match):
                                                  "audio_consumed": <bool>,
                                                  "audio_format": <str or null>,
                                                  "audio_codec": <str or null>,
+                                                 "publisher_audio_format": <str or null>,
+                                                 "audio_format_rebuilds": <int>,
                                                  "decoded_audio_frames": <int>,
                                                  "dropped_audio_frames": <int>,
                                                  "audio_dropped": <bool>,
@@ -91,10 +93,17 @@ Contract (as implemented -- this is what callers must match):
       the bridge logged why once). "audio_format" is the raw PCM shape of a
       frame this camera has actually DECODED, as
       "<rate>Hz/<channels>ch/<sample format>", and null until one has been --
-      it is an OBSERVATION, never the shape ffmpeg was launched with (that is
-      config.AUDIO_DEFAULT_FORMAT until a frame arrives, and reporting it made
-      this field read "48000Hz/2ch/s16" for eleven consecutive sessions that
-      published pure silence). "audio_codec" names the decoder those frames
+      it is an OBSERVATION, never the shape ffmpeg was launched with (reporting
+      the launched shape as an observation made this field read
+      "48000Hz/2ch/s16" for eleven consecutive sessions that published pure
+      silence). "publisher_audio_format" is the other half of that pair: the
+      shape the RUNNING publisher's audio input reads, or null while the
+      publisher is video-only -- which it is until a real frame has been
+      decoded, because the input is never sized from a guess. The two differing
+      means a publisher rebuild is owed at the next rotation;
+      "audio_format_rebuilds" counts the ones already spent, out of the
+      config.AUDIO_FORMAT_REBUILD_LIMIT a camera gets per process before its
+      audio is given up on (audio_dropped). "audio_codec" names the decoder those frames
       actually came from -- "pcmu" (G.711 mu-law at 8 kHz, what this account's
       cameras really send) or "opus" (what the Janus offer ADVERTISES) -- and
       is null until a frame has been decoded. It is derived from the frame

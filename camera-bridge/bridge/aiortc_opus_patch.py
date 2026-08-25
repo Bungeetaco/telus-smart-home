@@ -140,12 +140,17 @@ PCMU = "pcmu"
 #     reading of the packet rate that is under a fifth of the stream. Needing
 #     OPUS_CONFIDENCE of the sample to commit to Opus therefore leaves several
 #     standard deviations of margin in both directions.
-#   * SMALL ENOUGH that the whole window lands inside the first video batch.
+#   * SMALL ENOUGH to be worth landing inside the first video batch.
 #     camera_session collects ten video frames (~670 ms at 15fps) before it
-#     peeks at `session.audio_format` to size the ffmpeg audio input; a decision
-#     made at 400 ms means that peek sees a REAL frame in the real format
-#     instead of falling back to config.AUDIO_DEFAULT_FORMAT and rebuilding the
-#     publisher when the first true frame arrives.
+#     peeks at `session.audio_format` to size the ffmpeg audio input, so a
+#     decision made at 400 ms gets this camera's audio published from its very
+#     first session. It is no longer a CORRECTNESS constraint, and it must not
+#     be treated as one: a peek that sees nothing now yields a video-only
+#     publisher that gains audio at a later rotation, so the cost of missing the
+#     window is latency, not a mis-sized publisher (E81). Sparse audio can miss
+#     it by a long way -- 20 packets is 1.28 s of CONTINUOUS audio at the 64 ms
+#     packetisation this account's cameras appear to use, and a quiet room does
+#     not send that.
 #
 # It is also bounded by the consumer: the buffered frames are handed over in one
 # batch at the commit, and janus_client's decoded-audio queue holds
