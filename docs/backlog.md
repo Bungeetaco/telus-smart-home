@@ -39,10 +39,10 @@ and evidence. Grouped by whether anything can actually be done about them.
   sink on a material change the way a frame-size change already does.
 - **E65** (open, minor) — the MediaMTX publish password is passed on ffmpeg's
   argv, so it shows in `docker top`. Loopback-scoped, but avoidable.
-- **E63** (open) — the integration has no test harness at all, so logic like
-  E61's audio-state derivation can only be pinned by throwaway scripts. A
-  minimal suite stubbing `homeassistant.helpers.update_coordinator` would let
-  it run in CI the way the bridge's suites do.
+- **E66** (open) — the integration now has a test harness (E63), but it covers
+  two modules. The config flow, the three services, the settings-backed
+  platforms and every setup/teardown path are still verified by reading and
+  `py_compile` alone.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -1062,9 +1062,10 @@ when it ships.
   service always sends a well-formed body, so a 400 on this route can only be
   a fetch/decode failure). The 409/403/422 mappings are unchanged. Wordings
   were checked against `control_server.py`'s actual response bodies and
-  `control-api.md`. Verified by `py_compile` and code reading only — the
-  integration has no test suite and this was not run in a live HA instance;
-  live confirmation needs a real rate limit or an oversized clip.
+  `control-api.md`. Verified by `py_compile` and code reading only —
+  `speak_service.py` is outside what the integration's test suites cover (E63,
+  E66), and this was not run in a live HA instance; live confirmation needs a
+  real rate limit or an oversized clip.
 
 - **E51 (DONE — all parts)
   Observability additions that lost the batch-size contest.** The metrics half
@@ -1575,22 +1576,59 @@ survived. Restored here with their current status rather than as they were.
   because they cannot be changed in place, and vendoring would turn those into
   ordinary edits and delete the guard machinery with them.
 
-- **E63 (open) The integration has no test harness.** The bridge has thirteen
-  suites run by CI on every PR; `custom_components/` has none, so the ceiling
-  for integration work is `py_compile` plus careful reading. That has already
-  cost something concrete: E61's audio-state derivation — which has real edge
-  cases (first poll, counter reset on a bridge restart, an unanswered poll, a
-  camera dropped from the payload) — could only be checked by pulling the
-  function out with `ast` and exec'ing it against a stand-in coordinator in a
-  throwaway script. The logic is right today and nothing pins it tomorrow.
+- **E63 (DONE) The integration has a test harness.** `tests/` at the repository
+  root holds two suites, run by a dedicated `integration-tests` CI job on every
+  PR under the same conventions as the bridge's: plain scripts ending in
+  `RESULT: PASS` / `RESULT: FAIL (n)`, no network, no account, no hardware, and
+  a new `test_*.py` picked up by the glob with no list to update. The job
+  installs **aiohttp and nothing else**.
 
-  Home Assistant itself is not importable here, which is the reason it has
-  never been done. But most of the logic worth pinning does not need HA: a
-  minimal harness stubbing just `homeassistant.helpers.update_coordinator` (and
-  whatever else a given module touches) would let derivations, dedup rules and
-  status parsing run in CI on the same terms as the bridge's suites — plain
-  scripts ending in `RESULT: PASS`, picked up by the existing glob if placed
-  where CI looks, or by widening that glob.
+  **Home Assistant is stubbed, not installed.** `tests/ha_stubs.py` registers a
+  small `homeassistant.*` package tree in `sys.modules` before the integration
+  is imported, so the REAL integration modules load and the REAL derivations run
+  against stand-in base classes. Installing Home Assistant was evaluated
+  properly rather than assumed impossible: it *does* resolve on the interpreter
+  CI pins, but pulls in the order of a hundred transitive packages (grpcio,
+  boto3, pillow, cryptography, bleak/dbus-fast, zeroconf, SQLAlchemy, and PyRIC,
+  which has no wheel and builds from source) to supply a handful of base
+  classes — and exercising entity behaviour for real on top of it needs
+  `pytest-homeassistant-custom-component`, which pins one exact Home Assistant
+  version and would put this repo on a version-lock treadmill, with a second
+  test framework alongside the bridge's plain scripts. The logic worth pinning
+  is pure and needs none of it. `pyalarmdotcomajax` is stubbed for the three
+  attributes `const.py` reads; `controller.py` is stubbed wholesale, because
+  importing it applies the websocket monkeypatch and needs the real library —
+  work the existing `check_patch.py` CI job already does.
+
+  **Covered.** `test_stream_health_sensors.py` pins E61's audio-state
+  derivation, including all four cases that must never fabricate a `stalled` —
+  an unanswered poll (both guards: the `last_poll_ok` flag and the identical
+  payload object the coordinator hands back), a failed poll, a counter reset on
+  a bridge restart, and the first poll of an entity's life — plus the per-poll
+  delta, the `not_consuming` reset of the remembered count, the unknown state
+  for a bridge too old to report `audio_consumed`, ENUM-options containment, the
+  stream-state and dropped-frames mappings, and the coordinator's two failure
+  flags. `test_event_entities.py` pins the doorbell matcher on the untranslated
+  `event_type_name` enum (a French-described press fires; a "Button Push"
+  *description* with a different enum does not), the per-page id-set dedup
+  (restart safety, timestamp siblings, oldest-first firing with one state write
+  per press, an empty page neither becoming nor clearing the baseline),
+  `_classify` across both locales, `_event_time` ordering across TELUS's two
+  timestamp formats, `_is_doorbell`, and `TelusActivityEvent`'s single extra
+  fire when a clip attaches late.
+
+  **Every invariant was proven falsifiable.** 39 deliberate source mutations
+  were applied one at a time, the suite run, and the mutation reverted: 38 were
+  caught. The one survivor is a *finding about the source, not a hole in the
+  test* — dropping `_classify`'s French `"personne"` needle changes nothing,
+  because `"personne"` contains `"person"` and the English needle already
+  matches it. The French **vehicle** needles are genuinely load-bearing
+  (`"véhicule"` shares no substring with `"vehicle"`) and their removal is
+  caught. That asymmetry is now recorded in the test's own docstring so it is
+  not re-derived.
+
+  **Not covered — see E66**, which carries the list rather than leaving it
+  implied.
 
 - **E64 (open) The measured fps is unstable across restarts, and `-framerate`
   bakes it in.** The same indoor camera has been observed locking
@@ -1634,3 +1672,38 @@ survived. Restored here with their current status rather than as they were.
   exposure is small — but a credential on an argv is avoidable: ffmpeg accepts
   the same values through the environment or a config file. Log lines already
   redact it (`_redact_url`); this is the one place it stays in the clear.
+
+- **E66 (open) The integration test harness covers two modules; the rest of the
+  integration is still unpinned.** E63 built the harness and used it on the two
+  places where a silent regression was already known to be expensive. It
+  deliberately stopped there rather than chasing coverage, so this entry records
+  what is NOT covered instead of leaving it implied:
+
+  - `config_flow.py` — the config/reconfigure/reauth flows, including the OTP
+    branch. Pure-ish and testable with the same stub tree; the payoff is that a
+    broken flow is discovered at setup time by a user, not by CI.
+  - `speak_service.py`, `bypass_service.py`, `unpair_service.py` — the service
+    handlers. Their schemas and their error mapping (E51's 413/504/400 wording,
+    for one) are exactly the kind of thing that reads correct and is not.
+  - `switch.py`, `select.py`, `number.py`, `button.py` — the settings-backed
+    platforms. `camera_settings_coordinator.py`'s wire shape *is* covered on the
+    bridge side (`test_camera_settings.py`); what is unpinned here is the HA-side
+    capability gating and option-list handling.
+  - `binary_sensor.py` — including the bridge-connectivity entity that shares
+    `StreamHealthCoordinator` with the covered sensors.
+  - `clip_view.py` — only the link **minting** is exercised (through the doorbell
+    event's `clip_link` attribute). Signature verification, expiry handling and
+    the redirect view's request handling are not.
+  - `arming_devices_coordinator.py` — again, covered bridge-side
+    (`test_arming_devices.py`), not HA-side.
+  - `__init__.py` — every setup, unload and reload path.
+
+  There is also a **structural** gap that no amount of new suites in this shape
+  closes, and it should not be papered over: the stubs assert nothing about Home
+  Assistant's real API, so a breaking upstream change to `CoordinatorEntity` or
+  `EventEntity` leaves every suite green. Closing that means installing Home
+  Assistant, which E63 rejected on cost — the realistic middle ground, if it ever
+  matters, is a separate, occasional CI job that installs Home Assistant and only
+  *imports* the integration's platform modules against the real base classes,
+  the way `bridge-import-smoke` does for the bridge. Not done, and not obviously
+  worth it yet.
