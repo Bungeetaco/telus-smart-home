@@ -27,16 +27,20 @@ dies, so ~8,000 frames per session were queued to nobody; and this bridge's
 end-of-stream `None` sentinel only the dead worker can produce (4 leaked
 `Task was destroyed but it is pending` tasks confirmed).
 
-The failing bytes are NOT ordinary Opus. libopus accepts every TOC code-0
-packet -- the shape of every normal 20 ms WebRTC Opus packet -- 0 of 500
-rejected in a calibration sweep. The inputs that DO reproduce the exact error
-are Ogg identification headers (`OpusHead` / `OpusTags`, TOC byte 0x4f = code 3)
-and H.264 NAL bytes (0x67 / 0x65): something that is not an Opus payload,
-arriving on the Opus payload type. The leading hypothesis is a stream-start
-identification header, and it is **UNVERIFIED** -- which is precisely why the
-wrapper logs `len` and the first 16 bytes. One line per session identifies the
-packet for good; a per-packet line on a 50 packets/s stream would be its own
-outage.
+The failing bytes are NOT ordinary Opus -- libopus accepts every TOC code-0
+packet (the shape of every normal 20 ms WebRTC Opus packet; 0 of 500 rejected
+in a calibration sweep). Identified from this wrapper's own log line, once per
+session, consistently: **G.711 mu-law audio arriving on the Opus payload
+type** -- 512 bytes clustered on 0x7c-0x7f/0xfc-0xff, which is mu-law near
+silence. Not either of the shapes originally suspected (Ogg
+`OpusHead`/`OpusTags` identification headers, or H.264 NAL bytes); those
+merely reproduce the same error class. WHY the gateway emits it is still
+unverified -- the doorbell's own upstream audio is mu-law, so the most
+plausible reading is a device-native frame or two forwarded before the
+relay's Opus transcode is running -- which is why the wrapper keeps logging
+`len` and the first 16 bytes. One line per session; a per-packet line on a
+50 packets/s stream would be its own outage. The full identification is in
+docs/camera-bridge.md.
 
 Neither aiortc 1.15.0 (the pin) nor upstream `main` fixes this: their
 `OpusDecoder.decode` is byte-identical, and `decoder_worker` is unchanged. The
@@ -129,9 +133,9 @@ def _decode_dropping_undecodable_packets(self, encoded_frame):
 
     Logged at most ONCE per decoder instance, which is once per session: aiortc
     builds a fresh OpusDecoder per RTP receiver, and this stream carries ~50
-    packets a second. The length and the first 16 bytes go in the line because
-    what these packets actually are is still unverified, and one live line is
-    enough to settle it.
+    packets a second. The length and the first 16 bytes stay in the line: they
+    are what identified the packet as G.711 mu-law (see the module docstring),
+    and they are what would show a DIFFERENT undecodable shape turning up.
     """
     try:
         return _orig_decode(self, encoded_frame)

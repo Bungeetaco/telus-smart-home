@@ -60,7 +60,8 @@ AUDIO_TIMEOUT = _AudioTimeout()
 #
 # ~500 ms is chosen against what a stall actually costs here: the audio-pacing
 # defect this queue could not absorb stalled the video pipe for 165-330 ms at a
-# time (see config.AUDIO_SILENCE_TOPUP_S), and a session rotation's own hiccup is
+# time (~0.33-0.66x of each 500 ms top-up; the mechanism and the measured table
+# are on config.AUDIO_SILENCE_TOPUP_S), and a session rotation's own hiccup is
 # shorter than that.
 #
 # THE FLOOR AND THE CEILING ARE MEMORY. A decoded 1440x1440 yuv420p frame is

@@ -2933,7 +2933,7 @@ async def test_a_quiet_camera_is_topped_up_under_the_lead_and_never_in_bursts():
     assert biggest <= lead_s * rate * 1.05, (
         f"a single audio write handed ffmpeg {biggest / rate:.2f}s of PCM, past "
         f"the {lead_s:.2f}s the pipe leads the video by -- one video stall of "
-        f"~0.35-0.75x that follows every such write")
+        f"~0.33-0.66x that follows every such write")
     assert max(spacings) < lead_s, (
         f"the longest gap between audio writes was {max(spacings):.3f}s against a "
         f"{lead_s:.3f}s lead -- the audio input runs dry before the next write "

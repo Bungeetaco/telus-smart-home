@@ -1294,8 +1294,10 @@ exits. The vocabulary is owned by a separately-deployed bridge, so a state this
 build does not know degrades to **unknown** rather than erroring on every
 update, with the verbatim value still readable in the `raw_state` attribute.
 The supporting numbers ride along as attributes rather than more entities:
-`fps` and `hardware_encode` (pinned encoder properties the bridge learns once
-per camera, not live measurements worth a recorder series),
+`fps` and `hardware_encode` (encoder properties that only ever change on a
+publisher rebuild — `fps` is the rate the publisher is currently *declared*
+with, which the bridge keeps under review while the stream runs but applies
+stepwise — not live measurements worth a recorder series),
 `consecutive_failures`, `last_error`, `last_frame_at`, and `raw_state`.
 
 **Dropped frames** counts frames discarded because the consumer fell behind the
@@ -1345,11 +1347,12 @@ Deliberately attributes rather than a fifth enum state: `stalled` is what an
 automation should act on either way, and splitting it would break any automation
 already keyed on it.
 
-**Every camera gets an Audio state entity, consuming or not.** Audio
-consumption is currently disabled on the live deployment, so today every camera
-reads `not_consuming` — a real answer ("audio is switched off for this camera"),
-which is what someone asking "why is there no sound?" needs, and it becomes
-`flowing` with no Home Assistant restart when the knobs are turned back on. The
+**Every camera gets an Audio state entity, consuming or not.** A camera whose
+audio the bridge is not configured to consume (the per-camera
+`JANUS_CONSUME_AUDIO` knob, off by default) reads `not_consuming` — a real
+answer ("audio is switched off for this camera"), which is what someone asking
+"why is there no sound?" needs, and it becomes `flowing` with no Home Assistant
+restart when the knobs are turned on for that camera. The
 conditional creation the per-camera diagnostics and solar-panel sensors use does
 not apply: entity creation is sticky, so an entity that appears and vanishes
 with a bridge env var breaks any automation naming it, and a camera with no

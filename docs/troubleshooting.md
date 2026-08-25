@@ -379,7 +379,7 @@ arrives. The frames that pile up behind it are dropped by the ingest queue, a
 layer away from anything audio-shaped.
 
 Measured in the deployed container at 15 fps, 900 frames per 60 s run: a 0.5 s
-top-up cadence stalled 120 frames (13%), a 0.1 s cadence stalled 162, and 0.05 s
+top-up cadence stalled 120 of 900 frames (13.3%), a 0.1 s cadence stalled 162, and 0.05 s
 stalled none. Two hypotheses that look obvious here are **disproven**: the
 per-frame pixel copy costs 0.24 ms of a 66.7 ms frame interval, and pre-scaling
 the source changes the stall count by exactly zero.
@@ -630,8 +630,11 @@ If `audio_consumed` is `true` and there is still no sound:
 Three log lines worth grepping:
 `OpusDecoder: dropped an undecodable packet and kept the audio decoder alive`
 (the patched decoder throwing away a packet libopus rejected — expected at most
-once per session, and the line carries the packet's length and first 16 bytes,
-which is how the still-unidentified offending packet gets identified),
+once per session. The packet is identified: G.711 µ-law arriving on the Opus
+payload type, at stream start — see
+[camera-bridge.md](camera-bridge.md#downstream-listen-audio); the line keeps
+carrying the length and first 16 bytes so a *different* undecodable shape
+would show itself),
 `ffmpeg has stopped reading the audio pipe`
 (ffmpeg stopped draining input 1 — the audio input is **dropped** and the same
 publisher keeps publishing video; the line ends `publishing VIDEO ONLY from this

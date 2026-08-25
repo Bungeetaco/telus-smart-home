@@ -610,9 +610,12 @@ class CameraStreamStateSensor(_StreamHealthEntity):
     bridge's escape hatch fired but restart_guard is holding the process).
 
     The pipeline's supporting numbers ride along as attributes rather than as
-    more entities -- fps in particular is an attribute BY DESIGN: it is a
-    pinned encoder property the bridge learns once per camera, not a live
-    measurement worth a recorder series of its own.
+    more entities -- fps in particular is an attribute BY DESIGN: it is the
+    rate the camera's publisher is currently DECLARED with. The bridge keeps
+    it under review while the stream runs (the rate is a device setting that
+    can change at any time) but it only ever moves on a publisher rebuild, so
+    it is a stepwise configuration fact, not a live measurement worth a
+    recorder series of its own.
     """
 
     _attr_device_class = SensorDeviceClass.ENUM
@@ -701,12 +704,12 @@ class CameraAudioStateSensor(_StreamHealthEntity):
     dead" into the same Off -- collapsing exactly the distinction an operator
     needs.
 
-    **Every camera gets one, consuming or not.** Audio consumption is currently
-    disabled on the live deployment (both `JANUS_REQUEST_AUDIO` and
-    `JANUS_CONSUME_AUDIO`, pending the bridge-side work), so today this reports
-    `not_consuming` everywhere. That is a real, honest, translated state, not a
-    broken entity -- and it is the state that answers "why is there no audio?"
-    for someone who did not know the knob was off. Creating the entity only for
+    **Every camera gets one, consuming or not.** A camera whose audio the
+    bridge is not configured to consume (`JANUS_CONSUME_AUDIO` is per-camera
+    and off by default) reports `not_consuming`. That is a real, honest,
+    translated state, not a broken entity -- and it is the state that answers
+    "why is there no audio?" for someone who did not know the knob was off.
+    Creating the entity only for
     consuming cameras (the rule the per-camera diagnostics and solar sensors
     follow) would be wrong here for two reasons: entity creation is sticky, so
     an entity that appears and disappears with a bridge env var breaks any

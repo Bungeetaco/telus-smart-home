@@ -171,17 +171,17 @@ _AUDIO_PRIME_MS = 100
 #
 #   top-up cadence / ceiling      write_frame p50/p90/p99 (ms)   frames >66.7ms
 #   video-only (control)                1.81 / 1.94 / 2.87        0 of 900
-#   every 500ms, ceiling 2.0s           1.80 / 231.6 / 297.1    120 of 900 (13%)
-#   every 100ms, ceiling 0.1s           1.90 / 202.8 / 297.1    162 of 900 (19%)
+#   every 500ms, ceiling 2.0s           1.80 / 231.6 / 297.1    120 of 900 (13.3%)
+#   every 100ms, ceiling 0.1s           1.90 / 202.8 / 297.1    162 of 900 (18%)
 #   every  80ms, ceiling 0.1s           1.81 / 1.97 / 2.27        0 of 900
 #   every  50ms, ceiling 0.1s           1.84 / 2.03 / 3.56        0 of 900
 #   every  25ms, ceiling 0.1s           1.80 / 2.04 / 3.44        0 of 900
 #
 # The cliff sits exactly at _AUDIO_PRIME_MS, which is what identifies the lead
 # (not the size of any one write) as the mechanism: a 100ms cadence spends the
-# instant before each write with a lead of zero, and 19% of frames stall behind
-# it. The shipped 500ms cadence is the same fault with 400ms of the cycle spent
-# BEHIND the video -- one video stall per audio write, ~0.35-0.75x the audio
+# instant before each write with a lead of zero, and 18% of frames stall behind
+# it. The old 500ms cadence is the same fault with 400ms of the cycle spent
+# BEHIND the video -- one video stall per audio write, ~0.33-0.66x the audio
 # owed. Handing over MORE than is owed is harmless by comparison (it just
 # lengthens the lead): the same rig fed 2x real time showed no video stall at
 # all, but 10.9MB of audio backed up in this process because ffmpeg stopped

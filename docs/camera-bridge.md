@@ -818,8 +818,8 @@ Five properties of that path are load-bearing:
   | Silence top-up cadence | write_frame p50/p90/p99 (ms) | Frames stalled past one frame interval |
   | --- | --- | --- |
   | video-only (control) | 1.81 / 1.94 / 2.87 | 0 of 900 |
-  | 0.5 s | 1.80 / 231.6 / 297.1 | 120 of 900 (13%) |
-  | 0.1 s (= the lead) | 1.90 / 202.8 / 297.1 | 162 of 900 (19%) |
+  | 0.5 s | 1.80 / 231.6 / 297.1 | 120 of 900 (13.3%) |
+  | 0.1 s (= the lead) | 1.90 / 202.8 / 297.1 | 162 of 900 (18%) |
   | 0.08 s | 1.81 / 1.97 / 2.27 | 0 of 900 |
   | 0.05 s (shipped) | 1.84 / 2.03 / 3.56 | 0 of 900 |
   | 0.025 s | 1.80 / 2.04 / 3.44 | 0 of 900 |

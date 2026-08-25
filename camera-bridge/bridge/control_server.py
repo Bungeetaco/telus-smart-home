@@ -51,7 +51,12 @@ Contract (as implemented -- this is what callers must match):
                                                  "audio_consumed": <bool>,
                                                  "audio_format": <str or null>,
                                                  "decoded_audio_frames": <int>,
-                                                 "dropped_audio_frames": <int>}, ...}}
+                                                 "dropped_audio_frames": <int>,
+                                                 "audio_dropped": <bool>,
+                                                 "audio_dropped_reason": <str or null>,
+                                                 "publisher_alive": <bool or null>,
+                                                 "last_publish_at": <unix ts or null>},
+                                                ...}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
       reconnect counts, last-frame age, and current encode mode, without
@@ -86,6 +91,19 @@ Contract (as implemented -- this is what callers must match):
       accumulated across rotations exactly like "dropped_frames" -- it cannot
       see audio that never decodes at all, since a stream producing nothing
       drops nothing.
+      "audio_dropped"/"audio_dropped_reason" say the publisher GAVE UP on its
+      audio input and is publishing video only -- a wedged pipe, a pipe that
+      never opened, or a run of malformed frames -- with the reason verbatim;
+      without them the degradation is invisible, since "audio_consumed" keeps
+      saying what the camera is CONFIGURED to do and "decoded_audio_frames"
+      keeps climbing (frames still decode, they just no longer reach ffmpeg).
+      "publisher_alive" is whether the ffmpeg publisher exists AND is still
+      consuming what it is fed -- the process being alive is not sufficient,
+      which is how a camera once reported "streaming" while MediaMTX had no
+      path at all -- and "last_publish_at" is when ffmpeg last TOOK a frame,
+      against "last_frame_at"'s "a frame arrived from the camera"; the gap
+      between those two is the difference between "streaming" and "streaming
+      to nowhere". Full field semantics: docs/control-api.md.
       NOTE for callers building health checks on this: the frame-silence
       watchdog is video-only, so a camera whose audio has stopped still reports
       state "streaming" with a fresh "last_frame_at". Nothing here RECONNECTS a

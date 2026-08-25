@@ -519,8 +519,8 @@ AUDIO_QUEUE_MAXSIZE = 50
 #
 #   cadence      write_frame p50/p90/p99 (ms)     frames dropped behind a stall
 #   video-only         1.81 / 1.94 / 2.87                 0 of 900
-#   0.5  (shipped)     1.80 / 231.6 / 297.1             120 of 900 (13%)
-#   0.1  (= the lead)  1.90 / 202.8 / 297.1             162 of 900 (19%)
+#   0.5  (the defect)  1.80 / 231.6 / 297.1             120 of 900 (13.3%)
+#   0.1  (= the lead)  1.90 / 202.8 / 297.1             162 of 900 (18%)
 #   0.08               1.81 / 1.97 / 2.27                 0 of 900
 #   0.05 (this)        1.84 / 2.03 / 3.56                 0 of 900
 #   0.025              1.80 / 2.04 / 3.44                 0 of 900

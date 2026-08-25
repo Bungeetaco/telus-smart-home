@@ -30,9 +30,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   `/control/status` reported `streaming` throughout. Four changes shipped: audio
   pacing at half the muxer lead, a time-based video queue, a wedged audio pipe
   degrading to video-only, and a bounded video drain that makes "publishing to
-  nowhere" detectable. **Both audio knobs stay `false` until a multi-session run
-  on the doorbell confirms it** — re-enable on the doorbell only, and watch the
-  four signals listed at the end of E62.
+  nowhere" detectable. Validation is a multi-session soak with audio enabled
+  **on the doorbell only**, watching the four signals listed at the end of E62.
 - **E65** (open, minor) — the MediaMTX publish password is passed on ffmpeg's
   argv, so it shows in `docker top`. Loopback-scoped, but avoidable.
 - **E66** (open) — the integration now has a test harness (E63), but it covers
@@ -1277,7 +1276,7 @@ when it ships.
   than intended — while E54's note claiming "frame count is unchanged" was
   simply false. Both are corrected.
 
-- **E59 (DONE, fix unconfirmed on a live stream) aiortc's Opus decoder killed
+- **E59 (DONE, confirmed live) aiortc's Opus decoder killed
   its own thread, and the published audio was pure silence.** The entry above
   understated this badly: audio did not "arrive in gaps" — it never arrived at
   all. Measured on the live published stream with `ffmpeg -af volumedetect` over
@@ -1360,7 +1359,7 @@ when it ships.
   dead audio
   visible; it does not recover it** — that is E60/E62.
 
-- **E62 (open, BLOCKING audio consumption) Audio consumption took the doorbell
+- **E62 (fixed in the bridge, awaiting live validation) Audio consumption took the doorbell
   off the air, and the bridge reported `streaming` throughout.** Enabled on the
   doorbell it ran correctly for about fourteen minutes — real decoded audio,
   measured — and then collapsed. The sequence, from the container log:
@@ -1394,8 +1393,9 @@ when it ships.
   its own defect and arguably the more dangerous one: **the bridge cannot
   currently tell "publishing" from "publishing to nowhere."**
 
-  **Four changes shipped in response. Both knobs stay `false` until a live
-  multi-session run confirms them.**
+  **Four changes shipped in response.** Validation is a live multi-session run
+  with audio enabled on the doorbell only; what it must show is listed at the
+  end of this entry.
 
   1. **Audio pacing.** `AUDIO_SILENCE_TOPUP_S` 0.5 → 0.05 (half the muxer lead —
      see E60 for why 0.1 measured *worse* than the defect), per-write ceiling
@@ -1447,7 +1447,7 @@ when it ships.
   `-f null -`, never a live RTSP publish into MediaMTX, so the muxer-target side
   of the pacing is **inferred, not captured** — tracked as **E68**.
 
-- **E60 (root cause found; fix in progress) The doorbell's frame drops are
+- **E60 (DONE, fixed in the bridge) The doorbell's frame drops are
   caused by the audio silence top-up, not by the pixel copy.** Both earlier
   hypotheses are disproven by measurement inside the container, and so is the
   measurement that appeared to disprove the first one.
@@ -1465,7 +1465,7 @@ when it ships.
   | video-only (control) | 2.69 ms | 1 |
   | every 20 ms | 2.51 ms | 1 |
   | every 100 ms | 2.46 ms | 1 |
-  | **every 500 ms (shipped)** | **166 ms** | **120 (13.3%)** |
+  | **every 500 ms (the defect)** | **166 ms** | **120 (13.3%)** |
   | every 1000 ms | p99 730 ms | 61 |
 
   `-thread_queue_size` and `-max_interleave_delta` change nothing, and splitting
@@ -1504,7 +1504,7 @@ when it ships.
   rig — one reproducing `write_silence_to`'s actual arithmetic (deficit against
   wallclock, the 100 ms prime, the per-call ceiling) rather than writing on a
   fixed cadence — **did not reproduce that row**. It measured 100 ms at **162 of
-  900 frames (19.4%), twice**, i.e. *worse* than the 500 ms defect it was meant
+  900 frames (18%), twice**, i.e. *worse* than the 500 ms defect it was meant
   to fix. The same rig reproduced the shipped defect exactly (120 of 900,
   matching the first table to the frame), which is what makes it the more
   trustworthy of the two:
@@ -1512,8 +1512,8 @@ when it ships.
   | top-up cadence / ceiling | `write_frame` p50/p90/p99 | frames >66.7 ms of 900 |
   |---|---|---|
   | video-only (control) | 1.81 / 1.94 / 2.87 ms | 0 |
-  | **0.5 s / 2.0 s (the defect)** | 1.80 / 231.6 / 297.1 ms | **120 (13.4%)** |
-  | 0.1 s / 0.1 s | 1.87 / 295.1 / 395.0 ms | 162 (19.4%) |
+  | **0.5 s / 2.0 s (the defect)** | 1.80 / 231.6 / 297.1 ms | **120 (13.3%)** |
+  | 0.1 s / 0.1 s | 1.90 / 202.8 / 297.1 ms | 162 (18%) |
   | 0.08 s / 0.1 s | 1.81 / 1.97 / 2.27 ms | 0 |
   | **0.05 s / 0.1 s (shipped)** | 1.81 / 2.08 / 2.83 ms | **0** |
   | 0.025 s / 0.1 s | 1.80 / 2.04 / 3.44 ms | 0 |
@@ -1534,8 +1534,8 @@ when it ships.
   equal the ceiling, so a clipped deficit could never be repaid — a permanent,
   accumulating A/V offset that the old 2.0 s ceiling did not have.
 
-  **Fixed in the bridge (pending live validation with audio re-enabled).** See
-  E62 for the other three changes that shipped alongside.
+  **Fixed in the bridge.** What live validation must show is listed at the end
+  of E62, alongside the other three changes that shipped with this one.
 
 ## Entries restored after an editing slip
 
