@@ -641,6 +641,16 @@ class CameraStreamStateSensor(_StreamHealthEntity):
         status = self._status or {}
         return {
             "fps": status.get("fps"),
+            # The DELIVERED rate (the bridge's last settled measurement),
+            # against fps's "what ffmpeg was declared with"; the gap between
+            # the two is padding or dropping before ffmpeg complains about it.
+            # A confirmed change waiting for the rotation that applies it
+            # rides in rate_pending, and duplicated_frame_warnings is the
+            # encoder's own corroboration of a too-high declaration. All None/
+            # absent on a bridge that predates them.
+            "measured_fps": status.get("measured_fps"),
+            "rate_pending": status.get("rate_pending"),
+            "duplicated_frame_warnings": status.get("duplicated_frame_warnings"),
             "hardware_encode": status.get("hardware_encode"),
             "consecutive_failures": status.get("consecutive_failures"),
             "last_error": status.get("last_error"),

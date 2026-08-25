@@ -97,6 +97,12 @@ STATUS_STREAMING = {
     # pins that case separately.
     "audio_dropped": False,
     "audio_dropped_reason": None,
+    # Present on every v1.22.4+ bridge (E69/E70): the delivered rate beside
+    # the declared one, a confirmed change waiting for its rotation, and
+    # ffmpeg's own duplication-warning count.
+    "measured_fps": 14,
+    "rate_pending": None,
+    "duplicated_frame_warnings": 0,
 }
 
 
@@ -221,6 +227,11 @@ def test_stream_state_maps_the_payload():
     assert entity.native_value == "reconnecting"
     attrs = entity.extra_state_attributes
     assert attrs["fps"] == 15
+    assert attrs["measured_fps"] == 14, (
+        "the DELIVERED rate must ride beside the declared one -- the gap "
+        "between them is the padding/dropping diagnostic (E69)")
+    assert attrs["rate_pending"] is None
+    assert attrs["duplicated_frame_warnings"] == 0
     assert attrs["hardware_encode"] is True
     assert attrs["consecutive_failures"] == 2
     assert attrs["last_error"] == "ice failed"

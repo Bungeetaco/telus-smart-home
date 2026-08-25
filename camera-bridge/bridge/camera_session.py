@@ -210,6 +210,11 @@ class RateWatcher:
         # about the camera, not about one session.
         self.candidate: int | None = None
         self.last_rebuild_at: float | None = None
+        # The most recent settled batch's measurement (raw, pre-clamp), kept
+        # purely for observability: /control/status serves it as measured_fps
+        # so an operator can see the declared/delivered gap before ffmpeg
+        # complains about it. Survives rotations like everything else here.
+        self.last_measured: int | None = None
         # The rate the last rate-driven rebuild moved AWAY from. A confirmed
         # change straight back to it is the flapping signature (see _observe),
         # not a second setting change.
@@ -252,6 +257,8 @@ class RateWatcher:
         return self._observe(_fps_from_deltas(deltas), declared, now)
 
     def _observe(self, measured, declared, now):
+        if measured is not None:
+            self.last_measured = int(measured)
         if measured is None or not declared:
             # An unmeasurable batch is not evidence of anything, and it must not
             # be able to CONFIRM the batch before it either.
@@ -402,6 +409,15 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # (frames are still being decoded), and nothing else in the status
         # changes at all.
         "audio_dropped": False, "audio_dropped_reason": None,
+        # The rate under review (E69/E70): fps above is what ffmpeg was
+        # DECLARED with; measured_fps is what the camera is actually delivering
+        # (the last settled batch), rate_pending is a CONFIRMED change waiting
+        # for the rotation that applies it, and duplicated_frame_warnings is
+        # ffmpeg's own stderr corroboration that the declared rate exceeds
+        # delivery. All three update as frames flow, so they can lag by up to
+        # one frame interval (and duplicated_frame_warnings by a reconnect gap).
+        "measured_fps": None, "rate_pending": None,
+        "duplicated_frame_warnings": 0,
         # ...and the video counterpart of the same question. last_frame_at says a
         # frame arrived FROM the camera; publisher_alive and last_publish_at say
         # ffmpeg took it. Throughout the E62 outage the first was fresh, the
@@ -423,6 +439,10 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # first batch alone cannot be trusted with it and what stands between a
     # measurement and a rebuild.
     rate = RateWatcher(camera_id)
+    # "frames duplicated" stderr warnings from PUBLISHERS THAT HAVE BEEN
+    # REPLACED; the live sink's own counter is added on top at each status
+    # write, so /control/status carries a lifetime total like dropped_frames.
+    dup_warnings_folded = 0
     # Lifetime total of decoded audio frames this camera's sessions have handed
     # to the publisher. Unlike the two drop counters it is NOT folded in at
     # session end -- it is incremented by the pump as each frame arrives, so it
@@ -857,6 +877,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                              "publisher", camera["id"], sink.fps,
                              ffmpeg_sink.clamp_fps(fps))
                 rate_rebuild_needed = False
+                _update_status(rate_pending=None)
                 # `sink.proc is None` means a previous start() raised partway through
                 # (both encoders failed to survive the startup grace period -- what an
                 # RTSP ANNOUNCE to a momentarily-down MediaMTX looks like). Such a sink
@@ -901,6 +922,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # Remembered so RateWatcher can recognise a confirmed
                         # return to this rate as flapping, not a second change.
                         rate_rebuild_from = sink.fps
+                    dup_warnings_folded += sink.duplicated_frame_warnings
                     await sink.stop()
                     sink = None
                 if sink is None:
@@ -1008,7 +1030,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         raise RuntimeError("frame stream ended unexpectedly")
                     last_frame = frame
                     last_live = time.monotonic()
-                    _update_status(last_frame_at=time.time())
+                    _update_status(
+                        last_frame_at=time.time(),
+                        measured_fps=rate.last_measured,
+                        duplicated_frame_warnings=(
+                            dup_warnings_folded + sink.duplicated_frame_warnings))
                     # The rate under review, measured from live frames only. A
                     # confirmed change updates this camera's remembered rate
                     # immediately -- so the NEXT session's decoded-frame queue is
@@ -1019,6 +1045,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     if confirmed is not None:
                         known_fps = confirmed
                         rate_rebuild_needed = True
+                        _update_status(rate_pending=confirmed)
                     if not await sink.write_frame(frame):
                         # last_frame_at (a frame arrived from the camera) has
                         # already moved; last_publish_at (ffmpeg took it) has

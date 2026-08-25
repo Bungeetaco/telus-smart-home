@@ -336,6 +336,13 @@ class FfmpegSink:
         # CONSUMING what it is fed -- see write_frame.
         self.publisher_stalled: bool = False
         self.last_video_accepted_at: float | None = None   # monotonic
+        # ffmpeg's own corroboration of a declared-rate/delivered-rate gap:
+        # every "frames duplicated" line on stderr, counted (E70). Strictly
+        # observability -- one-directional (fires only when the declared rate
+        # is too HIGH), not quantitative, and coarse (fixed thresholds), so it
+        # is deliberately NOT an input to any control decision; the settled
+        # re-measurement (camera_session.RateWatcher) owns those.
+        self.duplicated_frame_warnings: int = 0
 
     @property
     def audio_enabled(self) -> bool:
@@ -674,7 +681,10 @@ class FfmpegSink:
                 line = await self.proc.stderr.readline()
                 if not line:
                     break
-                log.warning("%s: ffmpeg: %s", self.camera_id, line.decode(errors="replace").rstrip())
+                text = line.decode(errors="replace").rstrip()
+                if "frames duplicated" in text:
+                    self.duplicated_frame_warnings += 1
+                log.warning("%s: ffmpeg: %s", self.camera_id, text)
         except Exception:
             pass
 

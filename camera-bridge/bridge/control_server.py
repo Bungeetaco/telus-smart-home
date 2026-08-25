@@ -55,7 +55,10 @@ Contract (as implemented -- this is what callers must match):
                                                  "audio_dropped": <bool>,
                                                  "audio_dropped_reason": <str or null>,
                                                  "publisher_alive": <bool or null>,
-                                                 "last_publish_at": <unix ts or null>},
+                                                 "last_publish_at": <unix ts or null>,
+                                                 "measured_fps": <int or null>,
+                                                 "rate_pending": <int or null>,
+                                                 "duplicated_frame_warnings": <int>},
                                                 ...}}
       Live per-camera diagnostics maintained by camera_session.py's own
       run_camera_forever loop (main.py threads a shared dict into it) --
@@ -103,7 +106,12 @@ Contract (as implemented -- this is what callers must match):
       path at all -- and "last_publish_at" is when ffmpeg last TOOK a frame,
       against "last_frame_at"'s "a frame arrived from the camera"; the gap
       between those two is the difference between "streaming" and "streaming
-      to nowhere". Full field semantics: docs/control-api.md.
+      to nowhere". "measured_fps" is the DELIVERED rate (the last settled
+      measurement) beside "fps"'s declared one; "rate_pending" is a confirmed
+      rate change waiting for the rotation that applies it; and
+      "duplicated_frame_warnings" counts ffmpeg's own "frames duplicated"
+      stderr lines, the encoder's corroboration of a too-high declaration.
+      Full field semantics: docs/control-api.md.
       NOTE for callers building health checks on this: the frame-silence
       watchdog is video-only, so a camera whose audio has stopped still reports
       state "streaming" with a fresh "last_frame_at". Nothing here RECONNECTS a

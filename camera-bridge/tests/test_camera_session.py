@@ -305,6 +305,7 @@ class FakeSink:
         # here to wedge.
         self.publisher_stalled = False
         self.last_video_accepted_at = None
+        self.duplicated_frame_warnings = 0
         # --- audio ---
         self.audio_dropped = False
         self.audio_dropped_reason = None
@@ -1214,6 +1215,47 @@ async def test_the_rate_hysteresis_band_is_asymmetric_and_clears_observed_jitter
     assert not cs._rate_moved(15, None)
 
 
+async def test_the_rate_constants_hold_their_meaningful_ranges():
+    """The E64/E73 thresholds, pinned as VALUES and not only as logic (E72).
+
+    The rate tests drive the confirmation, hysteresis, storm-bound and flap
+    logic against shrunk knobs, which is the right shape for unit tests -- and
+    it means a tuning pass could set a shipped constant to a value that
+    defeats its own purpose with every suite still green. Each assertion below
+    carries the reason for its bound, so a deliberate retuning knows what it
+    is arguing with.
+    """
+    assert 5.0 <= c.RATE_RESAMPLE_SETTLE_S <= c.SESSION_MAX_LIFETIME_S / 3, (
+        f"RATE_RESAMPLE_SETTLE_S={c.RATE_RESAMPLE_SETTLE_S}: under ~5s the "
+        "session-start burst is measured again, which is exactly the 38-49fps "
+        "artifact readings the settle window exists to exclude; above a third "
+        f"of a {c.SESSION_MAX_LIFETIME_S}s session too little of every session "
+        "remains measurable")
+    assert 30 <= c.RATE_RESAMPLE_FRAMES <= \
+        6 * (c.SESSION_MAX_LIFETIME_S - c.RATE_RESAMPLE_SETTLE_S) / 2, (
+        f"RATE_RESAMPLE_FRAMES={c.RATE_RESAMPLE_FRAMES}: under ~30 deltas a "
+        "bunched arrival can own the median; larger than half the measurable "
+        "window at the slowest real camera on this account (6fps) and a "
+        "session no longer fits two batches, so nothing can ever CONFIRM")
+    assert c.SESSION_MAX_LIFETIME_S < c.RATE_REBUILD_MIN_INTERVAL_S \
+        <= 6 * c.SESSION_MAX_LIFETIME_S, (
+        f"RATE_REBUILD_MIN_INTERVAL_S={c.RATE_REBUILD_MIN_INTERVAL_S}: at or "
+        "under one rotation the storm bound stops bounding anything (two "
+        "rate rebuilds can land on consecutive rotations); far above it a "
+        "genuine correction is held for many minutes of wrong-rate publishing")
+    assert c.RATE_FLAP_WINDOW_S > c.RATE_REBUILD_MIN_INTERVAL_S, (
+        f"RATE_FLAP_WINDOW_S={c.RATE_FLAP_WINDOW_S} vs "
+        f"RATE_REBUILD_MIN_INTERVAL_S={c.RATE_REBUILD_MIN_INTERVAL_S}: a "
+        "confirmed return that the storm bound delayed past the window would "
+        "never be recognised as flapping -- live, the flap confirmation "
+        "arrived AFTER the 300s floor had held it back")
+    assert c.RATE_FLAP_HOLD_S >= c.RATE_FLAP_WINDOW_S, (
+        f"RATE_FLAP_HOLD_S={c.RATE_FLAP_HOLD_S} vs "
+        f"RATE_FLAP_WINDOW_S={c.RATE_FLAP_WINDOW_S}: a memory shorter than "
+        "the detection window expires and re-detects the same flap as a new "
+        "one, doubling the rebuilds the guard exists to remove")
+
+
 async def test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree():
     """The measurement that is allowed to move a known rate has to be worth
     trusting, because acting on it costs every RTSP reader a reconnect.
@@ -1277,6 +1319,10 @@ async def test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree(
             f"a settled 6fps batch against a publisher declared at 15 left the "
             f"candidate at {watcher.candidate!r} -- the measurement was taken and "
             "then thrown away, so no amount of agreeing evidence can ever act on it")
+        assert watcher.last_measured == 6, (
+            f"the settled measurement was not kept for observability "
+            f"({watcher.last_measured!r}) -- /control/status's measured_fps "
+            "serves it (E69)")
         second, now = feed_batch(watcher, 1 / 6, now, declared=15)
         assert second == 6, f"two agreeing settled batches did not confirm 6fps: {second}"
         assert watcher.candidate is None, "the confirmed candidate was not cleared"
@@ -1512,15 +1558,28 @@ async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_
     """
     # First batch at 10fps, everything after it at 25fps: a +150% move, well past
     # the upward band, sustained rather than a burst.
+    def preset_dup_warnings(sink, width, height, fps):
+        # Models ffmpeg having emitted "frames duplicated" on each publisher:
+        # the loop must fold a replaced sink's count into the lifetime total
+        # /control/status serves, exactly as it does for dropped_frames.
+        sink.duplicated_frame_warnings = 3 if len(CTX.sinks) == 1 else 2
+
     with rate_knobs(RATE_RESAMPLE_SETTLE_S=0.05, RATE_RESAMPLE_FRAMES=4,
                     RATE_REBUILD_MIN_INTERVAL_S=0):
         with scenario([Plan(frames=steady(10, 0.1), tail=("repeat", 0.04, 1280, 720))],
                       FIRST_FRAME_TIMEOUT_S=2.0, SESSION_MAX_LIFETIME_S=1.2,
                       FRAME_SILENCE_TIMEOUT_S=5.0) as ctx:
+            ctx.sink_started_hook = preset_dup_warnings
             with capture_logs(level=logging.WARNING) as lines:
                 start(ctx)
-                await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].fps,
-                                timeout=15.0, why="the publisher to be rebuilt for the rate")
+                # ...and wait until a frame has flowed through the REBUILT
+                # publisher, so the status has folded the replaced sink's
+                # duplication-warning count and added the live one on top --
+                # the per-frame status write is what carries it.
+                await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].fps
+                                and x.state.get("duplicated_frame_warnings") == 5,
+                                timeout=15.0, why="the rebuilt publisher's first "
+                                "status write (dup warnings folded to 5)")
                 sinks = list(ctx.sinks)
                 sessions = list(ctx.sessions)
                 state = dict(ctx.state)
@@ -1562,6 +1621,21 @@ async def test_a_settled_rate_change_rebuilds_the_publisher_without_failing_the_
         f"the publisher was rebuilt for a rate change and the log does not say so, "
         f"so the reconnect every reader sees looks like a fault: {lines}")
     assert "10" in said[0] and str(new_rate) in said[0], said[0]
+
+    # The observability fields (E69/E70): the DELIVERED rate rides alongside
+    # the declared one, a confirmed-but-unapplied change is visible while it
+    # waits, and ffmpeg's duplication warnings accumulate across the rebuild
+    # exactly like dropped_frames.
+    assert state.get("measured_fps") == new_rate, (
+        f"/control/status does not carry the settled measurement: "
+        f"{state.get('measured_fps')!r} against the confirmed {new_rate}")
+    assert "rate_pending" in state and state["rate_pending"] is None, (
+        f"rate_pending should read null once the rotation has applied the "
+        f"change: {state.get('rate_pending')!r}")
+    assert state.get("duplicated_frame_warnings") == 5, (
+        f"duplicated_frame_warnings must be a lifetime total across publisher "
+        f"rebuilds (3 folded from the replaced sink + 2 live): "
+        f"{state.get('duplicated_frame_warnings')!r}")
 
 
 async def test_the_frame_hold_repeats_at_the_rate_ffmpeg_was_declared_with():
@@ -3430,6 +3504,37 @@ async def test_a_publisher_born_without_its_audio_pipe_says_so():
         f"a failed audio pipe took the camera off the air: {state}")
 
 
+async def test_ffmpeg_duplicated_frame_warnings_are_counted():
+    """Every "frames duplicated" line ffmpeg writes to stderr is counted (E70).
+
+    The count is the encoder's OWN corroboration of a declared/delivered rate
+    gap, from the other side of the pipe than RateWatcher's arithmetic. It is
+    observability only: one-directional (fires only when the declared rate is
+    too high), not quantitative, and coarse -- so it feeds no control decision,
+    it just makes "did the correction remove the padding" answerable from
+    /control/status instead of from container-log archaeology.
+    """
+    class FakeStderr:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+    real = fs.FfmpegSink("cam")
+    real.proc = types.SimpleNamespace(returncode=None, stderr=FakeStderr([
+        b"[vf#0:0 @ 0x5c1] More than 1000 frames duplicated\n",
+        b"Past duration 0.999992 too large\n",
+        b"[vf#0:0 @ 0x5c1] More than 10000 frames duplicated\n",
+        b"[rtsp @ 0x5c2] Nonmatching transport in server reply\n",
+    ]))
+    await real._log_stderr()
+    assert real.duplicated_frame_warnings == 2, (
+        f"{real.duplicated_frame_warnings} warnings counted from a stderr "
+        "stream carrying exactly two -- the count either misses the 10000-frame "
+        "escalation or fires on unrelated encoder noise")
+
+
 async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
     """A hardware path that publishes audio while the software fallback silently
     does not is the exact class of bug this codebase keeps finding -- and the
@@ -3811,6 +3916,7 @@ TESTS = [
     test_the_fps_fallback_is_never_locked_in,
     test_a_real_fps_is_not_overwritten_by_a_burst,
     test_the_rate_hysteresis_band_is_asymmetric_and_clears_observed_jitter,
+    test_the_rate_constants_hold_their_meaningful_ranges,
     test_a_settled_rate_is_measured_past_the_burst_and_needs_two_to_agree,
     test_a_confirmed_reversal_is_flapping_and_resolves_to_the_higher_rate,
     test_flap_memory_expires_once_the_high_rate_stops_appearing,
@@ -3843,6 +3949,7 @@ TESTS = [
     test_a_wedged_audio_pipe_degrades_to_video_only,
     test_a_publisher_that_stopped_reading_is_detected_and_rebuilt,
     test_an_audio_format_change_forces_a_publisher_rebuild,
+    test_ffmpeg_duplicated_frame_warnings_are_counted,
     test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio,
     test_silence_is_the_formats_zero_not_zero_bytes,
     test_a_publisher_born_without_its_audio_pipe_says_so,

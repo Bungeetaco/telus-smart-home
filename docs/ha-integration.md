@@ -1297,8 +1297,14 @@ The supporting numbers ride along as attributes rather than more entities:
 `fps` and `hardware_encode` (encoder properties that only ever change on a
 publisher rebuild: `fps` is the rate the publisher is currently *declared*
 with, which the bridge keeps under review while the stream runs but applies
-stepwise, not live measurements worth a recorder series),
-`consecutive_failures`, `last_error`, `last_frame_at`, and `raw_state`.
+stepwise, not live measurements worth a recorder series), `measured_fps` (the
+rate the camera is actually *delivering*, the bridge's last settled
+measurement; a material gap against `fps` is padding or dropping before
+ffmpeg complains), `rate_pending` (a confirmed rate change waiting for the
+rotation that applies it), `duplicated_frame_warnings` (ffmpeg's own count of
+`frames duplicated` stderr warnings, the encoder-side corroboration of a
+too-high declaration), `consecutive_failures`, `last_error`, `last_frame_at`,
+and `raw_state`.
 
 **Dropped frames** counts frames discarded because the consumer fell behind the
 decoder: a sustained climb is a quietly-degrading stream that otherwise only
