@@ -594,6 +594,48 @@ HANDOVER_TRACE = os.environ.get("HANDOVER_TRACE", "false").strip().lower() in (
 # rotation it belongs to in the log.
 HANDOVER_TRACE_SETTLE_S = 1.0
 
+# --- Instrumentation for the container's memory (backlog E83) ----------------
+# OFF by default. With it on, the process emits ONE structured line every
+# MEMORY_TRACE_INTERVAL_S -- `memory trace {...}`, JSON after the prefix --
+# saying which PROCESS in the container holds the memory, whether the Python
+# heap or glibc's arenas are holding it, which object types grew, and which
+# allocation sites grew (see memory_trace.py for the record's shape).
+#
+# It exists because the number that raised E83 is the cgroup's, and the cgroup
+# holds four processes: mediamtx, python3, and one ffmpeg per camera (see
+# entrypoint.sh). "The bridge leaks ~15 MB per rotation with audio on" is
+# therefore a claim about a sum, and the four candidate mechanisms behind it
+# have four different fixes, three of which are not in this repository.
+#
+# NOT safe to leave on, unlike HANDOVER_TRACE. tracemalloc roughly doubles
+# per-allocation cost and stores a frame per live allocation, and each sample
+# walks every gc-tracked object. It also changes the number under
+# investigation, since traced memory is itself memory: read `python.rss_mb`,
+# never `tracemalloc.traced_mb`, when deciding whether the climb is still
+# there. Turn it on to attribute the climb, then turn it off.
+MEMORY_TRACE = os.environ.get("MEMORY_TRACE", "false").strip().lower() in (
+    "1", "true", "yes", "on")
+# Seconds between records. 330 is two of the ~165s SESSION_MAX_LIFETIME_S
+# rotations, so consecutive records always bracket at least one whole rotation
+# per camera: a per-rotation retention then shows as a step between records
+# rather than as noise inside one, which is what E83 asks for ("snapshots across
+# two rotations"). It is also slow enough that the sampling cost -- a full
+# gc.get_objects() walk plus a tracemalloc snapshot -- is amortised to nothing.
+#
+# Settable from the environment, unlike HANDOVER_TRACE's settle tail, because
+# this one is turned on for a single live investigation and the useful window
+# depends on what is being chased: a container that reaches its limit in twenty
+# minutes cannot wait for six records at the default cadence.
+MEMORY_TRACE_INTERVAL_S = float(os.environ.get("MEMORY_TRACE_INTERVAL_S", "330"))
+# How many allocation sites each record lists, largest GROWTH first.
+MEMORY_TRACE_TOP = int(os.environ.get("MEMORY_TRACE_TOP", "12"))
+# How many stack frames tracemalloc keeps per allocation. 1 is the allocating
+# line alone, which is what names a leak; deeper stacks multiply tracemalloc's
+# own memory cost by roughly the same factor and are only worth it when the
+# allocating line turns out to be a shared helper (numpy's, PyAV's) that says
+# nothing about which caller is responsible.
+MEMORY_TRACE_FRAMES = int(os.environ.get("MEMORY_TRACE_FRAMES", "1"))
+
 # How often to re-poll TELUS for the camera list after startup, so a camera
 # added to the account later gets picked up (and streaming started
 # automatically) without a container restart. Existing camera tasks are never

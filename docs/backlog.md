@@ -91,9 +91,15 @@ and evidence. Grouped by whether anything can actually be done about them.
   `--sandbox=chroot` in `/etc/libvirt/virtiofsd.opt`.
 
 
-- **E83** (open, BLOCKING) - the mu-law audio path leaks ~15 MB per session
-  rotation and took the bridge to `bridge-unreachable`. Audio consumption is OFF
-  on the live deployment. Measure with `tracemalloc` before changing anything.
+- **E85** (open) - E74's arena diagnosis is disproven by test
+  (`MALLOC_ARENA_MAX=2`: no change); the entry needs correcting and the watcher
+  threshold re-deriving under jemalloc.
+- **E86** (open, minor, upstream) - aiortc's rate estimator accumulates
+  RateBucket objects, ~3 MB per 330 s; invisible under jemalloc, worth an
+  upstream check.
+
+- **E84** (open, minor) - four limits of the E83 memory instrumentation, and
+  the one live reading it cannot take.
 
 **Blocked on hardware or a device this account does not have**
 
@@ -2639,24 +2645,37 @@ entries are the mechanism that keeps it under review
       not read it, so that sensor says `flowing` for that rotation. A sensor
       change plus a version bump; deferred, not forgotten.
 
-- **E83 (open, BLOCKING audio) The mu-law audio path leaks about 15 MB per
-  session rotation.** Found by the stack watcher, not by looking, and it had
-  already taken the bridge to `bridge-unreachable` once before it was noticed.
+- **E83 (DONE) With audio consuming, the CONTAINER grows about
+  12 MB per minute and does not plateau. Which of its four processes grows is
+  not known.** Found by the stack watcher, not by looking, and it had already
+  taken the bridge to `bridge-unreachable` once before it was noticed.
 
   **Attribution is from the watcher's own history, not from reasoning.** Before
   v1.24.0 the container climbed to 81 to 85 percent of its 768 MiB limit and
   **plateaued**, exactly as E74 measured and closed. After v1.24.0 deployed at
   17:49 it went 41.6, 65.3, 77.5, 84.8, **99.10** percent and did not stop, and
   logged `bridge-unreachable` at 19:25. A later 13 minute curve measured
-  496 MB to 651 MB, **+155 MB**, while `sessions_pcmu` went 10 to 20: about
-  **15 MB per session**, with thread count flat at 119 throughout, so this is not
-  the accumulation E74 ruled out.
+  496 MB to 651 MB, **+155 MB**, while `sessions_pcmu` went 10 to 20, with
+  thread count flat at 119 throughout, so this is not the accumulation E74
+  ruled out.
+
+  **That 13 minute curve is a RATE, and reading it as "15 MB per session" was
+  an over-claim.** Ten rotations happened inside it because ten rotations
+  happen in thirteen minutes with two cameras on a 165 s cycle; the reading is
+  equally consistent with a climb proportional to elapsed time, to decoded
+  audio frames, or to rotations, and it does not distinguish them. Stated
+  honestly it is **12 MB per minute**, and everything below is written against
+  that.
 
   **It scales with audio volume, which is why it appeared exactly here.** E80
   took real decoded audio from about 3 frames per second to about 15, so
   whatever retains a per-session reference now retains five times as much. At
   roughly 2,475 audio frames per 165 s session, 15 MB works out near 6 kB per
-  frame, which is the right order for a retained `av.AudioFrame`.
+  frame, which is the right order for a retained `av.AudioFrame`. That
+  arithmetic is what the offline rigs below were aimed at, and none of them
+  found such a retention -- five times the audio also means five times the
+  allocation CHURN through the decoder and executor threads, which raises a
+  glibc arena's high-water mark without anything being retained at all.
 
   Audio consumption is **off** on the live deployment as a result. Both cameras
   publish video.
@@ -2673,20 +2692,180 @@ entries are the mechanism that keeps it under review
   this. **Take a control over at least one full plateau, and say how long the
   window was.**
 
-  **Do not assume the sniff's held frames are the cause.** That list is bounded
-  at 20 packets, which is roughly 120 kB per session, two orders of magnitude
-  short of what is measured. Something retains frames for the life of a session,
-  or retains the session itself. Candidates worth measuring before changing
-  anything: a module-level structure in the decoder patch keyed by decoder
-  instance that is never evicted, and the retired session's own queues.
+  **THE NUMBER IS A SUM OVER FOUR PROCESSES, and nothing had ever decomposed
+  it.** `entrypoint.sh` runs `mediamtx` and `python3 -m bridge.main` side by
+  side, and the bridge launches **one ffmpeg per camera**. All four count
+  against docker-compose's `mem_limit`, so the cgroup figure the watcher alerts
+  on, and every number in this entry, is their total. "The mu-law audio path
+  leaks" -- what this entry was originally titled -- is a claim about the
+  Python process that no measurement here has ever made. It is equally
+  consistent with:
 
-  **Measure, do not guess.** The bridge has no profiler in the image; a
-  `tracemalloc` snapshot across two rotations behind a flag would name the
-  allocation site directly, and that is cheaper than another round of plausible
-  hypotheses. This entry exists because the last two audio problems were both
-  solved by measurement and both nearly solved wrongly by inference.
+    * **MediaMTX**, which with audio on carries a second (AAC) track per stream
+      and repacketises it for every reader. Written in Go, so its RSS climbs and
+      is returned to the OS lazily whatever it does.
+    * **ffmpeg**, whose two-input mux buffers one stream's packets to interleave
+      them with the other's, bounded only by `-max_interleave_delta` (10 s by
+      default). With audio off there is one input and nothing to interleave.
+    * **The Python heap**, retaining a decoded frame per packet.
+    * **glibc**, holding freed memory in per-thread arenas rather than returning
+      it -- which is precisely what E74 identified as this container's plateau,
+      at 119 threads. E80 took real decoded audio from ~3 frames/s to ~15, i.e.
+      five times the allocation churn through the decoder and executor threads,
+      which would raise the arenas' high-water marks without any object being
+      retained at all. That is a *higher plateau*, and thirteen minutes cannot
+      tell a higher plateau from no plateau.
+
+  Three of those four are not fixable from this repository.
+
+  **Five offline rigs failed to reproduce any of it, and that is evidence, not
+  an absence of it.** Each ran the real code with the real audio rates, drove
+  many rotations or many minutes, and measured RSS and `gc` object counts by
+  type after a forced collection:
+
+  | rig | what was real | result |
+  |---|---|---|
+  | the decoder patch alone | the real patched `OpusDecoder` and `PcmDecoder`, 2,475 mu-law packets x 8 sessions, all committing to mu-law | **+0.02 MB/session**, object count flat |
+  | `janus_client` | the real `JanusCameraSession` audio path (`_pump_audio_track` -> the bounded queue -> `next_audio_frame` -> `close()`) fed real decoded `av.AudioFrame`s, 12 sessions | **+0.01 MB/session**, object count flat |
+  | `camera_session` | the real `run_camera_forever` with audio consuming, 55 rotations | **+0.055 MB/rotation**, object count flat within noise |
+  | the publisher | the real `FfmpegSink` driving a REAL ffmpeg child (output swapped to `-f null -`), real 1440x1440 frames at 15 fps plus real decoded audio at 15/s, 3.7 minutes | **python +0.00 MB/min, ffmpeg +0.04 MB/min** |
+  | aiortc | real `RTCPeerConnection` pairs with a real audio track, created and closed once per rotation, 40 rotations | plateaus at ~140-150 MB with audio and ~150 MB **without**; the warm-up is the same shape either way |
+
+  So the Python bridge retains no per-session and no per-frame object across
+  rotations, and the pinned test `test_consumed_audio_retains_nothing_across_rotations`
+  now holds it to that. **The sniff's held frames are disproven** as the cause
+  by the first rig (and were already two orders of magnitude too small, being
+  bounded at 20 packets, ~120 kB per session), and so is a module-level
+  structure in the decoder patch keyed by decoder instance: there is none, the
+  sniff state is an attribute on the decoder instance and dies with it.
+
+  **Measure, do not guess, and the cheapest measurement needs no code at all.**
+  One `docker exec` decomposes the sum:
+
+  ```
+  sudo docker exec telus-cam-bridge sh -c 'for p in /proc/[0-9]*; do \
+    echo "$(cut -d" " -f2 $p/statm) $(cat $p/comm)"; done | sort -rn'
+  ```
+
+  Repeated ten minutes apart and subtracted, that says which process climbs,
+  and three of the four answers end the search in this repository immediately.
+  **Do that before anything else.**
+
+  Past it, `MEMORY_TRACE` (off by default, `bridge/memory_trace.py`) emits one
+  JSON line every `MEMORY_TRACE_INTERVAL_S` (330 s = two rotations, so
+  consecutive records always bracket a whole rotation per camera) carrying, in
+  the order the questions have to be asked: every container process with its
+  RSS; glibc's `mallinfo2`, which separates "the heap is full" from "the
+  allocator is holding freed memory" and which `tracemalloc` structurally
+  cannot see; the `gc` object types that grew; and the allocation sites that
+  grew, ranked by GROWTH rather than by size. It is not safe to leave on --
+  `tracemalloc` roughly doubles per-allocation cost and adds a frame per live
+  allocation, so it changes the number under investigation; read
+  `python.rss_mb` from the record and never `tracemalloc.traced_mb`. Reading
+  guide: `docs/troubleshooting.md`, "Attributing the container's memory".
+
+  This entry exists because the last two audio problems were both solved by
+  measurement and both nearly solved wrongly by inference, and its own first
+  title is now the third example.
 
   Related: the doorbell was also dropping 34 to 970 video frames per five minute
   window through this period against a 7 to 10 per minute baseline. That is
   almost certainly the memory pressure slowing the consumer rather than a second
   defect, but it has not been separated and should not be assumed.
+
+- **E84 (open, minor) What the E83 memory instrumentation does not do.** Five
+  things were considered while building `memory_trace.py` and left out on
+  purpose. Recorded so none of them is mistaken for an oversight, and so the
+  reasoning is available if one becomes worth doing.
+
+    * **It cannot see inside MediaMTX or ffmpeg.** `container.procs` says which
+      process holds the megabytes and stops there. If the answer is `mediamtx`,
+      the next step is its own metrics endpoint (which this deployment does not
+      enable) or Go's pprof; if it is `ffmpeg`, the levers are
+      `-max_interleave_delta` and the audio pipe's depth, neither of which this
+      bridge currently sets. Building either into the bridge before knowing
+      which process it is would be the guess this whole entry exists to avoid.
+    * **`MALLOC_ARENA_MAX` is still not set.** E74 recommended it at "the next
+      natural rebuild" as an optimisation and it was never applied, so if the
+      climb turns out to be per-thread arenas the fix is a one-line environment
+      change that has been available the whole time. It is deliberately NOT
+      being applied blind here: applying it now would confound the very
+      measurement that would tell us whether it was the cause, and it is not
+      free -- two arenas across 119 threads serialises allocation that is
+      currently spread across many.
+    * **The sampler runs on the event loop.** A record costs a full
+      `gc.get_objects()` walk (tens of milliseconds on this heap) plus a
+      `tracemalloc` snapshot, once every 330 s. That is a real pause on the
+      loop that also drives `write_frame`, so a traced run may drop a frame at
+      each sample. Acceptable for a diagnostic that is on for an hour, and the
+      reason `HANDOVER_TRACE`'s "nothing here awaits, sleeps or writes, safe to
+      leave on" promise is explicitly NOT made for this one. Moving it to a
+      thread would need the gc walk to be safe concurrently with the loop
+      allocating, which it is not.
+    * **`gc_growth` cannot see untracked objects.** `gc.get_objects()` returns
+      only container-tracked objects, so a leak of plain `bytes`/`bytearray`
+      buffers -- which is what a retained PCM payload would be -- appears in
+      `tracemalloc.top` and in `python.rss_mb` but never in `gc_growth`. The
+      three views are complementary for exactly this reason, and reading only
+      the object census would miss the case.
+    * **The offline rigs are not in the repository.** The five rigs that ruled
+      out the Python bridge (E83's table) were scratch scripts: a decoder-only
+      loop, a `JanusCameraSession` audio loop, the `run_camera_forever`
+      harness, a real-ffmpeg publisher fed real frames, and a real aiortc
+      peer-connection pair rotated. Only the third became a test
+      (`test_consumed_audio_retains_nothing_across_rotations`), because it is
+      the only one that runs in under a minute with no ffmpeg binary and no
+      network stack. The other four are minutes-long soaks whose pass condition
+      is a slope, which is a poor fit for a suite that has to be fast and
+      deterministic in CI. If the leak ever IS found in the Python process, the
+      rig that finds it should be added rather than re-derived.
+
+- **E83 resolution, 2026-08-26: glibc heap fragmentation, fixed with jemalloc.**
+  The memory_trace instrumentation answered it in two samples. Across one 330 s
+  window python RSS grew 118 MB while glibc's `in_use` grew **3 MB**:
+  `free_not_returned` went 35.9 to 144.6 MB with only 2.92 MB `releasable`. So
+  Python was not retaining memory; glibc was holding freed memory, fragmented
+  inside its arenas where `malloc_trim` cannot reach it. The cause is the
+  allocation pattern: 3.11 MB video frame buffers at 15 fps interleaved with
+  about 15/s of small audio allocations, and mu-law quintupling the small half
+  is why v1.24.0 surfaced it.
+
+  That explains every prior observation at once: five offline rigs flat (none
+  interleave at production scale for long enough), object counts flat (nothing
+  was retained), `MALLOC_ARENA_MAX=2` useless (the arena COUNT was never the
+  problem, tested and measurably no change), and E74's plateau (the same
+  fragmentation reaching a ceiling at the lower pre-E80 churn).
+
+  **Fix: jemalloc, preloaded for the python process only** (`libjemalloc2` in
+  the image, `LD_PRELOAD` in `entrypoint.sh`). Not global on purpose: MediaMTX
+  is Go and bypasses glibc malloc, and both ffmpegs measured flat, so the change
+  is scoped to the one process with the pathology. Missing library degrades to
+  glibc with a stderr warning rather than a dead container.
+
+  **Measured against a pre-stated pass criterion, same 25 minute window, same
+  18 sessions:** glibc went 333 to 623 MB monotonically, python +15.4 MB per
+  session, straight line to OOM. jemalloc went 321 to 439 MB **oscillating**,
+  python about +6 MB per session and falling, including a 417 to 336 MB drop at
+  one sample, something glibc never once did. The decay returning pages to the
+  OS is the exact mechanism mallinfo2 showed missing.
+
+  Audio is ON for both cameras. Watch `bridge-memory-high` in the stack watcher
+  over the next days; the threshold conversation belongs to E74's reopening.
+
+- **E85 (open) E74 is wrong and needs reopening.** E74 diagnosed the memory
+  plateau as glibc arena behaviour and recommended `MALLOC_ARENA_MAX=2` without
+  testing it. E83 tested it: no measurable change. The plateau E74 observed was
+  real but the mechanism was fragmentation reaching a ceiling at low allocation
+  churn, not arena count. E74's entry should be corrected to say so, its
+  watcher-threshold guidance re-derived under jemalloc (the working set may sit
+  lower now), and this is also the third entry to carry the same lesson: a
+  diagnosis inferred from a curve's shape and closed without testing its own
+  recommendation is not a diagnosis.
+
+- **E86 (open, minor, upstream) aiortc accumulates RateBucket objects.**
+  `gc_growth` showed +4,004 `RateBucket` and +26,622 tuples in one 330 s window,
+  from `aiortc/rate.py` (the remb bandwidth estimator's history). Roughly 3 MB
+  per window, real but two orders below the fragmentation, and invisible now
+  that jemalloc handles the churn. Worth checking whether aiortc's
+  RemoteBitrateEstimator ever prunes its buckets, and filing upstream if not.
+  Not load-bearing for this deployment.

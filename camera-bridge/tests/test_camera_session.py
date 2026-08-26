@@ -4357,6 +4357,102 @@ async def test_audio_drops_accumulate_separately_from_the_video_count():
         f"{state.get('dropped_frames')!r}")
 
 
+async def test_consumed_audio_retains_nothing_across_rotations():
+    """Nothing in this loop may keep a per-session reference alive once the
+    session has been retired, and nothing may retain a reference PER DECODED
+    AUDIO FRAME.
+
+    This is the bound E83 is stated against. The container grows about 12 MB a
+    minute with audio consuming and about 3.7 without, which works out near
+    15 MB per session rotation -- roughly 6 kB per decoded frame at the rate the
+    live cameras deliver, i.e. exactly the size of a retained `av.AudioFrame`.
+    Nothing in this loop reproduces that offline (five rigs: the decoder patch
+    alone, the real JanusCameraSession's audio path, this loop, a real ffmpeg
+    child fed real decoded frames, and real aiortc peer connections rotated),
+    so what this test pins is the invariant those rigs established rather than
+    a defect they found: **retention must not scale with the number of audio
+    frames, and a retired session must be released.**
+
+    Both halves have to be here. A leak of one small object per frame would not
+    move a per-rotation object count much, and a retained session would not move
+    a per-frame one at all -- but a retired `JanusCameraSession` owns a
+    decoded-frame queue of up to 8 x 3.11 MB on the doorbell, which is the same
+    order as the number being chased.
+
+    The growth allowance is expressed against DECODED FRAMES, not against
+    rotations, because that is the shape of the hypothesis: 5 percent of the
+    frames this run decodes is hundreds of objects of ordinary churn and still
+    orders of magnitude below one-object-per-frame.
+    """
+    # A single plan, which is also what makes trimming ctx.sessions below safe:
+    # Ctx.next_plan indexes the plan list by len(ctx.sessions), and with one
+    # plan that index is clamped to 0 however short the list is kept.
+    plans = [Plan(frames=steady(400, 0.005), tail=("repeat", 0.005, 1280, 720),
+                  audio_interval=0.002, audio_fmt=("s16", 8000, 1),
+                  audio_samples=512)]
+    refs = []
+
+    def harvest(ctx):
+        """Weakrefs to every session built since the last call, and drop the
+        harness's own strong references to them.
+
+        Ctx keeps every session and sink it ever made, which is unbounded growth
+        by construction -- measuring the loop's retention while the rig holds
+        everything would measure the rig.
+        """
+        refs.extend(weakref.ref(s) for s in ctx.sessions)
+        del ctx.sessions[:]
+        del ctx.sinks[:-1]
+
+    with consume_knob(True), scenario(plans) as ctx:
+        start(ctx)
+        # Warm up first: the process-wide cost of building the first sink, the
+        # first status dict and the first hold is start-up, not per-rotation
+        # growth, and counting it as growth is how a baseline lies.
+        await run_until(ctx, lambda x: len(x.gvs_calls) >= 3, timeout=20,
+                        why="warm-up rotations")
+        harvest(ctx)
+        gc.collect()
+        objects_before = len(gc.get_objects())
+        frames_before = ctx.state.get("decoded_audio_frames") or 0
+        target = len(ctx.gvs_calls) + 12
+        while len(ctx.gvs_calls) < target:
+            seen = len(ctx.gvs_calls)
+            await run_until(ctx, lambda x, n=seen: len(x.gvs_calls) > n,
+                            timeout=20, why="the next rotation")
+            harvest(ctx)
+        rotations = len(ctx.gvs_calls) - (target - 12)
+        decoded = (ctx.state.get("decoded_audio_frames") or 0) - frames_before
+        await stop(ctx)
+    harvest(ctx)
+    gc.collect()
+    objects_after = len(gc.get_objects())
+    alive = [ref for ref in refs if ref() is not None]
+    audio_frames_alive = sum(1 for obj in gc.get_objects()
+                             if isinstance(obj, FakeAudioFrame))
+
+    assert decoded > 500, (
+        f"only {decoded} audio frames were decoded across {rotations} "
+        "rotations, which is too few for this test to be measuring anything -- "
+        "the audio path is not being exercised")
+    assert len(alive) <= 1, (
+        f"{len(alive)} of {len(refs)} retired sessions are still reachable "
+        f"after {rotations} rotations. A JanusCameraSession owns its "
+        "decoded-frame queue, so holding one holds up to 8 frames of 3.11 MB "
+        "with it -- the shape of the growth E83 is chasing. At most the "
+        "in-flight session may survive")
+    assert audio_frames_alive <= c.AUDIO_QUEUE_MAXSIZE, (
+        f"{audio_frames_alive} decoded audio frames are still reachable after "
+        f"{decoded} were pumped. Nothing past the session's own bounded queue "
+        "may outlive the write that consumed it")
+    growth = objects_after - objects_before
+    assert growth <= max(200, decoded * 0.05), (
+        f"{growth} objects were retained across {rotations} rotations that "
+        f"decoded {decoded} audio frames. Retention that tracks the FRAME "
+        "count is the signature in E83: about 6 kB per decoded frame, which is "
+        "an av.AudioFrame kept alive")
+
+
 # --------------------------------------------------------------------------
 # 6d. The session-handover trace (E76)
 # --------------------------------------------------------------------------
@@ -4854,6 +4950,7 @@ TESTS = [
     test_the_consume_knob_takes_the_same_three_value_forms,
     test_the_offered_audio_track_is_pumped_only_when_the_session_consumes,
     test_audio_drops_accumulate_separately_from_the_video_count,
+    test_consumed_audio_retains_nothing_across_rotations,
     test_the_handover_trace_is_off_by_default_and_emits_nothing,
     test_a_traced_rotation_emits_one_record_covering_the_whole_window,
     test_the_record_shows_where_the_audio_timeline_stopped,

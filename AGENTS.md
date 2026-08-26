@@ -16,7 +16,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 | Path | What it is |
 | --- | --- |
 | `custom_components/telus_smarthome/` | HA integration. Entry: `__init__.py`. Auth patch: `telus_auth_patch.py`. Platforms: `alarm_control_panel.py`, `binary_sensor.py`, `lock.py`, `camera.py`, `event.py`, etc. Bridge client: `bridge_client.py`. Talk service: `speak_service.py`. |
-| `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. aiortc patch: `aiortc_opus_patch.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Control API: `control_server.py`. Config: `config.py`. Rotation-window instrumentation (off by default): `handover_trace.py`. |
+| `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. aiortc patch: `aiortc_opus_patch.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Control API: `control_server.py`. Config: `config.py`. Rotation-window instrumentation (off by default): `handover_trace.py`. Container-memory instrumentation (off by default): `memory_trace.py`. |
 | `camera-bridge/{Dockerfile,docker-compose.yml,mediamtx.yml,entrypoint.sh}` | Build + runtime. |
 | `tests/` (repo root) | Integration regression suites + `ha_stubs.py`, the `homeassistant.*` stand-in tree that lets them run without Home Assistant installed. |
 | `install.sh` (repo root) | Interactive installer for both components. |
@@ -74,7 +74,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   re-deriving a settled question.
 - **Tests are part of the change too, on the same terms as the docs.** There are
   two regression suites, both run in full by CI: `camera-bridge/tests/`
-  (thirteen files) for the bridge, and `tests/` at the repo root for the
+  (fourteen files) for the bridge, and `tests/` at the repo root for the
   integration. Both cover behaviour that fails *silently* in production: a
   camera that freezes instead of erroring, a setting that reads back a value it
   never wrote, an audio stream that drifts, a doorbell event that quietly stops

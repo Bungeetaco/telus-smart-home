@@ -7,6 +7,7 @@ import aiohttp
 
 from . import config as c
 from . import control_server
+from . import memory_trace
 from . import restart_guard
 from .telus_auth import RateLimited, TelusSession, relogin_if_stale
 from .telus_rest import list_cameras, get_video_source
@@ -305,6 +306,13 @@ async def main():
         control_runner = await control_server.start_control_server(
             telus, login_lock, camera_registry, camera_status, lifecycle, talk_manager
         )
+        # None unless config.MEMORY_TRACE is on, in which case it samples on its
+        # OWN timer (see memory_trace.py). Bound BEFORE the try so the finally
+        # can always cancel it, and started outside the camera loops
+        # deliberately: the question it answers is about the whole container,
+        # including the processes this one does not own, so it has to keep
+        # sampling while a camera is reconnecting.
+        memory_task = memory_trace.start()
         try:
             # First discovery pass runs synchronously so /control/cameras is
             # populated before we consider startup done, rather than racing the HA
@@ -355,6 +363,8 @@ async def main():
             # unexpected exception from one itself (see its deactivate()).
             await asyncio.gather(discovery_task, fallback_task)
         finally:
+            if memory_task is not None:
+                memory_task.cancel()
             control_runner.app[control_server.APP_SECRET_ROTATION_TASK].cancel()
             await control_runner.cleanup()
 
