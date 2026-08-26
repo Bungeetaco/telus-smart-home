@@ -21,6 +21,7 @@ the component READMEs.
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
 - [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
 - [Measuring what a session rotation costs the audio timeline](#measuring-what-a-session-rotation-costs-the-audio-timeline)
+- [Attributing the container's memory](#attributing-the-containers-memory)
 - [The status says `streaming` but MediaMTX has no path](#the-status-says-streaming-but-mediamtx-has-no-path)
 - [A live view drifts further behind real time the longer it runs](#a-live-view-drifts-further-behind-real-time-the-longer-it-runs)
 - [`frame rate changed`: the publisher rebuilds and readers reconnect once](#frame-rate-changed-the-publisher-rebuilds-and-readers-reconnect-once)
@@ -465,6 +466,63 @@ a sample of its own, because a sampler running on the event loop during the very
 window being measured would perturb it. The records are in the **log only**, not
 in `/control/status`: a handover is an event, and a snapshot endpoint polled
 continuously would report each one an arbitrary number of times or not at all.
+
+---
+
+## Attributing the container's memory
+
+**When to use this.** The container's memory climbs and it is not known which
+process is climbing. The number `docker stats` reports, and the number the stack
+watcher alerts on, is the **cgroup's**, and the cgroup holds four processes:
+`entrypoint.sh` runs MediaMTX and `python3 -m bridge.main` side by side, and the
+bridge launches one ffmpeg per camera. All of them count against
+`docker-compose.yml`'s `mem_limit` (768 MiB by default). "The bridge is leaking"
+is therefore a claim about a sum.
+
+**Do the free measurement first.** One command decomposes it, with no rebuild,
+no restart and no code:
+
+```
+sudo docker exec telus-cam-bridge sh -c 'for p in /proc/[0-9]*; do \
+  echo "$(cut -d" " -f2 $p/statm) $(cat $p/comm)"; done | sort -rn'
+```
+
+The first column is resident pages (multiply by 4096 for bytes). Repeat it ten
+minutes later and subtract. If the growing row is `mediamtx` or `ffmpeg`, nothing
+in the Python bridge is the cause and no amount of reading `camera_session.py`
+will find it.
+
+**Then turn on `MEMORY_TRACE`** if the growing row is `python3`. Set
+`MEMORY_TRACE=true` in the bridge's `.env` and `docker compose up -d --build`. It
+is off by default, and unlike `HANDOVER_TRACE` it is **not** safe to leave on: it
+enables `tracemalloc` (roughly double per-allocation cost, plus a frame stored
+per live allocation) and each sample walks every gc-tracked object.
+
+```
+sudo docker logs --since 1h telus-cam-bridge | grep 'memory trace' \
+  | sed 's/.*memory trace //' | jq .
+```
+
+One line every `MEMORY_TRACE_INTERVAL_S` (330 s by default, which is two session
+rotations, so any two consecutive records bracket at least one whole rotation per
+camera). Read it outermost first:
+
+| Field | What it tells you |
+| --- | --- |
+| `container.procs` | Every process in the container, largest RSS first, with `container.rss_mb` as the sum over all of them and `container.procs_total` as how many there were. This is the same decomposition as the command above, taken automatically beside everything else. |
+| `python.rss_mb`, `python.rss_mb_per_min` | The Python process only, and its rate since the previous record. **This is the number to judge a climb by** -- never `tracemalloc.traced_mb`, which grows because tracing is on. |
+| `glibc.in_use_mb` vs `glibc.free_not_returned_mb` | Whether the Python heap is full or the allocator is simply holding freed memory. A large and growing `free_not_returned_mb` against a flat `in_use_mb` is per-thread arena behaviour, not a leak: this process runs ~119 threads, and glibc allows many arenas each able to reach 64 MB. `tracemalloc` cannot see this, because it only tracks the Python allocator. |
+| `python.gc_growth` | The object types that grew since the previous record, biggest movers first. A retained decoded audio or video frame appears here as a climbing `AudioFrame` / `VideoFrame` count and nowhere else. |
+| `tracemalloc.top` | Allocation sites, sorted by `d_mb` (growth since the previous record) rather than by size, so a large steady buffer does not outrank the thing that is actually growing. The first record has `d_mb: null` on every row, because it has nothing to diff against. |
+
+**What each answer means.** Growth in a non-`python3` row is MediaMTX or ffmpeg
+and is not fixable from this repository. Growth in `glibc.free_not_returned_mb`
+with a flat `in_use_mb` is allocator behaviour, and `MALLOC_ARENA_MAX=2` in the
+container's environment is the lever for it. Growth in `python.gc_growth` with a
+matching `tracemalloc.top` row names the retention directly.
+
+**Turn it off again** once the question is answered: `MEMORY_TRACE` unset (or
+`false`) and rebuild.
 
 ---
 

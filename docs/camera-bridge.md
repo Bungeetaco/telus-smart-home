@@ -710,6 +710,7 @@ environment variables:
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 | `CONTROL_ACCESS_LOG` | `false` | Per-request access logging on the control endpoint; off by default (see [configuration.md](configuration.md)). |
 | `HANDOVER_TRACE` | `false` | One structured line per session rotation describing the handover window; off by default (see [the section below](#instrumenting-the-handover-window)). |
+| `MEMORY_TRACE` | `false` | One structured line per interval saying which process in the container holds the memory; off by default, and **not** safe to leave on (see [the section below](#instrumenting-the-containers-memory)). |
 | `HOST_SHARED_DIR` | Supervised path | Host side of the `/shared` mount. |
 | `RENDER_GID` | `992` | Host `render` group GID for `/dev/dri` access. |
 | `BRIDGE_MEM_LIMIT` / `BRIDGE_CPU_LIMIT` | `768m` / `2.0` | Container resource caps. |
@@ -802,6 +803,52 @@ ffmpeg, not what ffmpeg's muxer has consumed; a stall is located between the two
 marks that bracket it and no more finely. Field-by-field, with what a healthy
 rotation and a stalled one look like:
 [troubleshooting.md](troubleshooting.md#measuring-what-a-session-rotation-costs-the-audio-timeline).
+
+### Instrumenting the container's memory
+
+`MEMORY_TRACE` (off by default, implemented in `bridge/memory_trace.py`) adds
+**one structured line every `MEMORY_TRACE_INTERVAL_S`**: `memory trace {...}`,
+where everything after the prefix is a single JSON object.
+
+It exists because the container's memory figure is a **sum over four
+processes**, and nothing else in this repository decomposes it. `entrypoint.sh`
+runs MediaMTX and `python3 -m bridge.main` side by side, and the bridge launches
+one ffmpeg per camera; all of them count against `docker-compose.yml`'s
+`mem_limit`. So "the bridge is leaking" is a claim about that sum, and the
+candidate mechanisms behind an audio-correlated climb have different fixes in
+different places: MediaMTX buffering a second (AAC) track per stream for its
+readers, ffmpeg's two-input mux holding packets to interleave them, the Python
+heap retaining decoded frames, or glibc holding freed memory in per-thread
+arenas rather than returning it. Three of those four are not fixable from this
+repository at all.
+
+The record therefore answers four questions, outermost first:
+
+| Field | Answers |
+| --- | --- |
+| `container.procs` | **which process** holds the megabytes, largest first, with `container.rss_mb` as the sum over all of them. If the growth is not in `python3`, nothing else in the record matters. |
+| `glibc` | **the heap or the allocator**: `in_use_mb` against `free_not_returned_mb`. Freed memory sitting in arenas is a large and growing `free_not_returned_mb` against a flat `in_use_mb`, which is the plateau behaviour E74 measured. `tracemalloc` cannot see this at all, because it only tracks the Python allocator. |
+| `python.gc_growth` | **what kind of object** grew since the previous record, by type. A retained `av.AudioFrame` per decoded frame shows here and nowhere else. |
+| `tracemalloc.top` | **which line** allocated it, sorted by `d_mb` (growth since the previous record) rather than by size, so a large steady buffer does not outrank the thing that is actually growing. |
+
+Consecutive records are `MEMORY_TRACE_INTERVAL_S` apart, and the default (330 s)
+is two of the ~165 s session rotations, so any two of them bracket at least one
+whole rotation per camera: a per-rotation retention appears as a step between
+records rather than as noise inside one.
+
+Two properties are deliberate, and one of them is the opposite of
+`HANDOVER_TRACE`'s:
+
+- **It is off by default and builds nothing when off.** `memory_trace.start()`
+  returns `None`, no sampler task exists, and `tracemalloc` is never enabled.
+- **It is NOT safe to leave on.** `tracemalloc` roughly doubles per-allocation
+  cost and stores a frame per live allocation, and every sample walks every
+  gc-tracked object. It also adds to the number under investigation, so read
+  `python.rss_mb` from the record and never `tracemalloc.traced_mb` when
+  deciding whether a climb is still there. Turn it on to attribute a climb,
+  then turn it off.
+
+Reading one: [troubleshooting.md](troubleshooting.md#attributing-the-containers-memory).
 
 ### Downstream (listen) audio
 

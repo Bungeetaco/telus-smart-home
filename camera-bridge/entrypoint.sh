@@ -47,7 +47,22 @@ for i in $(seq 1 30); do
   sleep 0.5
 done
 
-python3 -m bridge.main &
+# jemalloc, for the PYTHON process only. glibc's arenas fragment under the
+# bridge's mixed allocation sizes (3.11 MB frame buffers at 15 fps beside ~15/s
+# small audio allocations) until RSS grows without bound while the in-use heap
+# stays flat -- measured, not inferred; see backlog E83 and the Dockerfile note.
+# Deliberately NOT exported globally: MediaMTX is Go (its runtime never touches
+# glibc malloc for the heap) and ffmpeg has shown no growth (~127 MB flat), so
+# scoping the preload to the one process with the pathology keeps the change
+# auditable and the blast radius minimal. If the .so is ever missing the
+# preload degrades to glibc with a warning on stderr rather than failing.
+JEMALLOC_SO=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+if [ -e "$JEMALLOC_SO" ]; then
+  LD_PRELOAD="$JEMALLOC_SO" python3 -m bridge.main &
+else
+  echo "entrypoint.sh: $JEMALLOC_SO not found, running the bridge on glibc malloc (E83 fragmentation will return)" >&2
+  python3 -m bridge.main &
+fi
 BRIDGE_PID=$!
 
 trap 'kill $MEDIAMTX_PID $BRIDGE_PID 2>/dev/null' TERM INT

@@ -18,9 +18,19 @@ FROM python:3.14-slim
 # attack surface of a container that runs 24/7. The pip install below is verified
 # to resolve to wheels only; if a future pin ever lacks one, that install fails
 # loudly at build time rather than silently regressing this.
+# libjemalloc2: the bridge's allocation pattern -- 3.11 MB video frame buffers
+# at 15 fps interleaved with ~15/s small audio allocations -- fragments glibc's
+# arenas so badly that RSS grows ~12 MB/min without bound while Python's actual
+# in-use heap stays flat (measured with mallinfo2: in_use +3 MB while
+# free_not_returned grew +109 MB in one 330 s window, only 2.92 MB of it
+# releasable). MALLOC_ARENA_MAX=2 measurably did NOT help, because the arena
+# count was never the problem. jemalloc's size-class slabs handle
+# large/small interleave without this failure mode. Wired via LD_PRELOAD in
+# entrypoint.sh for the python process. See backlog E83.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg curl ca-certificates bash \
         intel-media-va-driver mesa-va-drivers \
+        libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
 
 # MediaMTX: single static binary, no runtime deps. Pin the version tested against this design.
