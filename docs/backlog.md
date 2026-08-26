@@ -25,33 +25,18 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 **Blocking, and actionable now**
 
-- **E80**: fixed in the bridge, **awaiting live validation**. The audio track is
-  advertised as Opus and carries G.711 mu-law at 8 kHz, so ~94% of it was being
-  discarded and the published audio was ~6% real audio and ~94% silence fill.
-  The decoder now sniffs the first 20 packets of each session and commits to the
-  codec that actually arrives. Self-verifying: `decoded_audio_frames` should
-  climb at ~50/s per consuming camera rather than ~3/s, with
-  `audio_codec: "pcmu"`, `audio_format: "8000Hz/1ch/s16"` and
-  `audio_decoder.discarded` flat. The entry lists what could not be verified
-  from a workstation, including whether 8 kHz AAC is as acceptable downstream as
-  48 kHz was.
-- **E81**: fixed in the bridge, **awaiting live validation**. A camera with
-  sparse audio could not finish E80's codec sniff before its publisher was
-  sized, so the publisher was built from a guessed audio shape, the first real
-  frame failed the session, and the restart threw away the sniff: a livelock,
-  and that camera published nothing at all. The publisher is now built
-  video-only until a real frame has been decoded, and gains its audio input by
-  one bounded rebuild at a rotation; no audio-format change can fail a session.
-  Validation is re-enabling audio on the living room camera and watching
-  `publisher_audio_format` fill in exactly once, `audio_format_rebuilds` reach
-  1 and stop, and no `camera session failed` lines appear for it.
-- **E62 / E60**: fixed in the bridge, **awaiting live validation**. Audio
-  consumption took the doorbell off the air after ~14 minutes while
-  `/control/status` reported `streaming` throughout. Four changes shipped: audio
-  pacing at half the muxer lead, a time-based video queue, a wedged audio pipe
-  degrading to video-only, and a bounded video drain that makes "publishing to
-  nowhere" detectable. Validation is a multi-session soak with audio enabled
-  **on the doorbell only**, watching the four signals listed at the end of E62.
+- **E80** (DONE, validated live): the audio track is advertised as Opus and
+  carries G.711 mu-law at 8 kHz. The sniff commits every session to mu-law
+  ("20 of 20 packets"), coverage went from ~6% to ~100% of the timeline,
+  `audio_decoder.discarded` is flat at zero, and 8 kHz AAC carries end to end
+  (go2rtc `MPEG4-GENERIC/8000`, Frigate copy preset stores it).
+- **E81** (DONE, validated live): the sparse-audio sniff livelock. Both cameras
+  converged with exactly one bounded rebuild each and zero failed sessions,
+  where the living room previously failed every session and published nothing.
+- **E62 / E60** (DONE, validated live): the pacing and liveness changes have
+  run through multi-hour soaks across many rotations with no publisher loss.
+  The remaining audio-attributable residual (~14 drops per rotation at the
+  handover) is E76's, not this entry's.
 - **E66** (open): the integration now has a test harness (E63), but it covers
   three modules. The config flow, the three services, the settings-backed
   platforms and every setup/teardown path are still verified by reading and
