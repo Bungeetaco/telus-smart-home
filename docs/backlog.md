@@ -204,6 +204,48 @@ and evidence. Grouped by whether anything can actually be done about them.
   TELUS relay is at fault. Nothing in this repo can distinguish them, and no
   change here would fix either.
 
+- **E97** (open, camera-side, measured) - the living-room camera's NVR audio
+  cuts out intermittently and the doorbell's does not, because the living-room
+  camera STOPS SENDING audio packets for stretches while its video keeps
+  flowing; the bridge fills the gaps with silence by design, and those
+  zero-fill stretches are the cutouts. Evidence, all from one evening:
+
+  * Recording segments during the cutouts read `mean_volume: -91.0 dB` with
+    `max_volume: -91.0 dB` -- digital zero, which no real microphone produces
+    (a live mic's quiet floor on these cameras reads around -70 dB). 3 of the
+    40 most recent living-room segments were fully silent; 0 of the doorbell's.
+  * The producer-side decoded-audio counter dips in exactly the five-minute
+    windows containing the silent segments (+2,408 and +2,305 against a
+    +3,400-3,650 norm), while the doorbell holds +3,900-4,500 -- close to the
+    continuous-stream rate -- through the same windows. Frames that were sent
+    but dropped are counted separately and are negligible, so the shortfall is
+    frames never sent.
+  * The whole-stack watcher's audio-not-advancing check fired 0 times in the
+    same 3 hours: the gaps are shorter than its threshold, which is why this
+    was invisible until the NVR made it audible.
+
+  Consistent with the V522IR's known sparse-audio behaviour (the same property
+  that caused E81's sniff livelock): the camera appears to suppress its audio
+  send when the room is quiet, where the doorbell streams its porch noise floor
+  continuously. Nothing bridge-side is dropping this audio; a fix, if one
+  exists, is a camera/portal setting or an accepted limitation. Frigate's
+  audio-based detection on this camera would also be blind during the gaps.
+
+- **E98** (open, decide-then-tune) - the two cameras' recorded audio levels are
+  wildly asymmetric: the living room peaks at -0.2 to -0.6 dB (at or brushing
+  full scale, so loud content likely clips) with means of -15 to -39 dB, while
+  the doorbell means sit at -47 to -72 dB with peaks near -14 dB at their
+  loudest. The doorbell is NOT broken quiet: those levels are the correct
+  decode of a quiet porch (the loud pre-E80 readings were decode garbage), and
+  the level difference is real microphone/gain difference between the devices.
+  Neither camera exposes a microphone-gain entity (`*_speaker_volume` is
+  talkdown output, unrelated). Options, none implemented: check the alarm.com
+  portal for a per-camera microphone/audio-volume setting (the settings survey
+  has not looked for one); apply a fixed gain on the doorbell's audio encode in
+  the bridge; or normalize per camera in Frigate's ffmpeg output args. Pick
+  deliberately -- boosting the doorbell also boosts its noise floor, and
+  attenuating the living room trades clipping for quieter speech.
+
 **Recently shipped, listed only because the trap is expensive**
 
 - **E79** (DONE) - Frigate records to the NAS vault pool over virtiofs. If the
