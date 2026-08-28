@@ -1,0 +1,368 @@
+"""Tests for the JSON-envelope MWS actions: camera siren and privacy mode.
+
+Run from the camera-bridge directory:
+
+    TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_mws_json_actions.py
+
+These actions are the odd ones out in mws_client: ordinary form-urlencoded MWS
+POSTs carrying the standard token envelope, but the decompiled app models the
+replies as JSON rather than XML (no live command was ever captured on the
+account, see docs/mobile-api-findings.md).
+
+That model turned out to be only half right, which is why this file covers BOTH
+encodings despite its name: the live server answers the two READ actions in XML.
+The client is JSON-first with an XML path, and _parse_mws_ack dispatches on the
+body itself. Three things are worth pinning because nothing else can catch
+them:
+
+  * the JSON envelope (``isSuccess`` / ``ErrorMessage``) has to map onto the same
+    ok/error contract the XML acks produce, or every caller needs to know which
+    response family it is holding; and
+  * ``IsActive`` goes on the wire as the STRING "true"/"false". ``str(True)`` is
+    "True", which the server does not recognise -- and the failure mode is a
+    privacy-mode command that reports success and changes nothing.
+
+No network and no live account: a local aiohttp server stands in for the MWS
+servlet and records the form each action posts. Every value here is a
+placeholder; no real session token exists in this file.
+"""
+import asyncio
+import contextlib
+import json
+import os
+import pathlib
+import sys
+
+import aiohttp
+from aiohttp import web
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
+os.environ.setdefault("TELUS_PASSWORD", "unused")
+
+from bridge import mws_client  # noqa: E402
+
+TOKEN = "placeholder-session-token"          # not a real token
+CUSTOMER = "1234567"
+DEVICE = "2048"
+
+
+def _ack(payload):
+    """Run mws_client._parse_json_ack over a DECODED payload.
+
+    This used to try the raw-body form first and fall back to the dict form, on
+    the grounds that either was a reasonable interface. That hedge was broken:
+    _parse_json_ack fails CLOSED on an unrecognised payload rather than raising,
+    so the string attempt returned an ok=False ack instead of falling through,
+    and every mapping assertion below was silently checking the rejection path.
+    The interface is settled -- _post_mws_json decodes, _parse_json_ack takes the
+    dict -- so this now says so, and the fail-closed behaviour is pinned
+    separately in test_json_ack_mapping.
+    """
+    return mws_client._parse_json_ack(payload)
+
+
+class FakeMws:
+    """Stands in for MobileServlet/SubmitRequest.aspx: records each posted form
+    and replies with a canned JSON envelope, chosen per Action."""
+
+    def __init__(self, replies):
+        self.replies = replies              # {Action: response dict}
+        self.forms: list[dict] = []
+        self.content_types: list[str] = []
+
+    def form_for(self, action):
+        for form in self.forms:
+            if form.get("Action") == action:
+                return form
+        raise AssertionError(f"no {action} request was posted (saw "
+                             f"{[f.get('Action') for f in self.forms]})")
+
+    async def handle(self, request):
+        # Recorded rather than asserted here: an assert inside the handler would
+        # surface as an HTTP 500 and a confusing client-side error instead of the
+        # test's own failure message.
+        self.content_types.append(request.headers.get("Content-Type", ""))
+        form = dict(await request.post())
+        self.forms.append(form)
+        return web.json_response(self.replies.get(form.get("Action"), {"isSuccess": True}))
+
+
+async def _serve(fake, port):
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", fake.handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    return runner
+
+
+@contextlib.asynccontextmanager
+async def _mws(replies, port):
+    fake = FakeMws(replies)
+    runner = await _serve(fake, port)
+    original = mws_client.MWS_URL
+    mws_client.MWS_URL = f"http://127.0.0.1:{port}/MobileServlet/SubmitRequest.aspx"
+    try:
+        async with aiohttp.ClientSession() as session:
+            yield fake, session
+    finally:
+        mws_client.MWS_URL = original
+        await runner.cleanup()
+
+
+def test_json_ack_mapping():
+    """isSuccess drives ok; ErrorMessage becomes the error, empty string aside."""
+    ok = _ack({"isSuccess": True, "ErrorMessage": "", "DidSeamlesslyLogin": False})
+    assert ok["ok"] is True, ok
+    assert not ok["error"], f"an empty ErrorMessage must not become an error: {ok}"
+
+    refused = _ack({"isSuccess": False, "ErrorMessage": "Not permitted",
+                    "DidSeamlesslyLogin": False})
+    assert refused["ok"] is False, refused
+    assert refused["error"] == "Not permitted", refused
+
+    # A failure with no message is still a failure -- ok must come from isSuccess,
+    # not from "did the server bother to explain itself".
+    silent = _ack({"isSuccess": False})
+    assert silent["ok"] is False, silent
+
+    # ...and the converse: a payload arriving with data but no isSuccess is not a
+    # success by default. The siren commands run against a live alarm device;
+    # "assume it worked" is the wrong default there.
+    assumed = _ack({"AllCameraSirenInfo": []})
+    assert assumed["ok"] is False, assumed
+
+    # Fail closed on a shape that is not an envelope at all -- an HTML error page
+    # or a raw body handed in by mistake must not read as success.
+    for junk in ('{"isSuccess": true}', None, [], 42):
+        rejected = _ack(junk)
+        assert rejected["ok"] is False, f"{junk!r} must not parse as success"
+        assert rejected["data"] == {}, rejected
+    print("  ok  json ack: isSuccess -> ok, ErrorMessage -> error, empty message "
+          "isn't an error, missing isSuccess isn't a success")
+
+
+def test_xml_ack_mapping():
+    """The live server answers several of these actions in XML, not JSON.
+
+    This is the exact body the account returns for GetAllSirenDevices -- captured
+    from the deployed bridge, not constructed. The decompiled app modelled these
+    actions as JSON, so the client shipped JSON-only and every call raised
+    "non-JSON body"; both encodings have to work.
+    """
+    real = ('<GetAllSirenDevicesResponse ts="0" dsl="false" s="true">\r\n'
+            '  <AllCameraSirenInfo />\r\n'
+            '</GetAllSirenDevicesResponse>')
+    ack = mws_client._parse_mws_ack(real)
+    # s="true" with an EMPTY list means "answered: no siren-capable devices".
+    # Reading that as a failure would make callers retry a question already
+    # answered -- and, worse, look like a transient fault rather than a fact
+    # about the account.
+    assert ack["ok"] is True, ack
+    assert ack["data"]["AllCameraSirenInfo"] == [], ack
+    assert ack["token_status"] == 0, ack
+    assert ack["error"] is None, ack
+
+    # A populated container: attribute names survive exactly as the server spells
+    # them, so the same consumer code matches XML and JSON records alike. Note
+    # the booleans arrive as the STRINGS "true"/"false" here too.
+    populated = ('<GetAllSirenDevicesResponse ts="0" s="true"><AllCameraSirenInfo>'
+                 '<CameraSirenInfo DeviceId="2048" canManuallyTriggerSiren="false"/>'
+                 '</AllCameraSirenInfo></GetAllSirenDevicesResponse>')
+    entry = mws_client._parse_mws_ack(populated)["data"]["AllCameraSirenInfo"][0]
+    assert entry["DeviceId"] == "2048", entry
+    assert entry["canManuallyTriggerSiren"] == "false", entry
+    assert mws_client._json_bool(entry["canManuallyTriggerSiren"]) is False
+
+    # A failed action, and the envelope's error message.
+    refused = mws_client._parse_mws_ack(
+        '<ManualSirenStartResponse ts="0" s="false" em="Not permitted" />')
+    assert refused["ok"] is False, refused
+    assert refused["error"] == "Not permitted", refused
+
+    # A logged-out token is not a success however the body is spelled.
+    assert mws_client._parse_mws_ack(
+        '<GetAllSirenDevicesResponse ts="1" s="true" />')["ok"] is False
+
+    # JSON still works, and anything that is neither fails closed.
+    assert mws_client._parse_mws_ack('{"isSuccess": true}')["ok"] is True
+    for junk in ("", "not xml or json", "<unclosed", "null"):
+        assert mws_client._parse_mws_ack(junk)["ok"] is False, junk
+    print("  ok  xml ack: empty container is an answered 'none', attributes keep "
+          "their spelling, ts/s/em map to the JSON shape, junk fails closed")
+
+
+def test_chime_type_options_are_parsed_with_their_server_supplied_names():
+    """The whole reason GetCurrentDoorbellSettings is called at all.
+
+    The website API publishes chimeTypeOptions as bare integers and leaves naming
+    them to a client-side enum in the portal's JavaScript. The mobile API sends
+    the names -- and `sdict`, which says which value means "no wired chime" on
+    this model. Asking the server beats hardcoding a mapping that would then have
+    to stay true for every camera model.
+
+    This body is the LIVE response from the reference doorbell, trimmed to the
+    chime members; attribute names come from the decompiled
+    SupportedChimeTypeOptionsInfoParser (n / v / sdict).
+    """
+    real = ('<gcdsr ts="0" dsl="false" s="true" dn="Doorbell">'
+            '<ct n="Mechanical" v="0" sdict="false" sdcds="true"/>'
+            '<scto>'
+            '<sctoi n="None" v="-1" sdict="true" sdcds="true"/>'
+            '<sctoi n="Mechanical" v="0" sdict="false" sdcds="true"/>'
+            '<sctoi n="Digital" v="1" sdict="false" sdcds="false"/>'
+            '</scto></gcdsr>')
+    parsed = mws_client.parse_chime_type_options(mws_client._parse_mws_ack(real))
+
+    assert parsed["selected"] == 0, parsed
+    assert [o["value"] for o in parsed["options"]] == [-1, 0, 1], parsed
+    assert [o["label"] for o in parsed["options"]] == ["None", "Mechanical", "Digital"]
+    # Only "None" disables the indoor chime toggle. Nothing here hardcodes -1:
+    # the server says which one it is, which is the point.
+    assert [o["disables_indoor_chime"] for o in parsed["options"]] == [True, False, False]
+
+    # sdict arrives as the STRING "true"/"false" like every other MWS boolean, so
+    # a plain truthiness test would mark every option as disabling.
+    assert parsed["options"][1]["disables_indoor_chime"] is False
+
+    # A response with no chime members is empty, not an error -- callers fall back
+    # to the website's bare integers rather than losing the control.
+    empty = mws_client.parse_chime_type_options(
+        mws_client._parse_mws_ack('<gcdsr ts="0" s="true" />'))
+    assert empty == {"options": [], "selected": None}, empty
+
+    # An option with no usable value is skipped rather than guessed at.
+    junk = mws_client.parse_chime_type_options(mws_client._parse_mws_ack(
+        '<gcdsr ts="0" s="true"><scto>'
+        '<sctoi n="Broken" v="not-a-number"/><sctoi n="Digital" v="1"/>'
+        '</scto></gcdsr>'))
+    assert [o["value"] for o in junk["options"]] == [1], junk
+
+    # An option the server names with nothing usable still gets a label, so a
+    # select never renders a blank row.
+    unnamed = mws_client.parse_chime_type_options(mws_client._parse_mws_ack(
+        '<gcdsr ts="0" s="true"><scto><sctoi n="" v="7"/></scto></gcdsr>'))
+    assert unnamed["options"][0]["label"] == "7", unnamed
+    print("  ok  chime types: server-supplied names + the sdict flag that says "
+          "which value means 'no wired chime'")
+
+
+async def test_privacy_mode_sends_string_bool():
+    """IsActive is the string "true"/"false" -- never Python's "True"/"False"."""
+    replies = {"SetCameraPrivacyModeState": {
+        "isSuccess": True, "ErrorMessage": "",
+        "CameraPrivacyModeInfo": {"DeviceId": DEVICE, "State": 1}}}
+    async with _mws(replies, 8791) as (fake, session):
+        out = await mws_client.set_privacy_mode(session, TOKEN, DEVICE, True,
+                                                customer_id=CUSTOMER)
+        form = fake.form_for("SetCameraPrivacyModeState")
+        assert form["IsActive"] == "true", (
+            f"IsActive was sent as {form['IsActive']!r}; the server expects the "
+            'lowercase string "true"')
+        assert form["DeviceId"] == DEVICE, form
+        assert out["ok"] is True, out
+
+        await mws_client.set_privacy_mode(session, TOKEN, DEVICE, False,
+                                          customer_id=CUSTOMER)
+        off = fake.forms[-1]
+        assert off["IsActive"] == "false", (
+            f"IsActive was sent as {off['IsActive']!r}; the server expects the "
+            'lowercase string "false"')
+    print('  ok  privacy mode: IsActive on the wire as "true"/"false", not '
+          "str(bool), and the ack maps to ok")
+
+
+async def test_siren_commands_carry_the_token_envelope():
+    """Start/stop use the right Action + DeviceId on the shared token envelope."""
+    replies = {"ManualSirenStart": {"isSuccess": True, "ErrorMessage": ""},
+               "ManualSirenStop": {"isSuccess": False,
+                                   "ErrorMessage": "Siren is not active"}}
+    async with _mws(replies, 8792) as (fake, session):
+        started = await mws_client.start_siren(session, TOKEN, DEVICE,
+                                               customer_id=CUSTOMER)
+        assert started["ok"] is True, started
+        form = fake.form_for("ManualSirenStart")
+        assert form["DeviceId"] == DEVICE, form
+        # The envelope is what makes an MWS action authenticate and scope; a
+        # JSON-reply action is no different from the XML ones here.
+        assert form["SessionToken"] == TOKEN, "SessionToken missing from the envelope"
+        assert form["CustomerId"] == CUSTOMER, "CustomerId missing -- account scoping"
+
+        stopped = await mws_client.stop_siren(session, TOKEN, DEVICE,
+                                              customer_id=CUSTOMER)
+        assert fake.form_for("ManualSirenStop")["DeviceId"] == DEVICE
+        assert stopped["ok"] is False and stopped["error"] == "Siren is not active", (
+            f"a refused stop must surface the server's reason: {stopped}")
+
+        # Only the RESPONSE is JSON -- the request is the same form-urlencoded
+        # POST every other MWS action uses.
+        assert all(ct.startswith("application/x-www-form-urlencoded")
+                   for ct in fake.content_types), fake.content_types
+    print("  ok  siren: ManualSirenStart/Stop carry DeviceId + the token envelope, "
+          "and a refusal surfaces the server's ErrorMessage")
+
+
+async def test_reads_preserve_the_device_payload():
+    """The read actions must hand back the per-device data, not just the ack.
+
+    ``canManuallyTriggerSiren`` is a per-camera permission the app checks before
+    offering the control at all, and the privacy ``State`` is the entity's value.
+    Either one dropped during parsing turns into an entity that lies.
+    """
+    replies = {
+        "GetAllSirenDevices": {
+            "isSuccess": True, "ErrorMessage": "",
+            "AllCameraSirenInfo": [{"DeviceId": DEVICE, "isActive": False,
+                                    "timestampEnd": None,
+                                    "canManuallyTriggerSiren": True}]},
+        "GetAllCameraPrivacyModeInfo": {
+            "isSuccess": True, "ErrorMessage": "",
+            "CameraPrivacyModeInfo": {"DeviceId": DEVICE, "State": 0}},
+    }
+    async with _mws(replies, 8793) as (fake, session):
+        sirens = await mws_client.get_siren_devices(session, TOKEN, customer_id=CUSTOMER)
+        assert sirens["ok"] is True, sirens
+        assert "canManuallyTriggerSiren" in json.dumps(sirens), (
+            "the per-camera trigger permission was dropped -- callers would have "
+            f"to fire the siren blind: {sirens}")
+        assert DEVICE in json.dumps(sirens), sirens
+
+        privacy = await mws_client.get_privacy_mode_info(session, TOKEN,
+                                                         customer_id=CUSTOMER)
+        assert privacy["ok"] is True, privacy
+        assert "CameraPrivacyModeInfo" in json.dumps(privacy), privacy
+
+        # Reads must not carry a DeviceId: these two are account-wide actions,
+        # and neither may have any side effect on a device.
+        for action in ("GetAllSirenDevices", "GetAllCameraPrivacyModeInfo"):
+            assert "DeviceId" not in fake.form_for(action), (
+                f"{action} is account-wide; it must not address a device")
+    print("  ok  reads: siren permission flag and privacy State survive the parse, "
+          "and neither read addresses a device")
+
+
+async def main():
+    failures = 0
+    async_tests = (test_privacy_mode_sends_string_bool,
+                   test_siren_commands_carry_the_token_envelope,
+                   test_reads_preserve_the_device_payload)
+    for test in (test_json_ack_mapping, test_xml_ack_mapping,
+                 test_chime_type_options_are_parsed_with_their_server_supplied_names,
+                 ) + async_tests:
+        try:
+            result = test()
+            if asyncio.iscoroutine(result):
+                await result
+        except AssertionError as exc:
+            print(f"  FAIL {test.__name__}: {exc}")
+            failures += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ERROR {test.__name__}: {exc!r}")
+            failures += 1
+    print("\nRESULT:", "PASS" if not failures else f"FAIL ({failures})")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

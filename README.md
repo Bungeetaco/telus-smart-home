@@ -1,140 +1,339 @@
-# TELUS Smart Home for Home Assistant
+# telus-cam-bridge
 
-**Brings a TELUS Smart Home system (which is really a white-labeled Alarm.com account) into Home Assistant: the alarm panel, locks, sensors, live camera video, and two-way audio through the doorbell.**
+Standalone Docker service that pulls live video from a TELUS Smart Home
+(white-labeled Alarm.com) account and republishes it as RTSP, so Home
+Assistant (or anything else) can consume the cameras as normal RTSP camera
+entities instead of needing WebRTC/Janus support itself.
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.11.0%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
-[![Docker](https://img.shields.io/badge/camera%20bridge-Docker-2496ED?logo=docker&logoColor=white)](camera-bridge)
-![Status](https://img.shields.io/badge/status-unofficial%20%26%20reverse--engineered-yellow)
+**This is not an official TELUS/Alarm.com product** -- it's a reverse-engineered
+personal project (see the top-level README) with no upstream to pull updates
+from. It's been made installable on a fresh box (see "Installing" below), but
+treat this README and the comments in the source as the design doc, not a
+maintained public package with support guarantees.
 
-TELUS doesn't publish an API, and their portal logs in through TELUS's own SSO/OAuth gateway instead of Alarm.com's normal login form. That's enough to break the standard `alarmdotcom` integration and every off-the-shelf Alarm.com camera tool against a TELUS account. This repo exists to close that gap. The login flow and the camera signaling were both worked out by reading the network traffic of a real browser session; there was no spec to build from.
+## Network requirement -- read this first
 
-> **Heads up:** this is a personal, unofficial project, not affiliated with TELUS or Alarm.com. It can break any time either of them changes their portal. See [Status and disclaimer](#status-and-disclaimer) before you lean on it.
-
-## What you get
-
-- **The whole security panel as HA entities**: arm and disarm, lock and unlock, and read every door, motion, and glass-break sensor natively.
-- **Live camera video**: cameras show up as ordinary HA camera entities. Behind the scenes a bridge translates Alarm.com's proprietary WebRTC into plain RTSP that HA (and its bundled go2rtc) can play. There's nothing to wire up by hand; the integration reads the stream URLs, password included, from the bridge. Video only by default; the camera's own **listen** audio can be published on the same stream per camera, opt-in; see `JANUS_REQUEST_AUDIO`/`JANUS_CONSUME_AUDIO` in [docs/configuration.md](docs/configuration.md).
-- **Two-way audio ("talkdown")**: speak through the doorbell's speaker from HA: a text-to-speech phrase, or any audio clip you point it at, via a `telus_smarthome.speak` service, and stop it early with `telus_smarthome.stop_speaking`. See [Two-way audio](#two-way-audio-talkdown) below.
-- **The doorbell press, as a real trigger**: pressing the button fires a proper Home Assistant event entity with the `doorbell` device class, so a ring automation triggers on a press instead of scraping the wording out of the activity feed. That distinction matters more than it looks: TELUS renders the activity feed's text in the account's own language, and this project's reference account has produced both French and English descriptions for the same kinds of event, so a text match is an automation that stops working one day with no error anywhere. The entity matches TELUS's own untranslated event code instead. It's created for cameras that report having a chime, attaches to the camera it belongs to, and fires exactly once per press: a restart won't re-ring you for the last person who called. See [Ringing the doorbell as a trigger](#ringing-the-doorbell-as-a-trigger) below.
-- **The alarm side, where it was worth having**: a switch per paired phone for whether it may auto-disarm the panel on approach, and, on a system with more than one partition, a picker for which partition that phone opens. The panel's own Bluetooth settings are there too: whether it accepts pairing at all, so a phone that isn't already enrolled can't be added, and how long it stays disarmable once a paired phone is seen: 1, 5, 10, 20 or 30 minutes, which are the only windows TELUS offers. Removing a phone for good is a service (`unpair_arming_device`) rather than a button, because it can't be undone from Home Assistant: re-pairing needs physical access to both the phone and the panel. Alongside them a `bypass_sensors` service for skipping specific zones, also deliberately a service and not a per-sensor toggle, since a bypassed zone stops triggering the alarm until you put it back, and that is not something a stray tap should do.
-- **The camera's own settings, as entities**: how loud the doorbell speaks (the same volume talkdown is heard at), privacy mode, and the siren, from Home Assistant instead of the TELUS app. Alongside them, per-camera signal strength, battery and status, so a camera drifting onto bad Wi-Fi becomes a number you can alert on rather than a picture that quietly gets worse, plus, on a camera with the hardware to answer the question, whether a solar panel is attached. Controls only show up for cameras that report supporting them, so a capability your camera lacks leaves no broken button behind. The doorbell's chime is there too: switches for the indoor chime and the outdoor tone, and a picker for the kind of chime the doorbell is wired to (mechanical, digital, or none) with the names coming from TELUS rather than guessed at. There's a switch for the device's status LED as well (the little light on the front) for anyone who'd rather it weren't lit, and switches for TELUS's own push notifications, which are handy if you'd rather your doorbell told you about visitors once rather than twice. There's also a picker for the live video resolution, which is the honest lever on how much bandwidth a camera uses; it changes what the bridge itself receives, not just what the TELUS app shows. Picture and clip settings are reachable through the bridge's control API but do not have entities yet; see [docs/control-api.md](docs/control-api.md).
-- **Credentials that stay in sync**: change your TELUS password once, in HA's Reconfigure flow, and both the integration and the separate bridge process pick it up. No more silently-stale bridge login after a password change.
-- **Cameras that heal themselves**: Alarm.com force-closes a video session about every three minutes. The bridge rotates ahead of that so viewers see at most a brief freeze, notices dead sessions on its own, and restarts cleanly if one truly wedges, with a guard that keeps an *upstream* outage from turning into a restart loop.
-- **Diagnostics as entities**: an Auth Health sensor for login/session state, plus talkdown status and failure-count
-  sensors, so a doorbell that quietly stops speaking can trigger a notification instead of going unnoticed. Each camera also gets a stream-health trio: a Stream state sensor for where its video pipeline is (connecting, streaming, reconnecting, or held back by the restart guard), a Dropped frames counter for a stream that is quietly degrading, and an Audio state sensor that says whether sound is actually flowing right now, is switched off, or has stopped dead. That last one exists because a camera whose audio decoder dies keeps every other signal green while publishing pure silence, and "a number stopped going up" is not something Home Assistant can alert on: a state that says *stalled* is. A connectivity sensor says whether the bridge container itself is answering at all, so "the camera feed died", "the sound died" and "the bridge is down" are entities you can alert on rather than log greps.
-
-## Two moving parts
-
-- **[`custom_components/telus_smarthome/`](custom_components/telus_smarthome)**: the Home Assistant integration (a fork of [pyalarmdotcom/alarmdotcom](https://github.com/pyalarmdotcom/alarmdotcom) with the TELUS SSO login patched in). It provides the panel, lock, sensor, camera, and event entities, the `speak` service, and a GUI Reconfigure flow.
-- **[`camera-bridge/`](camera-bridge)**: a standalone Docker service that logs in to TELUS, pulls the WebRTC video, and re-serves it as RTSP. It's a separate process because Alarm.com's video platform has no RTSP or ONVIF of its own.
-
-They talk over a loopback-only HTTP endpoint and a shared directory (for credential and secret handoff). The [architecture doc](docs/architecture.md) has the full picture.
+**This container, and your Home Assistant container, must both run with
+`--network host`.** Janus/WebRTC negotiates a wide ephemeral UDP port range
+for RTP that doesn't work through Docker's default bridge networking + NAT,
+and the credential-sync control endpoint (see below) is loopback-only by
+design, reachable from Home Assistant's container only because both share the
+host's network namespace. If your Home Assistant install doesn't use host
+networking (a default HA Container/Docker install typically uses bridge
+networking with port mapping instead), this won't work as-is -- `install.sh`
+checks for this up front and will tell you plainly rather than let you
+discover it halfway through.
 
 ## Installing
 
-**Before anything else:** both the Home Assistant container **and** the bridge container must run with **`--network host`**. This isn't a preference: Janus/WebRTC's RTP port range doesn't survive Docker's bridge networking, and the credential-sync endpoint is loopback-only. If your HA runs on the default bridge networking, the camera bridge won't work as-is. `install.sh` checks this first and stops with a clear message if it's not the case.
-
-**1. The integration**: in HACS, add this repo as a custom repository (category *Integration*), install "TELUS Smart Home", then add it from Settings → Devices & Services.
-
-**2. The camera bridge**: on the same host as HA:
-
 ```bash
-git clone https://github.com/Bungeetaco/telus-smart-home.git
 cd telus-smart-home
 ./install.sh
 ```
 
-The installer handles the network pre-flight, your TELUS credentials, the shared directory, and building the container. If you'd rather do it by hand, or want every knob explained, the [setup guide](docs/setup.md) and [configuration reference](docs/configuration.md) cover it.
+Walks through the network pre-flight check, credentials, the shared
+directory, and building/starting the container. See the top-level README for
+what it does step by step. To recreate manually instead: `cp .env.example
+.env`, `cp secrets.env.example secrets.env` (fill in real values -- **if your
+password contains a literal `$`, escape it as `$$`**, see the comment in
+secrets.env.example for why), then `sudo docker compose up -d --build`.
 
-## Ringing the doorbell as a trigger
+## Architecture
 
-Each doorbell gets an event entity (`event.<doorbell>_button_press`) that fires
-when someone presses the button. Trigger on its state change:
+- **MediaMTX** (`/usr/local/bin/mediamtx`, static binary) runs inside the same
+  container and does the RTSP serving. `mediamtx.yml` configures it minimally;
+  `entrypoint.sh` generates the RTSP password (see "RTSP authentication"
+  below), renders a runtime config with it, starts MediaMTX first and waits for
+  its RTSP listener before starting the Python bridge.
+- **The Python bridge** (`bridge/`) logs into TELUS's SSO
+  (`telus_auth.py`, a from-scratch reimplementation of the OAuth/cookie dance
+  -- no `pyalarmdotcomajax` dependency here, unlike the separate HA
+  integration), enumerates cameras (`telus_rest.py`), and for each camera
+  opens a Janus/WebRTC session (`janus_client.py`) and feeds decoded frames
+  into an ffmpeg process that publishes them to MediaMTX over RTSP
+  (`ffmpeg_sink.py`). `camera_session.py` owns the per-camera reconnect loop.
+- Runs as a single Docker container (`telus-cam-bridge`), `--network host`,
+  `--restart unless-stopped`, managed via `docker-compose.yml` (see
+  "Installing" above and "Recreating the container" below).
 
-```yaml
-automation:
-  - alias: Someone is at the door
-    triggers:
-      - trigger: state
-        entity_id: event.doorbell_button_press
-        # Not to: an event entity's state is the timestamp of the last
-        # event, so every press is a new state. `not_to` filters out the
-        # startup transition from unavailable/unknown, which is not a press.
-        not_to:
-          - unavailable
-          - unknown
-    actions:
-      - action: notify.mobile_app_phone
-        data:
-          message: Someone is at the front door
+## Hardware encode backends
+
+`config.ENCODE_BACKEND` (env var `ENCODE_BACKEND`, see `.env.example`) picks
+which encoder `ffmpeg_sink.py` tries before falling back to software libx264:
+
+- **`vaapi`** (default) -- Intel QuickSync or AMD, via `/dev/dri`. This is
+  what this project's own host actually runs and has verified live (hardware
+  encode confirmed active in ffmpeg's own log, full pipeline exercised).
+  Debian's ffmpeg package already includes both `intel-media-va-driver` and
+  `mesa-va-drivers` in the image (see `Dockerfile`) -- which one actually
+  gets used is decided by libva against whatever GPU is at the passed-through
+  `/dev/dri` device, not by anything this project has to choose.
+- **`nvenc`** -- NVIDIA, via `nvidia-container-toolkit` device injection (see
+  `docker-compose.yml`'s commented-out NVIDIA section) instead of
+  `/dev/dri`. `h264_nvenc` is already compiled into Debian's ffmpeg package
+  (confirmed via `ffmpeg -encoders` inside this image), so no extra package
+  install is needed for it -- only the host-side NVIDIA driver +
+  `nvidia-container-toolkit`. **Not verified against real NVIDIA hardware by
+  this project** (Intel-only host) -- treat it as implemented-per-ffmpeg's-own-
+  documentation, not confirmed-live the way the VAAPI path is.
+- **`software`** -- always libx264, skip the hardware attempt entirely.
+
+Whichever backend is selected, an unavailable/broken device still falls back
+to software automatically per-`start()` call (see `ffmpeg_sink.py`'s module
+docstring) -- `ENCODE_BACKEND` only picks which hardware path is *attempted*
+first.
+
+## The 165s proactive session-rotation fix -- do not regress
+
+Alarm.com kills a video session **server-side at ~180s**, unconditionally,
+matching the `"timeout_seconds": 180` sent in the Janus mountpoint-create
+request (see `janus_client.py`). This was a real production bug: earlier
+versions of this bridge used far longer values and would go dark and hang
+once the server-side timer won the race.
+
+The current, tested, working fix (`config.py`'s `SESSION_MAX_LIFETIME_S = 165`
+and the rotation loop in `camera_session.py`'s `run_camera_forever`):
+
+- Proactively **rotates every camera session every 165s**, before Alarm.com's
+  ~180s server-side kill, so the RTSP feed never goes dark waiting for a
+  server-initiated teardown. (The 15s margin -- matching
+  `FRAME_SILENCE_TIMEOUT_S` -- is safe because the ffmpeg publisher outlives
+  rotations and the gap is bridged by repeating the last frame; the margin is
+  kept this tight to keep those frame-hold gaps as infrequent as possible.)
+- Independently detects a **dead session via frame silence**
+  (`FRAME_SILENCE_TIMEOUT_S = 15`) -- if no frame arrives for 15s, the session
+  is torn down and reconnected immediately, without waiting for the rotation
+  deadline. This check runs unconditionally on every loop iteration
+  (including when zero frames have ever arrived for that session), which is
+  what makes it safe against a camera that stalls immediately.
+- Bridges each rotation/reconnect gap by **repeating the last real frame** into
+  the still-running publisher (`FRAME_HOLD_MAX_S = 60`), so readers see a brief
+  freeze rather than a torn-down RTSP path. A genuinely offline camera stops
+  being held after 60s and the feed is allowed to go dark honestly.
+
+**If you touch `camera_session.py` or `janus_client.py`: read them in full
+first.** The frame-silence check and the rotation deadline check are two
+separate, deliberately-redundant safety nets -- don't collapse them, and don't
+change `SESSION_MAX_LIFETIME_S` without re-verifying Alarm.com's actual
+server-side timeout live (it's not documented anywhere; 180s was observed).
+
+`tests/test_camera_session.py` holds all three nets to their behaviour against
+scripted fake sessions, with no network and no ffmpeg, so a regression fails
+there rather than surfacing days later as a frozen feed:
+
+```bash
+TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py
 ```
 
-Check the entity's actual id under **Settings → Devices & services → Entities**;
-it is named from the camera's own name, so a doorbell called "Front Door"
-produces `event.front_door_button_press`.
+## RTSP authentication
 
-The event's attributes carry `event_id`, `timestamp`, `camera_id`,
-`device_description` and the untranslated `event_type_name`, plus the clip
-fields (`clip_link`, `video_event_id`, `thumbnail_url`, …) when TELUS has already
-attached a recording. It often hasn't yet: the clip is linked a poll or two
-after the press itself lands, and this entity deliberately does not fire a second
-time when that happens, because a doorbell that rings your automation twice for
-one visitor is worse than a first notification without a thumbnail. If you want
-the clip in the notification, trigger on the account-wide `Activity` event
-entity, which does re-fire exactly once when a clip arrives.
+**As of v1.4.0 the RTSP server requires credentials.** It previously ran on
+MediaMTX's default internal user: anonymous *publish and read* on every path.
+Binding to `127.0.0.1` is not a substitute for auth here -- this container and
+Home Assistant's both run with `--network host`, so "loopback" means every
+process and every other host-networked container on the box, and path names are
+a pure function of the camera id (`config.rtsp_path_for`), so they are
+guessable. Anything local could therefore read the camera feeds, or publish over
+a path and replace the live feed with its own.
 
-A complete worked example lives in [`ha-config/`](ha-config): an installable
-package that turns the press event, Frigate person detection and the
-`telus_smarthome.speak` service into an actionable-notification intercom
-(snapshot notifications with tap-to-speak quick replies), plus a matching
-doorbell dashboard view. It is written against one specific deployment's
-entity ids; its README says what to re-check before using it on another.
+How it works, end to end:
 
-## Two-way audio (talkdown)
+- `entrypoint.sh` generates a random password on first start and persists it to
+  `/shared/rtsp_password` (mode `0600`). It is reused on every later start; the
+  bridge never rotates it on its own.
+- MediaMTX gets it via `authInternalUsers` in `mediamtx.yml`, whose
+  `__RTSP_PASSWORD__` placeholder `entrypoint.sh` substitutes into a runtime
+  copy under `/tmp` (MediaMTX does not interpolate environment variables inside
+  its config).
+- The Python side reads the same value from the `RTSP_PASSWORD` environment
+  variable that `entrypoint.sh` exports, and `config.rtsp_publish_url()` builds
+  it into the URL used *both* as ffmpeg's publish target and as the `rtsp_url`
+  reported over `/control/cameras` -- which is how Home Assistant's camera
+  entities authenticate without anything being configured by hand.
+- The credentials are redacted from the ffmpeg publish log line, since container
+  logs are persisted by Docker's json-file driver.
 
-Home Assistant can play audio out the doorbell speaker: a spoken warning, a greeting, whatever you like. Call the `telus_smarthome.speak` service with either a `message` (rendered by HA's text-to-speech) or a `media_content_id` (a media-source URI or a direct URL to an audio file):
+To rotate: delete `/shared/rtsp_password`, restart this container, then restart
+Home Assistant so it re-reads the URLs. To read a stream by hand:
 
-```yaml
-action: telus_smarthome.speak
-data:
-  message: "Hello, someone will be right there."
-  # or target a specific camera; defaults to the doorbell:
-  # entity_id: camera.front_door
+```bash
+ffplay "rtsp://bridge:$(sudo cat /var/lib/homeassistant/share/telus_cam_bridge/rtsp_password)@127.0.0.1:8554/telus_<camera_id>"
 ```
 
-To cut a clip short (a long piece of music, say), call `telus_smarthome.stop_speaking`: it stops within a few tens of milliseconds, and doing it when nothing is playing is harmless.
+## Credentials
 
-It's **on by default**: nothing ever speaks on its own, it only plays what you ask it to; set `TALKDOWN_ENABLED=false` on the bridge to disable the endpoint entirely. Long clips are safe: the doorbell's audio session is short-lived and per-session, so if one expires mid-clip the bridge transparently opens a fresh one and picks up exactly where it left off. The audio is band-limited and level-managed for a small doorbell speaker, so music and speech come through cleanly rather than clipping, and that conditioning is yours to control per call: pass `conditioning: false` to play a clip exactly as decoded, or `audio_filter` with an ffmpeg `-af` chain of your own. The doorbell's audio endpoint is HTTPS with a self-signed certificate, so the bridge pins the certificate's fingerprint instead, and by default a mismatch is logged loudly rather than blocked, so a firmware update can't silently leave you with a doorbell that won't speak. The mechanism was reverse-engineered against an ADC-VDB750 doorbell; the full protocol and how to turn it on are in [docs/talkdown-fullduplex-protocol.md](docs/talkdown-fullduplex-protocol.md) and [docs/talkdown-DEPLOY.md](docs/talkdown-DEPLOY.md).
+By default, credentials are read once at startup from `secrets.env`
+(`TELUS_EMAIL` / `TELUS_PASSWORD`); non-secret settings such as
+`MEDIAMTX_RTSP_PORT` and `LOG_LEVEL` come from `.env`.
 
-## Documentation
+**This bridge holds its own separate copy of the TELUS username/password from
+the Home Assistant `telus_smarthome` integration.** They used to be
+completely disconnected -- changing the password via HA's integration would
+silently leave this bridge on the old password until someone noticed camera
+streams failing. That gap is now closed by the control endpoint below.
 
-The [`docs/`](docs) folder is the deep end; start with its [index](docs/README.md). Highlights:
+### Control endpoint (credential push from Home Assistant)
 
-| Doc | What's in it |
-| --- | --- |
-| [architecture.md](docs/architecture.md) | How the two components fit together and the two Alarm.com backends they use. Start here. |
-| [ha-integration.md](docs/ha-integration.md) | The integration in detail: entities, services, the update model, and the SSO/websocket patches. |
-| [camera-bridge.md](docs/camera-bridge.md) | The bridge: the video pipeline, session rotation, hardware encoding, and RTSP auth. |
-| [control-api.md](docs/control-api.md) | The bridge's HTTP control API, endpoint by endpoint. |
-| [alarm-com-api.md](docs/alarm-com-api.md) | The reverse-engineered Alarm.com website + mobile APIs and the TELUS login handshake. |
-| [configuration.md](docs/configuration.md) | Every setting across both components, in one place. |
-| [setup.md](docs/setup.md) | Full installation and deployment walkthrough. |
-| [troubleshooting.md](docs/troubleshooting.md) | Common problems as symptom → cause → fix. |
-| [development.md](docs/development.md) | Repo layout, versioning, and the release process. |
+`bridge/control_server.py` runs a small `aiohttp` HTTP listener bound to
+`127.0.0.1:8199` (loopback only -- never exposed off the host; reachable from
+the HA container purely because both containers use `--network host` and
+therefore share the same loopback). It lets the HA integration's config-flow
+reconfigure/reauth step push a live credential update into this
+already-running process, with no container restart:
 
-## For AI tools
+```
+POST http://127.0.0.1:8199/control/credentials
+Authorization: Bearer <contents of /shared/control_secret, stripped>
+Content-Type: application/json
+Body: {"username": "<telus email>", "password": "<telus password>"}
 
-If you're an AI coding agent working with this repo, read [`AGENTS.md`](AGENTS.md) first: it's the short version of the layout, the build/run steps, the conventions to follow (commit style, keeping the docs anonymized, versioning), and the things that will bite you (rate limits against a live account, the load-bearing session-rotation logic).
+200 {"status": "applied"}    -- credentials swapped in, re-login succeeded
+400 {"error": "malformed"}   -- bad/missing JSON, or empty username/password
+401 {"error": "bad_secret"}  -- Authorization header missing or wrong
+500 {"error": "internal"}    -- re-login with the new credentials failed
+                                 (still applied in-process; existing
+                                 reconnect loops keep retrying them)
 
-## Status and disclaimer
+GET http://127.0.0.1:8199/control/health   -- no auth, {"status": "ok"}
+```
 
-This is a personal, unofficial integration built by reverse-engineering one TELUS account's browser traffic. It is **not affiliated with or endorsed by TELUS or Alarm.com**, and it may break if either changes their portal, login flow, or camera platform. It installs through HACS as a custom repository but isn't in the default store; treat it as a solid starting point rather than a supported package. No license has been set for this repo yet.
+The same listener serves the rest of the control API (see
+`docs/control-api.md`), including `GET /control/status` -- per-camera
+`state`, `consecutive_failures`, `last_frame_at`, `fps`, `hardware_encode`,
+`dropped_frames`, `last_error`, `publisher_alive`, `last_publish_at`, the audio
+fields, plus a process-wide `audio_decoder` block of decode counters; same
+bearer auth as every other endpoint.
+`camera_session.py`'s `run_camera_forever` updates its own entry directly;
+the control server just reflects it. `dropped_frames` is the camera's
+lifetime consumer-fell-behind drop total since process start, accumulated as
+each video session ends. `last_frame_at` says a frame arrived *from the camera*
+and `last_publish_at` says ffmpeg *took* it -- the gap between them is the
+difference between "streaming" and "streaming to nowhere", which nothing in this
+response could express before. `fps` is the rate the running ffmpeg was
+*declared* with; the bridge keeps re-measuring what the camera actually delivers
+and rebuilds the publisher when the two diverge materially (the rate is a device
+setting and can change with no restart -- see
+`docs/camera-bridge.md`), so this field can legitimately change between polls.
 
-**Known limitations:**
+Credentials are swapped in by reassigning the module attributes
+`config.TELUS_EMAIL` / `config.TELUS_PASSWORD` -- `telus_auth.py`'s
+`TelusSession.login()` reads them lazily (as `c.TELUS_EMAIL`/`c.TELUS_PASSWORD`
+module lookups) on every call rather than capturing them once, so a
+reassignment takes effect on the very next `login()` with **no restart
+needed**. This was deliberately kept as simple module-attribute mutation
+rather than a bigger `CredentialStore`-style refactor -- there was nothing for
+a refactor to buy here.
 
-- **No MFA in the camera bridge.** Its TELUS login is username/password only. If MFA gets enabled on the account, the bridge's login breaks (the HA integration itself does handle 2FA/OTP). The bridge's [README](camera-bridge/README.md) explains why this one needs a real MFA-challenge capture to implement.
-- **Talkdown is device-specific.** It's confirmed on the ADC-VDB750 doorbell; other camera models may need a different audio path (details in the talkdown docs).
-- **Downstream (listen) audio is opt-in and unproven per camera.** Asking for the audio track is known to work (the gateway offers it) but one camera on the account this was built against stopped delivering *video* while an audio m-line was in the offer, which is exactly why both audio knobs name the cameras they apply to instead of being global. Turn it on for one camera at a time and watch that camera's video before turning it on for another. A published audio track is also not by itself proof of sound: once a camera has an audio input the bridge keeps it alive with generated silence, so a camera that stops decoding still produces a valid, entirely silent track. Check `decoded_audio_frames` for that camera in the bridge's status endpoint, and check the *rate* it climbs at: audio arrives in 20 ms frames, so a whole stream decodes about 50 a second. A camera that has decoded *nothing yet* is published video-only until it does, so audio on a quiet camera can take a couple of minutes to appear (and the one publisher rebuild that adds it disconnects readers once). (Two causes of "no usable sound" are known and both are fixed. A defect in the WebRTC library let one malformed audio packet kill a session's decoder thread outright; that is patched and confirmed live. Underneath it, the gateway advertises the audio track as one codec and sends another, so most of the stream was being discarded and the audio arrived in fragments; the bridge now works out which codec is really arriving, once per session, and reports what it chose as `audio_codec` beside a process-wide count of what each decoder read and discarded. That second fix is in the bridge and awaiting a live soak, along with the follow-on it exposed: a camera whose audio is sparse could not finish the codec decision before its publisher was built, so the bridge now builds one without audio and adds it once, later, rather than restarting the camera to try again.) Turning audio on used to cost that camera most of its *video* frames, because the silence the bridge feeds its publisher was delivered in half-second bursts and ffmpeg stops reading the video pipe while it waits for audio; that pacing is fixed and measured in the container, and a live validation soak is still running; when you turn audio on, watch that camera's `dropped_frames` and its new `audio_dropped` and `last_publish_at` fields.
-- **The panel-wide Bluetooth settings have never been written by a real browser.** Reading them is captured traffic; the *write* was reconstructed from the per-phone endpoint next to it, because no save to that one was ever observed. The switch and the disarm-window picker work as far as anything here can tell, but treat the first change as an experiment, and if one fails, suspect the reconstruction before the panel. Relatedly, whether turning panel-wide pairing off also stops an already-paired phone from disarming is **not known**: treat the panel switch and the per-phone switches as independent controls.
-- **The siren and privacy mode have never been fired for real.** Both were recovered from the mobile app rather than watched working: the account this was built against exposes neither in its own UI, and reports privacy mode as unsupported. The buttons appear only if your camera says it supports them, but treat the first press as an experiment.
+The shared secret is generated once (32 random bytes, hex-encoded) on first
+start if it doesn't already exist, and written to
+`/shared/control_secret` (mode `0600`) -- see "Shared directory" below.
+A pre-existing file the bridge adopts instead of generating (restored from a
+backup, or created under a permissive umask) is re-tightened to `0600` at
+startup if it is group/world-readable, with a warning naming the old mode; if
+the chmod fails (e.g. the file is owned by another uid on the shared mount) a
+warning is logged and the secret is served as-is -- a permissions problem
+never regenerates it, so the HA side keeps authenticating.
+The secret rotates automatically every
+`config.CONTROL_SECRET_ROTATE_INTERVAL_S` (30 days by default) via an atomic
+rewrite of `control_secret` -- safe with no coordination needed, since HA's
+`bridge_client.py` re-reads the file fresh on every request rather than
+caching it. Manual rotation works too: delete the file and restart this
+container (it regenerates); the HA side re-reads the file on its next
+request for the same reason.
+
+Both `login()` call sites that existed before this endpoint (the initial
+startup login, and the 401-triggered relogin inside
+`get_video_source_with_relogin`) plus the new control-endpoint login and the
+fallback-file watcher's login are all serialized through one shared
+`asyncio.Lock` (`login_lock` in `main.py`). `TelusSession.login()` clears the
+entire cookie jar with no locking of its own -- without this lock, two
+concurrent `login()` calls (e.g. a 401-triggered relogin racing the new
+control endpoint) could interleave and leave the session cookie-jar in a
+mixed, broken state.
+
+### Shared directory (`/shared` in this container)
+
+Bind-mounted from the host at `/var/lib/homeassistant/share/telus_cam_bridge`
+-- the same physical host directory the `homeassistant` container already
+mounts read-write at `/share/telus_cam_bridge`, so both containers can read
+and write these files without any new host path or supervisor config change.
+
+- `control_secret` -- generated by this bridge on first start (see above).
+  The HA integration reads it to authenticate its credential push.
+- `rtsp_password` -- generated by `entrypoint.sh` on first start, mode `0600`.
+  Read back on every later start and built into the RTSP URLs this bridge
+  publishes with and reports over `/control/cameras`. See "RTSP
+  authentication" above.
+- `mobile_auth.json` -- written by this bridge's mobile MWS auth
+  (`mobile_auth.py`): a persisted synthetic device uid plus the rolling
+  seamless-login token, so a restart re-logs-in silently instead of re-running
+  the full SSO bootstrap. The token is credential-grade; the file never holds
+  the short-lived session token itself.
+- `restart_guard.json` -- `{"exits": [<unix ts>, ...]}`, written by this bridge
+  every time it deliberately ends its own process (camera_session.py's
+  escape hatch, or a terminal startup-login failure). It lives here purely
+  because it has to outlive the process it is counting; nothing else reads it.
+  More than a few entries inside an hour means the bridge stops exiting
+  immediately and holds itself up first, so the container can't restart-loop
+  against an upstream outage -- see `bridge/restart_guard.py`. Deleting it is
+  harmless (it just resets the count).
+- `credentials.json` -- `{"username", "password", "updated_at"}`, written by
+  the HA integration on **every** successful credential update (reconfigure or
+  reauth), regardless of whether the live push to `/control/credentials`
+  succeeded. This is the fallback path:
+  - **On startup**, this bridge adopts `credentials.json` over the
+    `secrets.env` credentials if present
+    (`_load_fallback_credentials_if_present` in `main.py`) -- so a
+    freshly recreated/restarted container picks up the latest credentials
+    even if it missed the live push entirely (e.g. it was down at the time).
+  - **While running**, a background task (`watch_credentials_fallback`)
+    polls this file every 30s and re-logs-in if `updated_at` has moved past
+    what was last applied -- a safety net for a missed live push (bridge
+    down, transient network issue between the two `--network host`
+    containers, secret mismatch, etc) without waiting for a restart.
+  - **A corrupt file never kills the bridge.** Truncated JSON, invalid
+    UTF-8 (a torn write on the shared mount), or valid JSON that is not an
+    object is logged as a warning and ignored on both paths: startup keeps
+    the `secrets.env` credentials, the watcher skips that cycle and keeps
+    polling.
+    The bad file outlives any restart, so crashing on it would restart-loop
+    the container through repeated SSO logins. Pinned by
+    `tests/test_credentials_fallback.py`.
+
+Net effect: a credential change made through HA's UI reaches this bridge
+either immediately (live push) or within 30s (fallback watcher) or at next
+startup (fallback file adoption) -- whichever happens first -- and HA's own
+credential update always succeeds/fails based on HA's own TELUS login only,
+never blocked on this bridge being reachable.
+
+## Known limitations
+
+- **No MFA/2FA support.** `telus_auth.py`'s login is username/password only.
+  If TELUS ever enables MFA on this account, this bridge's login breaks
+  independently of the HA integration (which does support 2FA/OTP). Not
+  handled -- implementing this needs a HAR capture of a real MFA challenge
+  against this account to know the actual redirect/OTP-submission contract
+  (the same way the rest of `telus_auth.py` was built); guessing at that
+  contract without one risks a login flow that looks plausible but doesn't
+  actually work, or repeated failed attempts against TELUS's live auth
+  endpoint. Would need real design work (and that capture) if it ever
+  becomes necessary.
+
+## Recreating the container
+
+The cloned repo directory itself is the deployment location -- there's no
+separate "install path" to keep in sync with the source, `docker-compose.yml`
+runs directly from here:
+
+```bash
+cd camera-bridge   # inside your clone of the telus-smart-home repo
+sudo docker compose up -d --build
+```
+
+`install.sh` at the repo root does this plus the one-time setup (shared
+directory, credentials) in one step -- see the top-level README.
+
+No port-publish flags are needed anywhere, including for the control
+endpoint -- `--network host` (set in `docker-compose.yml`) already puts the
+container's `127.0.0.1:8199` on the host's own loopback, which the HA
+container (also `--network host`) shares directly.

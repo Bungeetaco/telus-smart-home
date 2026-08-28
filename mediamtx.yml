@@ -1,0 +1,66 @@
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+# Without this block MediaMTX runs its default "any" user: anonymous publish AND
+# read on every path. Binding to 127.0.0.1 is not a substitute -- this container
+# and Home Assistant's both run with --network host, so "loopback" here means every
+# process and every other host-networked container on the box. Path names are
+# derived deterministically from the camera id (config.rtsp_path_for), so they are
+# guessable, which made both passive viewing of the camera feeds and publishing a
+# replacement stream over them trivial for anything running locally.
+#
+# __RTSP_PASSWORD__ is substituted at container start by entrypoint.sh from
+# /shared/rtsp_password; the bridge reads the same file to build the URLs it
+# publishes with and hands to Home Assistant.
+authInternalUsers:
+  - user: bridge
+    pass: __RTSP_PASSWORD__
+    ips: ['127.0.0.1/32']
+    permissions:
+      - action: publish
+      - action: read
+# The default 10s read timeout races bridge/config.py's FRAME_SILENCE_TIMEOUT_S
+# (15s): when Alarm.com's RTP silently stalls mid-session, ffmpeg has nothing to
+# send, and MediaMTX would kill the publisher connection at 10s -- destroying the
+# path (kicking every reader, HLS discontinuity in HA) BEFORE the bridge's own
+# silence watchdog could fire at 15s, reconnect, and bridge the gap with held
+# frames (observed live 2026-07-18 01:22:50, "i/o timeout"). 30s covers the 15s
+# detection plus a reconnect (~2-6s measured) with margin.
+readTimeout: 30s
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+# MediaMTX 1.20.0 added a native Media-over-QUIC server that is ENABLED BY
+# DEFAULT (upstream default `moq: true`). Left alone it listens on :8892
+# (TCP/HTTP2 + UDP/HTTP3) and :8893 (UDP/QUIC) and generates a TLS keypair on
+# disk -- and because this container runs with --network host, those are real
+# host ports. This bridge only ever needs the local RTSP listener, so turn it
+# off explicitly, exactly like the other protocols above.
+#
+# NOTE for future MediaMTX bumps: a new release can introduce a new listener
+# that defaults to ON. After bumping MEDIAMTX_VERSION, run the server against
+# this config and check the "started with listeners on ..." lines -- anything
+# beyond RTSP should be disabled here. (Unknown keys are rejected, so a disable
+# line must land in the SAME commit as the version bump that introduces it.)
+moq: no
+api: no
+metrics: no
+pprof: no
+paths:
+  # No on-demand hooks: as of 2026-07-18 the bridge (main.py) starts every known
+  # camera's pipeline eagerly at process startup / discovery and keeps it running
+  # forever -- see main.py's eager-activation comment. That trades the CPU savings
+  # of the old gate-on-readers design (near-zero when nobody's viewing) for
+  # always-warm streams with no cold-start latency, which is the right trade here
+  # since the kiosk dashboard already keeps both cameras' live views on-screen
+  # ~24/7 in practice (measured live: ~14% CPU, 326MB for 2 cameras -- the "idle"
+  # case the old design optimized for barely occurs).
+  #
+  # This entry itself still can't be deleted, though: "all_others" is MediaMTX's
+  # catch-all template for any path name not explicitly listed, and a path must
+  # match SOME config entry (even an empty one) before MediaMTX will accept a
+  # publisher to it at all -- confirmed live, removing this block entirely made
+  # ffmpeg's RTSP ANNOUNCE get rejected with "435 Bad Request: path ... is not
+  # configured" for both cameras. Empty body -- no runOnDemand/runOnUnDemand --
+  # since the bridge is always the one initiating the publish now.
+  all_others:
