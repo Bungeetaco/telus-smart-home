@@ -74,7 +74,7 @@ Contract (as implemented -- this is what callers must match):
       run_camera_forever loop (main.py threads a shared dict into it) --
       reconnect counts, last-frame age, and current encode mode, without
       needing to grep container logs. "restart_deferred" is the rarest and
-      most informative one: this camera hit the MAX_CONSECUTIVE_SESSION_FAILURES
+      most informative one: this camera hit the SESSION_WEDGE_TIMEOUT_S
       escape hatch, but it has fired too often lately to be a local wedge, so
       restart_guard.py is holding the process before it exits (see there).
       "dropped_frames" is the camera's LIFETIME total (since process start) of

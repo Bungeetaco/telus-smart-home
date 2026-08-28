@@ -20,7 +20,7 @@ async def _close_with_timeout(session: JanusCameraSession, camera_id: str) -> No
     documents as "a known-hangable call under certain ICE states" with no
     timeout of its own. Both call sites below used to await it unbounded --
     if it actually hangs (rather than just failing-and-retrying, which is what
-    2026-07-20's MAX_CONSECUTIVE_SESSION_FAILURES escape hatch was built for),
+    2026-07-20's SESSION_WEDGE_TIMEOUT_S escape hatch was built for),
     the loop can never get back around to accumulate toward that failure
     count, since it's stuck on this very await. Bounding it here means a hang
     surfaces as one more counted failure instead of an unrecoverable wedge."""
@@ -381,8 +381,16 @@ class RateWatcher:
 
 async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
-    consecutive_failures = 0  # reset on any successful frame batch; see the
-    # os._exit() escape hatch in the except block below for why this exists.
+    consecutive_failures = 0  # reset on any successful frame batch. Reported in
+    # /control/status and useful for reading the log; it is NOT what arms the
+    # os._exit() escape hatch in the except block below -- see failing_since.
+    # Monotonic time this camera's CURRENT run of failures began, or None while
+    # it is delivering frames. This is what the escape hatch measures, because
+    # what distinguishes a wedged local resource from a flaky cloud is HOW LONG
+    # the camera has been unable to produce a frame, not how many attempts fit
+    # into that time. Set when a failure run starts, cleared by any successful
+    # frame batch, so a run always means "no successful frame in between".
+    failing_since: float | None = None
     # This camera's current best answer for its own frame rate: bootstrapped from
     # the first batch of a session and then kept under review by the RateWatcher
     # below, because it is a DEVICE SETTING that can change at any time. It is
@@ -531,14 +539,22 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     known_audio_fmt: tuple | None = None
     # How many times this camera's publisher has been rebuilt because the audio
     # shape it was launched with is not the shape the camera sends, and whether
-    # its audio has been given up on for the rest of the process. Learning the
-    # shape once is the expected cost; anything past
-    # config.AUDIO_FORMAT_REBUILD_LIMIT is a source whose shape keeps moving, and
-    # a rebuild kicks every RTSP reader, so it degrades to video-only the way a
-    # wedged audio pipe already does (E62) rather than buying a glitch per
-    # rotation forever.
+    # its audio is currently given up on. Learning the shape once is free (see
+    # the bootstrap condition at the increment); anything past
+    # config.AUDIO_FORMAT_REBUILD_LIMIT WITHIN A SETTLE WINDOW is a source whose
+    # shape keeps moving, and a rebuild kicks every RTSP reader, so it degrades
+    # to video-only the way a wedged audio pipe already does (E62) rather than
+    # buying a glitch per rotation forever. Both are recoverable: see
+    # audio_fmt_changed_at.
     audio_format_rebuilds = 0
     audio_given_up = False
+    # Monotonic time the decoded audio shape last CHANGED (None until one has
+    # been seen). Both of the things that used to be permanent are now measured
+    # against it: the churn budget above is forgiven once the shape has held for
+    # config.AUDIO_FORMAT_SETTLED_S, and a camera whose audio was given up on is
+    # allowed to try again on the same evidence. Written only where the shape is
+    # actually observed (_note_audio_shape), never where it is merely wanted.
+    audio_fmt_changed_at: float | None = None
     last_frame = None
     last_live = 0.0  # monotonic time a real (non-repeated) frame last arrived
     hold_task: asyncio.Task | None = None
@@ -572,6 +588,27 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                            audio_dropped_reason=sink_.audio_dropped_reason,
                            publisher_audio_format=None)
 
+    def _note_audio_shape(observed) -> None:
+        """Record the shape a REAL decoded frame carried, and when it changed.
+
+        Both observers -- the rotation's peek and the audio pump -- go through
+        here, because the shape and the instant it changed have to move
+        together: config.AUDIO_FORMAT_SETTLED_S is read against the timestamp,
+        so a shape updated without one would leave the churn budget and the
+        give-up cool-down measuring an interval that never started.
+
+        An OBSERVATION, exactly like reading (w, h) off a video frame. It says
+        nothing about what the publisher was launched with (sink_audio_fmt) or
+        what it should be launched with next (desired_audio_fmt); the rotation
+        decides that, and it is the only thing that may.
+        """
+        nonlocal known_audio_fmt, audio_fmt_changed_at
+        if observed is None or observed == known_audio_fmt:
+            return
+        known_audio_fmt = observed
+        audio_fmt_changed_at = time.monotonic()
+        _update_status(**_audio_status_fields(observed))
+
     async def _pump_audio(sess):
         # Per-session: drains this session's decoded audio into the publisher's
         # second input -- and, when the publisher has no second input, OBSERVES
@@ -602,7 +639,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # sparse enough that the sniff cannot finish inside one sizing window,
         # that is a livelock rather than a slow start, and it left the camera
         # with no publisher at all (E81).
-        nonlocal known_audio_fmt, decoded_audio_frames_total
+        nonlocal decoded_audio_frames_total
         # Audio written since this loop last yielded. The queue holds up to
         # AUDIO_QUEUE_MAXSIZE frames, so a backlog can be tens of frames deep and
         # each one costs an executor round trip on the same executor
@@ -660,17 +697,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # audio on the RTSP path".
                 decoded_audio_frames_total += 1
                 observed = ffmpeg_sink.audio_format_of(frame)
-                if observed != known_audio_fmt:
-                    # An observation, exactly like reading (w, h) off a video
-                    # frame -- and the load-bearing one: this is what the next
-                    # rotation sizes the publisher's audio input from, and for a
-                    # publisher that came up video-only it is the only evidence
-                    # this camera has audio at all. The GUARD that stops a
-                    # mismatched frame corrupting a running pipe stays in
-                    # sink.write_audio; the check below just avoids reaching it
-                    # once per frame.
-                    known_audio_fmt = observed
-                    _update_status(**_audio_status_fields(observed))
+                # The load-bearing observation: this is what the next rotation
+                # sizes the publisher's audio input from, and for a publisher
+                # that came up video-only it is the only evidence this camera
+                # has audio at all. The GUARD that stops a mismatched frame
+                # corrupting a running pipe stays in sink.write_audio.
+                _note_audio_shape(observed)
                 _update_status(decoded_audio_frames=decoded_audio_frames_total)
                 if not writable:
                     # A video-only publisher: nothing had been decoded for this
@@ -1107,14 +1139,47 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # with nothing to guess wrongly removes it: a shape that is not
                 # known yet is not a shape (E81).
                 if consume_audio:
-                    observed_audio = getattr(session, "audio_format", None)
-                    if observed_audio is not None and observed_audio != known_audio_fmt:
-                        known_audio_fmt = observed_audio
-                        # The peek is a real decoded frame, so it is the earliest
-                        # honest answer /control/status can give -- and on a
-                        # healthy camera it lands a rotation before the pump's
-                        # first frame does.
-                        _update_status(**_audio_status_fields(observed_audio))
+                    # The peek is a real decoded frame, so it is the earliest
+                    # honest answer /control/status can give -- and on a healthy
+                    # camera it lands a rotation before the pump's first frame
+                    # does.
+                    _note_audio_shape(getattr(session, "audio_format", None))
+                # THE SHAPE HAS HELD: forgive the churn budget, and let a
+                # camera whose audio was given up on try again.
+                #
+                # Both of those used to be permanent for the life of the
+                # process, and permanence is what made a single anomalous
+                # observation fatal (see config.AUDIO_FORMAT_REBUILD_LIMIT).
+                # Neither is a fresh policy: the budget exists to stop a shape
+                # that keeps MOVING buying a reader-kicking rebuild once per
+                # rotation, and a shape that has not moved for
+                # config.AUDIO_FORMAT_SETTLED_S is by definition not that. The
+                # bridge follows the camera; it declines only while the camera
+                # is actually churning, and it reconsiders once it stops.
+                #
+                # Read against the observed shape's own timestamp, never against
+                # the last rebuild: what has to have settled is the CAMERA, not
+                # this loop's reaction to it.
+                if (audio_fmt_changed_at is not None
+                        and (audio_format_rebuilds or audio_given_up)
+                        and time.monotonic() - audio_fmt_changed_at
+                        >= c.AUDIO_FORMAT_SETTLED_S):
+                    if audio_given_up:
+                        log.info(
+                            "%s: the decoded audio shape has held at %s for "
+                            "%.0fs -- taking the audio input back up. One "
+                            "rebuild is spent below and readers see one "
+                            "reconnect; this is a recovery, not a fault.",
+                            camera["id"], known_audio_fmt,
+                            c.AUDIO_FORMAT_SETTLED_S)
+                        # NOT cleared here. audio_dropped describes the
+                        # running publisher, and this camera does not have a
+                        # working audio input again until a rebuild below has
+                        # given it one; the rebuild reports it from the new
+                        # sink. Clearing it on intent rather than on outcome is
+                        # how a status field starts describing a wish.
+                    audio_given_up = False
+                    audio_format_rebuilds = 0
                 # None means "publish video only", and it is the state a camera
                 # that never sends a single audio packet stays in forever: no
                 # audio input, no format guard to trip, no failed session, video
@@ -1123,19 +1188,37 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     known_audio_fmt if consume_audio and not audio_given_up else None)
                 # A publisher whose audio input does not match what this camera
                 # really sends. BOUNDED: learning the shape once (video-only ->
-                # the observed shape) is the expected cost and is where the
-                # budget goes; past config.AUDIO_FORMAT_REBUILD_LIMIT the shape
-                # is not settling, and a rebuild kicks every RTSP reader, so the
-                # audio input is given up on and the camera publishes video only
-                # for the rest of the process -- the same trade FfmpegSink
+                # the observed shape) is FREE and is not what the budget is
+                # for; past config.AUDIO_FORMAT_REBUILD_LIMIT changes inside one
+                # settle window the shape is not settling, and a rebuild kicks
+                # every RTSP reader, so the audio input is given up on and the
+                # camera publishes video only -- the same trade FfmpegSink
                 # already makes for a wedged audio pipe (E62), for the same
-                # reason: video is worth more than audio. Once given up on, the
-                # comparison is skipped entirely, so the permanent None cannot
-                # read as a fresh change against what ffmpeg was launched with
-                # and rebuild the publisher once per rotation forever.
+                # reason: video is worth more than audio. While given up on, the
+                # comparison is skipped entirely, so the None cannot read as a
+                # fresh change against what ffmpeg was launched with and rebuild
+                # the publisher once per rotation forever.
+                #
+                # "While", not "forever": the shape holding steady for
+                # config.AUDIO_FORMAT_SETTLED_S lifts this above, because a
+                # camera that has stopped changing is no longer the thing this
+                # is defending against.
                 audio_format_changed = (
                     sink is not None and not audio_given_up
-                    and sink_audio_fmt != desired_audio_fmt)
+                    and (sink_audio_fmt != desired_audio_fmt
+                         # ...or this sink's audio input is DEAD and audio is
+                         # wanted again. The shapes can match here and the audio
+                         # still be gone: FfmpegSink._drop_audio is latched
+                         # one-way (ffmpeg cannot reopen an input), so a sink
+                         # given up on keeps the shape it was LAUNCHED with in
+                         # sink_audio_fmt while writing nothing. That is exactly
+                         # the shape a recovering camera settles back to -- the
+                         # live 2026-08-28 case was a publisher launched for
+                         # 8 kHz mono, one mis-sniffed session at 48 kHz stereo,
+                         # then a settle back to 8 kHz -- so comparing shapes
+                         # alone would clear audio_dropped and rebuild nothing.
+                         or (desired_audio_fmt is not None
+                             and sink.audio_dropped)))
                 if audio_format_changed and \
                         audio_format_rebuilds >= c.AUDIO_FORMAT_REBUILD_LIMIT:
                     audio_format_changed = False
@@ -1145,11 +1228,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         f"launched for {sink_audio_fmt}, the frames now carry "
                         f"{desired_audio_fmt}) and this camera has already spent "
                         f"its {c.AUDIO_FORMAT_REBUILD_LIMIT} audio-format "
-                        f"rebuild(s) for this process")
+                        f"change(s) within one {c.AUDIO_FORMAT_SETTLED_S}s settle "
+                        f"window; it will be taken back up once one shape holds "
+                        f"for that long")
                     desired_audio_fmt = None
-                    log.error("%s: %s -- publishing VIDEO ONLY for the rest of "
-                              "this process rather than rebuilding the publisher "
-                              "(and kicking every RTSP reader) for each change",
+                    log.error("%s: %s -- publishing VIDEO ONLY for now rather "
+                              "than rebuilding the publisher (and kicking every "
+                              "RTSP reader) for each change",
                               camera["id"], reason)
                     sink.drop_audio(reason)
                     _update_status(audio_dropped=True, audio_dropped_reason=reason,
@@ -1247,22 +1332,47 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # actually happened, so a rebuild that never took place
                         # cannot suppress a later, genuine one.
                         rate.rebuilt(time.monotonic(), rate_rebuild_from)
-                    if audio_format_changed:
-                        # Counted only where a rebuild really happened, and only
-                        # when the AUDIO FORMAT is what caused it: a publisher
-                        # replaced for a dead process or a changed frame size
-                        # picks up the current shape for free and must not spend
-                        # the budget that stops a moving shape rebuilding
-                        # forever.
+                    if audio_format_changed and sink_audio_fmt is not None:
+                        # Counted only where a rebuild really happened, only when
+                        # the AUDIO FORMAT is what caused it (a publisher replaced
+                        # for a dead process or a changed frame size picks up the
+                        # current shape for free), and only when the publisher
+                        # HAD an audio shape to move away from.
+                        #
+                        # That last condition is the 2026-08-28 fix. sink_audio_fmt
+                        # is None exactly once per process, at the bootstrap: every
+                        # publisher starts video-only and is given the camera's real
+                        # shape at the first rotation that has seen a decoded frame.
+                        # Counting that spent the whole budget on the one transition
+                        # that is not churn -- guaranteed, every process, before the
+                        # camera had changed anything -- so the next observation was
+                        # unconditionally fatal, and one arrived from a mis-sniffed
+                        # session and cost the living room camera 54 minutes of
+                        # audio. Learning a shape is not a shape that keeps moving,
+                        # and only the latter is what this budget is for.
                         audio_format_rebuilds += 1
                         log.info(
                             "%s: the publisher's audio input is now %s, was %s "
-                            "-- audio-format rebuild %d of the %d this camera "
-                            "may spend in one process. Readers see one "
-                            "reconnect; this is not a fault.",
+                            "-- audio-format change %d of the %d this camera may "
+                            "make within one settle window (forgiven after %ds "
+                            "at one shape). Readers see one reconnect; this is "
+                            "not a fault.",
                             camera["id"], desired_audio_fmt or "absent",
-                            sink_audio_fmt or "absent", audio_format_rebuilds,
-                            c.AUDIO_FORMAT_REBUILD_LIMIT)
+                            sink_audio_fmt, audio_format_rebuilds,
+                            c.AUDIO_FORMAT_REBUILD_LIMIT,
+                            c.AUDIO_FORMAT_SETTLED_S)
+                    elif audio_format_changed:
+                        # The bootstrap, said plainly and distinguished from a
+                        # change, because the two used to be reported (and
+                        # counted) as the same event and that is precisely what
+                        # made the budget useless. This one is free.
+                        log.info(
+                            "%s: the publisher now carries this camera's audio "
+                            "at %s, having started video-only -- the expected "
+                            "one-off cost of learning the shape, which spends "
+                            "no part of the change budget. Readers see one "
+                            "reconnect; this is not a fault.",
+                            camera["id"], desired_audio_fmt)
                     # What this ffmpeg was LAUNCHED with -- the command line is
                     # what the rebuild check above is really about, and start()
                     # can legitimately come up video-only anyway (an unsupported
@@ -1324,6 +1434,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     handover.arm()
                 backoff = c.RECONNECT_BACKOFF_INITIAL_S  # reset after any successful frame batch
                 consecutive_failures = 0
+                failing_since = None
                 # sink.fps (not the local fps var) so this always reflects what's
                 # actually driving the encoder's -r/-g, not a pre-clamp/burst-noisy
                 # measurement -- see FfmpegSink.start()'s own comment.
@@ -1437,6 +1548,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # a login and re-triggers the same window (see main.py's
                     # _login_with_retry). Don't let it count toward that threshold.
                     consecutive_failures += 1
+                    if failing_since is None:
+                        # The START of the run, not this attempt: the hatch below
+                        # asks how long this camera has been unable to deliver a
+                        # frame, and that clock starts at the first failure after
+                        # the last success. A rate-limited failure is excluded
+                        # for the same reason it is excluded from the count.
+                        failing_since = time.monotonic()
                 _update_status(state="reconnecting", consecutive_failures=consecutive_failures,
                                last_error=repr(exc))
                 # For a RateLimited failure the actual sleep is the server's own
@@ -1446,10 +1564,42 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # for one event. Message text only; the handling is unchanged.
                 log.exception("%s: camera session failed%s", camera["id"],
                               "" if rate_limited else f", reconnecting in {backoff}s")
-                if consecutive_failures >= c.MAX_CONSECUTIVE_SESSION_FAILURES:
-                    # This loop's own backoff already absorbs ordinary transient
-                    # failures (auth blips, brief camera dropouts, etc). Reaching
-                    # this many *consecutive* failures for one camera with no
+                if (failing_since is not None
+                        and time.monotonic() - failing_since
+                        >= c.SESSION_WEDGE_TIMEOUT_S):
+                    # MEASURED IN TIME, NOT IN ATTEMPTS, and it used to be the
+                    # other way round. The threshold was five consecutive
+                    # failures, and on 2026-08-28 that fired 21 times in a day on
+                    # transients that were already healing themselves: every
+                    # observed failure run recovered on its own after one to four
+                    # failures, and the restarts did not help -- after the
+                    # 16:13:36 exit the same camera failed five MORE times before
+                    # streaming again, which is the clearest possible statement
+                    # that no local resource was wedged. Each of those restarts
+                    # kicked every RTSP reader and threw away both cameras'
+                    # learned audio shape (E82) to fix nothing.
+                    #
+                    # A count cannot tell "the cloud is flaky right now" from "we
+                    # are wedged", because both produce failures; what separates
+                    # them is whether the camera comes back. So the question this
+                    # asks is how long this camera has been unable to deliver a
+                    # single frame, and the ORIGINAL evidence answers it just as
+                    # well: 2026-07-20's real wedge was 26+ consecutive failures
+                    # that never self-cleared and needed a manual restart, which
+                    # is many minutes of no frames, while the longest transient
+                    # run observed since was about 103 seconds. There is a wide
+                    # gap between those, and config.SESSION_WEDGE_TIMEOUT_S sits
+                    # in it.
+                    #
+                    # The count is not kept as a second condition because it
+                    # cannot add anything: every session attempt is bounded by
+                    # WEBRTCUP_TIMEOUT_S, FIRST_FRAME_TIMEOUT_S and
+                    # FRAME_SILENCE_TIMEOUT_S, so a run cannot reach this
+                    # duration without many attempts inside it.
+                    #
+                    # Everything below this point is unchanged, and the reasoning
+                    # it records still holds -- it is the trigger that was wrong,
+                    # not the response. Reaching here for one camera with no
                     # successful frame batch in between means something below
                     # this loop isn't being fully released between attempts --
                     # lifecycle.py's deactivate() already documents aiortc's
@@ -1470,10 +1620,11 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # _login_with_retry comment for the same pattern) brings up
                     # a fully clean process.
                     log.critical(
-                        "%s: %d consecutive session failures with no successful "
-                        "frame in between -- likely a leaked/wedged resource that "
+                        "%s: no successful frame for %.0fs across %d consecutive "
+                        "session failures -- likely a leaked/wedged resource that "
                         "only a fresh process can clear; forcing container restart",
-                        camera["id"], consecutive_failures)
+                        camera["id"], time.monotonic() - failing_since,
+                        consecutive_failures)
                     # ...unless we've already done exactly that several times in
                     # the last hour. A wedged resource is gone after the first
                     # restart; a hatch that keeps firing means the failures are

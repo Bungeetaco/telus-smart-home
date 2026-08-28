@@ -427,7 +427,7 @@ class JanusCameraSession:
         if want_audio:
             # FAIL-SAFE. A rejected experiment must cost nothing: it may not raise,
             # so it never counts a consecutive failure, never reaches
-            # camera_session.py's MAX_CONSECUTIVE_SESSION_FAILURES escape hatch and
+            # camera_session.py's SESSION_WEDGE_TIMEOUT_S escape hatch and
             # never restart-loops the container. On any error reply -- transport or
             # plugin level -- retry the create ONCE with the byte-identical
             # video-only body this bridge has always sent, and carry on as normal.

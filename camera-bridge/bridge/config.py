@@ -144,15 +144,34 @@ def rate_limit_sleep_s(retry_after_s: float) -> float:
     return min(max(float(retry_after_s), 0.0), RATE_LIMIT_RETRY_MAX_S) + RATE_LIMIT_RETRY_MARGIN_S
 
 
-# If a single camera's session fails this many times in a row with no
-# successful frame batch in between, camera_session.py gives up on in-process
-# retrying and hard-exits the whole bridge (os._exit) so Docker's
-# `restart: unless-stopped` policy brings up a fully clean process -- see the
-# comment at that call site for why. With the backoff sequence above
-# (2,4,8,16,30...), 5 consecutive failures is at least ~60s of continuous
-# failure before this fires, comfortably past what the backoff alone absorbs
-# for an ordinary transient blip.
-MAX_CONSECUTIVE_SESSION_FAILURES = 5
+# If a single camera goes this long with no successful frame batch -- a
+# continuous run of failed sessions, cleared by any success -- camera_session.py
+# gives up on in-process retrying and hard-exits the whole bridge (os._exit) so
+# Docker's `restart: unless-stopped` policy brings up a fully clean process.
+# See the comment at that call site for why the response is a hard exit.
+#
+# THIS USED TO COUNT FAILURES (MAX_CONSECUTIVE_SESSION_FAILURES = 5) AND THAT
+# WAS THE WRONG QUESTION. A count cannot separate a wedged local resource from a
+# flaky cloud, because both produce failures; only whether the camera comes back
+# separates them. Measured on 2026-08-28, the count fired 21 times in one day on
+# runs that were healing themselves -- every observed run recovered after one to
+# four failures -- and the restarts demonstrably did not help: after one of them
+# the same camera failed five more times before streaming. Each restart kicks
+# every RTSP reader and discards both cameras' learned audio shape (E82).
+#
+# 600s is chosen from both ends of the real evidence rather than from the
+# backoff arithmetic:
+#
+#   * the longest transient run actually observed was about 103 seconds (four
+#     failures), so this is roughly six times that;
+#   * the one confirmed wedge, 2026-07-20, was 26+ consecutive failures that
+#     never self-cleared and needed a manual `docker restart` -- far longer than
+#     this, so that incident would still be caught.
+#
+# A session attempt is bounded by WEBRTCUP_TIMEOUT_S, FIRST_FRAME_TIMEOUT_S and
+# FRAME_SILENCE_TIMEOUT_S, so a run cannot reach this duration without many
+# attempts inside it; there is no need to also require a count.
+SESSION_WEDGE_TIMEOUT_S = 600
 
 # --- Restart-frequency guard for that escape hatch (see restart_guard.py) ---
 # The hatch is right for a one-off local wedge and wrong for a sustained
@@ -334,7 +353,7 @@ JANUS_KEEPALIVE_INTERVAL_S = 25     # Janus GC's idle sessions ~60s server-side;
 # with the byte-identical video-only body this bridge has always sent. A
 # rejected experiment therefore never raises, never counts a consecutive
 # session failure, and never reaches camera_session.py's
-# MAX_CONSECUTIVE_SESSION_FAILURES container-restart escape hatch.
+# SESSION_WEDGE_TIMEOUT_S container-restart escape hatch.
 #
 # PER-CAMERA, not a plain on/off, because the blast radius has to be
 # selectable. Run live against both cameras on this account, the gateway offered
@@ -505,10 +524,48 @@ def janus_consume_audio_for(camera_id) -> bool:
 # audio_dropped_reason -- which is the trade FfmpegSink already makes for a
 # wedged audio pipe: video is worth more than audio.
 #
-# Raising it trades reader interruptions for a chance that a genuinely unstable
-# shape eventually settles. There is no evidence any camera on this account
-# needs more than one.
+# WHAT THIS COUNTS IS RECENT CHURN, NOT THE LIFE OF THE PROCESS, and it used to
+# count the latter. That is the whole of the 2026-08-28 fault: the counter was
+# incremented by the BOOTSTRAP (a publisher launched video-only, then given the
+# shape the camera really sends), which every process performs exactly once, so
+# the budget was always fully spent before the camera had changed anything. The
+# first anomalous observation afterwards was therefore unconditionally fatal --
+# and one arrived, from a mis-sniffed session (see aiortc_opus_patch's
+# OPUS_CONFIDENCE), taking the living room camera to video-only for 54 minutes.
+# A bound that is always exhausted is not a bound, it is a fuse.
+#
+# So two things are true of this number now that were not before:
+#
+#   * the bootstrap does not spend it. Learning a shape is not churn; the
+#     comment above already called that rebuild "the expected one", and it is
+#     now free in the code as well as in the prose;
+#   * it is FORGIVEN once the shape has held for AUDIO_FORMAT_SETTLED_S, so it
+#     measures "changes that did not settle", which is the thing worth bounding.
+#
+# One change per settle window is generous for a property of a device that
+# should never change at all, so the NUMBER is unchanged and only its meaning
+# has moved. Changing both at once would make the behaviour hard to reason
+# about.
 AUDIO_FORMAT_REBUILD_LIMIT = 1
+# How long the decoded audio shape has to hold before the churn budget above is
+# forgiven, and before a camera whose audio was given up on is allowed to try
+# again.
+#
+# The bridge adapts to the camera, not the other way around: a camera that
+# changes its audio shape ONCE has not misbehaved, and the publisher must
+# follow it rather than spending the rest of the process publishing video only.
+# Giving up is still the right answer for a shape that genuinely oscillates --
+# a rebuild kicks every RTSP reader -- but it has to be a COOL-DOWN rather than
+# a death sentence, because nothing else in the process ever revisits it.
+# (ffmpeg cannot reopen an input, so recovery always costs one rebuild; there is
+# no cheaper path back. See FfmpegSink._drop_audio, which is latched one-way for
+# a given sink by that constraint.)
+#
+# 900s spans about five and a half rotations at SESSION_MAX_LIFETIME_S. A
+# per-session anomaly -- the decoder committing differently for one session --
+# lasts exactly one, so this clears it several times over while still being far
+# shorter than the hours a process now runs for.
+AUDIO_FORMAT_SETTLED_S = 900
 # Bound on the per-session decoded-audio queue in janus_client. Audio arrives in
 # 20 ms frames, so this is ~1s of buffer: enough to ride out an encode hiccup,
 # short enough that a stalled consumer drops audio (and says so) instead of

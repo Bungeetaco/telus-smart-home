@@ -37,20 +37,32 @@ and evidence. Grouped by whether anything can actually be done about them.
   run through multi-hour soaks across many rotations with no publisher loss.
   The remaining audio-attributable residual (~14 drops per rotation at the
   handover) is E76's, not this entry's.
-- **E92** (open, the strongest remaining lead) - video drops track audio
-  STARVATION mid-session, not the handover: 0 drops at +3,398 audio frames
-  against 383 drops at +84, with one session shedding 2,700. Wedged pipe,
-  format mismatch and resource starvation all ruled out by direct reading.
-  Suspect E90(b). Measure it, do not reason about it.
-- **E90** (open, minor) - three follow-ons from E88: the prime's lead is spent
-  once and never re-established, the pump only tops up on its timeout branch,
-  and `video_issued` is not independently fail-first proven.
+- **E92** (open, and its stated mechanism is WITHDRAWN) - the entry claimed
+  video drops track audio STARVATION mid-session. That correlation held for the
+  living room and does not hold for the doorbell, which on 2026-08-28 dropped
+  613 to 1,959 frames per five minutes WHILE its audio ran normally at +3,900
+  to +4,500. The handover trace also clears the rotation itself: 4 to 12 drops
+  per rotation, small `worst_gap`, lead healthy at ~1,100 ms by `settled`, and
+  audio advancing ~992 ms per ~1,040 ms of wall clock (about 99% coverage), so
+  the timeline is not drifting either. What is actually observed is BIMODAL: a
+  session either drops ~21 per rotation or sheds ~150 every 22 seconds (38%
+  sustained), with no audio signal separating the two. The cause is unknown and
+  no hypothesis currently fits. Measure it, do not reason about it.
+- **E90** (open, minor, one point answered) - three follow-ons from E88. Point
+  (b), "the pump only tops up on its timeout branch", was measured on 2026-08-28
+  and is NOT causing drift: audio frames arrive every ~66 ms while the timeout
+  is 50 ms, so the timeout branch does fire between frames and coverage sits at
+  about 99%. It was the suspect for E92 and is cleared. The other two stand.
 - **E87** (DONE) - the integration harness covers eleven modules and the
   mutation pass has been run: eleven mutations, ten caught, one real survivor
   found and closed (`AttributeBinarySensor.is_on`).
-- **E89** (open) - the bridge restarts itself on session failures (escape hatch,
-  not OOM), and one of the failures is a plain `TypeError` from a JSON load
-  handed `None`. Separate from E88.
+- **E89** (FIXED 2026-08-28, pending live confirmation) - the escape hatch was
+  firing on transients that heal themselves: 21 restarts in a day, every
+  observed failure run recovering after one to four failures against a threshold
+  of five, and the restarts demonstrably not helping. The trigger is now a
+  duration with no successful frame (`SESSION_WEDGE_TIMEOUT_S = 600`) rather
+  than a count of failures. The `TypeError` this entry also named has not
+  recurred and was not what drove the restarts.
 
 - **E77** (open, minor) - four recorded limits of E76's handover
   instrumentation: it traces proactive rotations only, a record open at camera
@@ -74,6 +86,22 @@ and evidence. Grouped by whether anything can actually be done about them.
   left is to run it on the live doorbell and read the records; the suspected
   mechanism stays unconfirmed until then, and no fix is to be attempted before.
 
+
+- **E93** (FIXED 2026-08-28, deployed, soak in progress) - the codec sniff
+  committed to Opus on a mu-law stream roughly 1% of sessions, and each one cost
+  that camera its audio for the rest of the process. `OPUS_CONFIDENCE` was 0.75
+  tested with `>=`, and the live accidental-success rate is 0.75 to 0.80, so the
+  threshold sat ON the collision. Raised to 0.9. The comment's claim that 0.75
+  sat "far above" the accidental rate was an assumption and is corrected in
+  place with the measurement.
+
+- **E94** (FIXED 2026-08-28, built, not yet deployed) - the audio-format rebuild
+  budget was spent by the BOOTSTRAP, so it was always exhausted before a camera
+  changed anything and the first anomalous observation was unconditionally
+  fatal. It is now forgiven once the shape holds for
+  `AUDIO_FORMAT_SETTLED_S`, giving up is a cool-down rather than permanent, and
+  a recovery whose shape matches what the publisher was LAUNCHED with still
+  rebuilds, because `_drop_audio` is latched one-way.
 
 **Recently shipped, listed only because the trap is expensive**
 
@@ -1843,8 +1871,8 @@ entries are the mechanism that keeps it under review
   the next session rotation, not by raising from the streaming loop the way an
   audio-format change does: the rotation gap is already bridged by the frame
   hold, so the change costs one rebuild glitch rather than a glitch plus a failed
-  session plus a backoff. It never counts toward
-  `MAX_CONSECUTIVE_SESSION_FAILURES`. The pending change is also re-checked
+  session plus a backoff. It never contributes to the failure run
+  `SESSION_WEDGE_TIMEOUT_S` measures. The pending change is also re-checked
   against the current reading at that point, so a rate that wandered and came
   home rebuilds nothing.
 
@@ -2987,12 +3015,38 @@ entries are the mechanism that keeps it under review
   and the adaptive rate machinery tracks a genuine device-side change instead of
   latching the rate it first measured.
 
-- **E89 (open) The bridge is restarting itself on session failures, and one of
-  them is a plain bug.** Two days of watcher history show the container exiting
-  and restarting repeatedly. The cause is NOT memory: `OOMKilled` is false, the
-  kernel log has no OOM events, and every exit is `entrypoint.sh: bridge exited
-  (code 1)`, which is the `MAX_CONSECUTIVE_SESSION_FAILURES` escape hatch doing
+- **E89 (FIXED 2026-08-28, pending live confirmation) The bridge was restarting
+  itself on session failures, and the trigger was the bug.** Two days of watcher
+  history show the container exiting and restarting repeatedly. The cause is NOT
+  memory: `OOMKilled` is false, the kernel log has no OOM events, and every exit
+  is `entrypoint.sh: bridge exited (code 1)`, which is the escape hatch doing
   what it was built to do after five consecutive failures.
+
+  **What it was built to do was the wrong thing.** Measured on 2026-08-28: 21
+  restarts in one day, and EVERY observed failure run recovered on its own after
+  one to four failures. The threshold was five, so the hatch was firing on the
+  tail of a distribution that heals itself. The restarts also did not work: after
+  the 16:13:36 exit the same camera failed five MORE times before streaming
+  again, which falsifies the hatch's own premise ("a leaked/wedged resource that
+  only a fresh process can clear"). Each restart kicked every RTSP reader and
+  discarded both cameras' learned audio shape (E82).
+
+  A count cannot separate a wedged local resource from a flaky cloud, because
+  both produce failures; only whether the camera comes back separates them. So
+  the trigger is now a DURATION with no successful frame,
+  `config.SESSION_WEDGE_TIMEOUT_S = 600`, chosen from both ends of the evidence:
+  about six times the longest transient run observed (~103s), and far below the
+  one confirmed wedge (2026-07-20, 26+ consecutive failures that never
+  self-cleared and needed a manual restart), so that incident would still be
+  caught. `MAX_CONSECUTIVE_SESSION_FAILURES` is retired.
+
+  The `TypeError('the JSON object must be str, bytes or bytearray, not
+  NoneType')` this entry also named has NOT recurred in the 12 hours before the
+  fix and is not what was driving the restarts; if it returns it needs its own
+  entry, since nothing still records where it is raised.
+
+  **Not yet confirmed live.** The claim to check is a fall in restart count with
+  no rise in time-without-frames, and it needs hours rather than minutes.
 
   The failures behind it, from the watcher's captured `last_error` fields:
   `no frames received before timeout (waited 20.0s of 20.0s; webrtcup seen

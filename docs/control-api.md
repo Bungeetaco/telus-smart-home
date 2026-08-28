@@ -235,7 +235,7 @@ to a camera from there. The per-camera answer is each camera's `audio_codec`.
 | `opus_confidence` | float | What fraction of that sample libopus must accept for the session to commit to Opus (a constant, echoed for the same reason) |
 
 `state: "restart_deferred"` is the most informative value: the camera hit the
-`MAX_CONSECUTIVE_SESSION_FAILURES` escape hatch, but it has fired too often
+`SESSION_WEDGE_TIMEOUT_S` escape hatch, but it has fired too often
 lately to be a local wedge, so `restart_guard.py` is holding the process before
 it exits.
 

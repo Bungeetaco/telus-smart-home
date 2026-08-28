@@ -3,13 +3,13 @@
 # actually supervises both child processes -- previously this only ever
 # waited on the bridge, so a MediaMTX crash/OOM went unnoticed here (the
 # bridge would eventually cascade into repeated publish failures and hit its
-# own MAX_CONSECUTIVE_SESSION_FAILURES restart, but only after several failed
+# own SESSION_WEDGE_TIMEOUT_S restart, but only after several failed
 # sessions -- this makes MediaMTX dying trigger an immediate, direct restart
 # of the whole container instead of relying on that indirect path).
 # NOT `set -e`: with errexit on, a non-zero exit from `wait -n` below aborts the
 # script immediately, making every line after it -- the diagnostic "which child
 # died" message and the cleanup kill -- unreachable dead code. That is exactly the
-# path the bridge's own MAX_CONSECUTIVE_SESSION_FAILURES escape hatch takes
+# path the bridge's own SESSION_WEDGE_TIMEOUT_S escape hatch takes
 # (os._exit(1)), so the one failure mode most in need of a clear log line was the
 # one guaranteed not to produce it. Errors are handled explicitly instead.
 set -uo pipefail

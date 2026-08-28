@@ -70,7 +70,7 @@ Pinned here:
   5. sink repair       -- a sink whose `start()` raised is never adopted, a sink
                           whose process died is replaced, a frame-size change
                           replaces it, and nothing else does.
-  6. escape hatch      -- MAX_CONSECUTIVE_SESSION_FAILURES ends the process, one
+  6. escape hatch      -- SESSION_WEDGE_TIMEOUT_S ends the process, one
                           successful frame batch resets the count, the restart
                           guard's hold happens BEFORE the exit with the dead
                           session already closed, and a Cloudflare rate-limit
@@ -623,7 +623,7 @@ _FAST = {
     "FRAME_HOLD_MAX_S": 1.0,
     "RECONNECT_BACKOFF_INITIAL_S": 0.05,
     "RECONNECT_BACKOFF_MAX_S": 0.2,
-    "MAX_CONSECUTIVE_SESSION_FAILURES": 3,
+    "SESSION_WEDGE_TIMEOUT_S": 3.0,
     "SESSION_CLOSE_TIMEOUT_S": 0.3,
     "RATE_LIMIT_RETRY_MARGIN_S": 0.0,
 }
@@ -871,7 +871,7 @@ async def test_silence_before_the_deadline_is_a_failure():
     a full rotation lifetime on a camera that has already stopped."""
     with scenario([Plan(frames=steady(6, 0.02), tail="stall")],
                   SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=0.2,
-                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         start(ctx)
         await run_until(ctx, lambda x: x.state.get("state") == "reconnecting",
                         timeout=5.0, why="the silence watchdog to fire")
@@ -898,7 +898,7 @@ async def test_dropped_frames_accumulate_across_sessions_into_the_status():
         Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720)),
     ]
     with scenario(plans, SESSION_MAX_LIFETIME_S=0.3,
-                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         start(ctx)
         # Well inside the first session's 0.3s lifetime: nothing has retired yet,
         # so the field must already exist -- the status shape is a contract and a
@@ -940,7 +940,7 @@ async def test_a_first_frame_timeout_reports_how_long_it_actually_waited():
     # Waited it out: connect succeeds, webrtcup is up, no frame ever arrives.
     with scenario([Plan(frames=(), tail="stall", webrtcup_seen=True)],
                   FIRST_FRAME_TIMEOUT_S=0.4,
-                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         start(ctx)
         await run_until(ctx, lambda x: x.state.get("last_error"), timeout=8.0,
                         why="the first-frame timeout")
@@ -969,7 +969,7 @@ async def test_a_first_frame_timeout_reports_how_long_it_actually_waited():
     # whatever the constant happens to be.
     with scenario([Plan(frames=(), tail="end", webrtcup_seen=False)],
                   FIRST_FRAME_TIMEOUT_S=5,
-                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         start(ctx)
         await run_until(ctx, lambda x: x.state.get("last_error"), timeout=8.0,
                         why="the early first-frame abort")
@@ -1848,7 +1848,7 @@ async def test_a_sink_whose_start_raised_is_never_adopted():
             raise RuntimeError("both encoders died in the startup grace period")
 
     with scenario([Plan(frames=steady(8, 0.02), tail=("repeat", 0.05, 1280, 720))],
-                  SESSION_MAX_LIFETIME_S=5.0, MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_MAX_LIFETIME_S=5.0, SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         ctx.sink_start_hook = fail_the_first_start
         start(ctx)
         await run_until(ctx, lambda x: len(x.sinks) >= 2 and len(x.sinks[1].writes) > 2,
@@ -1915,42 +1915,122 @@ async def test_a_frame_size_change_replaces_the_publisher():
 # --------------------------------------------------------------------------
 
 async def test_the_escape_hatch_ends_the_process():
-    """MAX_CONSECUTIVE_SESSION_FAILURES with no successful frame in between
-    means something below this loop isn't being released -- a leaked/wedged
-    aiortc resource that only a fresh process can clear (observed live: 26+
-    consecutive failures across both cameras, needing a manual restart)."""
+    """A camera unable to produce a frame for SESSION_WEDGE_TIMEOUT_S means
+    something below this loop isn't being released -- a leaked/wedged aiortc
+    resource that only a fresh process can clear (observed live 2026-07-20: 26+
+    consecutive failures across both cameras, needing a manual restart).
+
+    The DURATION is the trigger, not the number of attempts; how many sessions
+    fit inside the window is a function of the timeouts and the backoff and is
+    deliberately not asserted here (it was, and asserting it is what made this
+    test agree with a threshold that fired on transients)."""
+    began = time.monotonic()
     with scenario([Plan(connect_error=RuntimeError("no frames received before timeout"))],
-                  MAX_CONSECUTIVE_SESSION_FAILURES=3) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=3.0) as ctx:
         start(ctx)
-        await run_until(ctx, lambda x: x.task.done(), timeout=8.0, why="the escape hatch")
+        await run_until(ctx, lambda x: x.task.done(), timeout=12.0, why="the escape hatch")
         await stop(ctx)
         sessions, guard_calls, exits = len(ctx.sessions), len(ctx.guard.calls), list(ctx.os.exits)
+    elapsed = time.monotonic() - began
 
     assert exits == [1], f"the process was not ended: exits={exits}"
-    assert sessions == 3, f"exited after {sessions} failures, expected 3"
+    assert elapsed >= 3.0, (
+        f"the process was ended after {elapsed:.2f}s, before the {3.0}s the "
+        "camera has to be failing for. Exiting early is the 2026-08-28 fault: "
+        "21 restarts in a day on runs that were already recovering.")
+    assert sessions >= 2, (
+        f"only {sessions} session(s) were attempted inside the window -- the "
+        "hatch fired without the loop having really retried")
     assert guard_calls == 1, "the restart guard was not consulted before exiting"
 
 
-async def test_a_successful_batch_resets_the_failure_count():
-    """"Consecutive" means consecutive. One good frame batch in between must
-    clear the count, or a camera that fails intermittently but recovers each
-    time would eventually restart the whole container for no reason."""
-    good = Plan(frames=steady(3, 0.01), tail="end")
+async def test_a_failure_run_that_recovers_does_not_restart_the_container():
+    """The 2026-08-28 fault, and the reason the trigger is a duration.
+
+    The threshold was five CONSECUTIVE failures. On the live deployment every
+    observed failure run recovered on its own after one to four failures, and
+    the hatch still fired 21 times in a day -- because a count cannot tell "the
+    cloud is flaky right now" from "we are wedged". Worse, the restarts did not
+    work: after the 16:13:36 exit the same camera failed five more times before
+    streaming, which is as clear as it gets that no local resource was stuck.
+    Each one kicked every RTSP reader and discarded both cameras' learned audio
+    shape.
+
+    So: fail more times in a row than the old count allowed, then recover, all
+    inside the wedge window. The process must survive it. This is scripted with
+    MORE failures than the retired threshold precisely so that a regression back
+    to counting fails here rather than looking plausible.
+    """
     bad = Plan(connect_error=RuntimeError("no frames received before timeout"))
-    with scenario([bad, bad, good, bad, bad, bad],
-                  MAX_CONSECUTIVE_SESSION_FAILURES=3) as ctx:
+    good = Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720))
+    with scenario([bad] * 6 + [good] * 4, SESSION_WEDGE_TIMEOUT_S=60.0) as ctx:
         start(ctx)
-        await run_until(ctx, lambda x: x.task.done(), timeout=10.0, why="the escape hatch")
+        await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                        timeout=25.0, why="the camera to recover on its own")
+        await run_until(ctx, lambda x: len(x.sinks) > 0 and len(x.sinks[-1].writes) > 3,
+                        timeout=15.0, why="video to be publishing again")
+        exits = list(ctx.os.exits)
+        guard_calls = len(ctx.guard.calls)
+        failures_before_recovery = len(ctx.sessions)
+        state = dict(ctx.state)
         await stop(ctx)
-        sessions, exits = len(ctx.sessions), list(ctx.os.exits)
+
+    assert exits == [], (
+        f"the container was restarted ({exits}) for a run of failures that "
+        "recovered on its own inside the wedge window. This is the retired "
+        "count-based trigger: six consecutive failures would have crossed the "
+        "old threshold of five.")
+    assert guard_calls == 0, (
+        "the restart guard was consulted, so the exit path was entered at all")
+    assert failures_before_recovery > 5, (
+        f"only {failures_before_recovery} sessions ran, so this never exceeded "
+        "the retired threshold of 5 and proves nothing")
+    assert state.get("state") == "streaming", state
+    assert state.get("consecutive_failures") == 0, (
+        f"the failure count was not cleared by the recovery: {state}")
+    print(f"  ok  {failures_before_recovery} sessions, recovered without a "
+          f"restart (old count-based hatch would have exited at 5)")
+
+
+async def test_a_successful_batch_restarts_the_wedge_clock():
+    """One good frame batch in between must restart the clock, not merely
+    decrement something.
+
+    This is the property that makes the hatch safe for an intermittently-failing
+    camera: without it, a camera that fails, recovers, fails, recovers would
+    accumulate its way to a restart it never deserved. Under the retired
+    count-based trigger the equivalent claim was "the count resets", asserted by
+    predicting the exact session number the exit landed on -- which only worked
+    because the trigger was a count, and is meaningless now.
+
+    So the claim is stated directly in the units the trigger actually uses: the
+    exit must come at least a full window AFTER the last success, never a window
+    after the first failure.
+    """
+    good = Plan(frames=steady(20, 0.02), tail="end")
+    bad = Plan(connect_error=RuntimeError("no frames received before timeout"))
+    wedge = 3.0
+    with scenario([bad, bad, good] + [bad] * 30,
+                  SESSION_WEDGE_TIMEOUT_S=wedge) as ctx:
+        start(ctx)
+        await run_until(ctx, lambda x: x.state.get("state") == "streaming",
+                        timeout=15.0, why="the good session to stream")
+        recovered_at = time.monotonic()
+        await run_until(ctx, lambda x: x.task.done(), timeout=25.0,
+                        why="the escape hatch after the good session")
+        exited_at = time.monotonic()
+        await stop(ctx)
+        exits = list(ctx.os.exits)
 
     assert exits == [1], f"the process was never ended: exits={exits}"
-    # Session 3 resets the count to 0 and then fails itself (its frame stream
-    # ends), leaving 1 -- so the hatch lands on session 5. Without the reset the
-    # first three failures alone would have ended the process at session 3.
-    assert sessions == 5, (
-        f"exited after {sessions} sessions -- the successful batch at #3 did not reset "
-        "the count")
+    assert exited_at - recovered_at >= wedge, (
+        f"the process exited {exited_at - recovered_at:.2f}s after the camera "
+        f"was last streaming, which is less than the {wedge}s window. The "
+        "successful batch did not restart the clock, so failure time is being "
+        "accumulated across recoveries -- exactly what would restart the "
+        "container for a camera that is flaky but keeps coming back.")
+    print(f"  ok  exit came {exited_at - recovered_at:.1f}s after the last "
+          f"success, not after the first failure")
 
 
 async def test_the_restart_guard_holds_the_process_before_exiting():
@@ -1962,7 +2042,7 @@ async def test_the_restart_guard_holds_the_process_before_exiting():
     would keep decoding RTP nobody drains for all of it. The hold never cancels
     the exit."""
     with scenario([Plan(connect_error=RuntimeError("no frames received before timeout"))],
-                  MAX_CONSECUTIVE_SESSION_FAILURES=2) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=2.0) as ctx:
         ctx.guard.result = (0.4, 7)
         start(ctx)
         await run_until(ctx, lambda x: x.task.done(), timeout=10.0, why="the guarded exit")
@@ -1997,7 +2077,7 @@ async def test_a_rate_limit_neither_counts_nor_takes_the_fixed_backoff():
     fixed 2/4/8/16/30s schedule just keeps re-entering that window instead of
     ever clearing it."""
     with scenario([Plan()],
-                  MAX_CONSECUTIVE_SESSION_FAILURES=2,
+                  SESSION_WEDGE_TIMEOUT_S=2.0,
                   RECONNECT_BACKOFF_INITIAL_S=1.5,
                   RECONNECT_BACKOFF_MAX_S=1.5) as ctx:
         async def rate_limited(idx):
@@ -2498,7 +2578,7 @@ async def test_a_rejected_audio_create_falls_back_instead_of_failing_the_session
 
     A rejected experiment must cost NOTHING. If it raised, camera_session.py
     would count a consecutive failure for every rotation of every camera -- five
-    in a row and MAX_CONSECUTIVE_SESSION_FAILURES hard-exits the process, which
+    in a row and SESSION_WEDGE_TIMEOUT_S hard-exits the process, which
     with `restart: unless-stopped` behind it is a container restart loop caused
     purely by a diagnostic. So the create is retried once with the byte-identical
     video-only body and the session proceeds normally.
@@ -2897,7 +2977,7 @@ async def test_audio_status_reports_only_what_was_actually_decoded():
                             audio_interval=0.02, audio_fmt=("s16", 16000, 1),
                             audio_peek=None, audio_samples=320)],
                       SESSION_MAX_LIFETIME_S=10.0, FRAME_SILENCE_TIMEOUT_S=5.0,
-                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                      SESSION_WEDGE_TIMEOUT_S=999) as ctx:
             start(ctx)
             await run_until(ctx, lambda x: x.state.get("decoded_audio_frames", 0) >= 3,
                             timeout=10.0, why="decoded audio frames")
@@ -3380,7 +3460,7 @@ async def test_a_wedged_audio_pipe_degrades_to_video_only():
         with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
                             audio_interval=0.02)],
                       SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0,
-                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                      SESSION_WEDGE_TIMEOUT_S=999) as ctx:
             def wedge_the_audio_pipe(sink, width, height, fps):
                 sink.drop_audio_after = 5
             ctx.sink_start_hook = wedge_the_audio_pipe
@@ -3490,7 +3570,7 @@ async def test_a_publisher_that_stopped_reading_is_detected_and_rebuilt():
     with scenario([Plan(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
                         on_frame=wedge_the_publisher)],
                   SESSION_MAX_LIFETIME_S=5.0, FRAME_SILENCE_TIMEOUT_S=5.0,
-                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         start(ctx)
         await run_until(ctx, lambda x: x.state.get("publisher_alive") is False,
                         timeout=10.0, why="the publisher to be reported gone")
@@ -3576,7 +3656,7 @@ async def test_an_audio_format_change_rebuilds_at_a_rotation_not_by_failing():
                        Plan(**steady_frames, audio_fmt=("s16", 16000, 1),
                             audio_samples=320)],
                       SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0,
-                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                      SESSION_WEDGE_TIMEOUT_S=999) as ctx:
             start(ctx)
             await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].audio_writes,
                             timeout=10.0, why="a rebuilt publisher carrying audio")
@@ -3709,10 +3789,152 @@ async def test_sparse_audio_converges_instead_of_looping_on_a_rebuild():
     assert state.get("state") == "streaming", state
     assert state.get("audio_format") == "8000Hz/1ch/s16", state
     assert state.get("publisher_audio_format") == "8000Hz/1ch/s16", state
-    assert state.get("audio_format_rebuilds") == 1, (
-        f"the audio shape cost more than the one rebuild it is allowed: {state}")
+    assert state.get("audio_format_rebuilds") == 0, (
+        f"the BOOTSTRAP was charged to the change budget: {state}. This camera "
+        "went video-only -> the shape it really sends, which is the one "
+        "transition every process makes exactly once and the one thing the "
+        "budget is not for. Charging it is what left no budget for a real "
+        "change and made the first anomalous observation fatal.")
     print(f"  ok  sparse audio: {sessions} sessions, 2 publishers, "
-          f"{len(second_audio)} audio frames published, 0 failed sessions")
+          f"{len(second_audio)} audio frames published, 0 failed sessions, "
+          f"bootstrap charged nothing")
+
+
+async def test_a_given_up_camera_takes_its_audio_back_when_the_shape_settles():
+    """Giving up is a COOL-DOWN, not a death sentence.
+
+    The 2026-08-28 fault was not only that the budget was spent by the
+    bootstrap; it was that spending it was terminal. `audio_given_up` was set
+    once and nothing in the process ever revisited it, so a camera that had one
+    bad observation published video only until something unrelated restarted the
+    container. The living room camera sat like that for 54 minutes.
+
+    The bridge follows the camera. A shape that keeps moving is still worth
+    declining -- a rebuild kicks every RTSP reader -- but "keeps moving" is a
+    statement about the present, and a camera that has settled is no longer
+    making it. So: oscillate until the audio is given up on, then hold ONE shape
+    and require that the publisher comes back carrying it.
+
+    The settle window is shortened here rather than waited out; what is being
+    tested is that the timer is read against the shape's own timestamp and that
+    the recovery path exists, not the value of the constant.
+    """
+    steady_frames = dict(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                         audio_interval=0.02, audio_peek=None)
+    quiet = Plan(**steady_frames, audio_fmt=("s16", 8000, 1), audio_samples=160)
+    loud = Plan(**steady_frames, audio_fmt=("s16", 48000, 2), audio_samples=960)
+    # Oscillate long enough to be given up on, then hold one shape for good.
+    plans = [quiet, loud] * 4 + [quiet] * 30
+    with consume_knob("all", request="all"):
+        with scenario(plans, SESSION_MAX_LIFETIME_S=0.4,
+                      FRAME_SILENCE_TIMEOUT_S=5.0,
+                      AUDIO_FORMAT_REBUILD_LIMIT=1,
+                      AUDIO_FORMAT_SETTLED_S=1.2) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("audio_dropped") is True,
+                            timeout=15.0, why="the audio input to be given up on")
+            gave_up_after = len(ctx.sessions)
+            sinks_at_give_up = len(ctx.sinks)
+            await run_until(
+                ctx, lambda x: x.state.get("audio_dropped") is False,
+                timeout=20.0,
+                why="the audio input to be taken back up once the shape settled")
+            recovered_after = len(ctx.sessions)
+            live = ctx.sinks[-1]
+            await run_until(ctx, lambda x: len(x.sinks[-1].audio_writes) > 0,
+                            timeout=15.0,
+                            why="real audio to reach the recovered publisher")
+            state = dict(ctx.state)
+            audio_writes = [n for _, n in live.audio_writes]
+            video_after = len(live.writes)
+            await stop(ctx)
+
+    assert recovered_after > gave_up_after, (
+        f"the camera recovered at session {recovered_after} but was given up on "
+        f"at {gave_up_after} -- recovery has to be a later decision, not the "
+        "give-up never having happened")
+    assert len(ctx.sinks) > sinks_at_give_up, (
+        "the audio came back without a new publisher. ffmpeg cannot reopen an "
+        "input (FfmpegSink._drop_audio is latched one-way), so a recovery that "
+        "did not rebuild is a recovery that only updated a status field")
+    assert state.get("audio_dropped") is False, state
+    assert state.get("audio_dropped_reason") is None, (
+        f"the give-up reason outlived the give-up: {state}")
+    assert state.get("publisher_audio_format") == "8000Hz/1ch/s16", (
+        f"the recovered publisher does not carry the shape that settled: {state}")
+    assert audio_writes and all(n == 160 for n in audio_writes), (
+        f"no real audio reached the recovered publisher: {audio_writes[:5]}")
+    assert video_after > 0, (
+        "video stopped across the recovery -- a camera is never taken off the "
+        "air for an audio repair")
+    print(f"  ok  given up at session {gave_up_after}, audio taken back up at "
+          f"{recovered_after} once one shape held")
+
+
+async def test_recovery_works_when_the_shape_settles_back_to_the_launched_one():
+    """The live 2026-08-28 shape, which the general recovery test does NOT hit.
+
+    There, the publisher was given up on while launched for one shape and
+    settled on a different one, so the shapes disagreed and a rebuild followed
+    naturally. The real incident was the other way round: the publisher was
+    launched for 8 kHz mono, ONE mis-sniffed session delivered 48 kHz stereo,
+    and the camera then settled back to 8 kHz -- the shape the publisher already
+    had.
+
+    Comparing shapes alone says "nothing to do" there, and that answer is wrong,
+    because FfmpegSink._drop_audio is latched one-way: ffmpeg cannot reopen an
+    input, so the sink keeps reporting the shape it was LAUNCHED with while
+    writing no audio at all. A recovery that trusted the shapes would clear
+    audio_dropped, rebuild nothing, and leave the camera silent while claiming
+    otherwise -- a status field describing a wish.
+    """
+    steady_frames = dict(frames=steady(10, 0.02), tail=("repeat", 0.02, 1280, 720),
+                         audio_interval=0.02, audio_peek=None)
+    quiet = Plan(**steady_frames, audio_fmt=("s16", 8000, 1), audio_samples=160)
+    loud = Plan(**steady_frames, audio_fmt=("s16", 48000, 2), audio_samples=960)
+    # Tuned so the give-up lands on a publisher launched for 48 kHz and the
+    # camera then settles on 48 kHz -- i.e. the shapes MATCH at the moment
+    # recovery is considered, which is the whole point. The assertion on
+    # launched_with below fails loudly if this sequence ever stops producing
+    # that, rather than passing as a duplicate of the previous test.
+    plans = [quiet, loud, quiet, loud] + [loud] * 30
+    with consume_knob("all", request="all"):
+        with scenario(plans, SESSION_MAX_LIFETIME_S=0.4,
+                      FRAME_SILENCE_TIMEOUT_S=5.0,
+                      AUDIO_FORMAT_REBUILD_LIMIT=1,
+                      AUDIO_FORMAT_SETTLED_S=1.2) as ctx:
+            start(ctx)
+            await run_until(ctx, lambda x: x.state.get("audio_dropped") is True,
+                            timeout=15.0, why="the audio input to be given up on")
+            dropped_sink = ctx.sinks[-1]
+            launched_with = dropped_sink.audio_format
+            await run_until(
+                ctx, lambda x: x.state.get("audio_dropped") is False,
+                timeout=25.0, why="the audio input to be taken back up")
+            await run_until(ctx, lambda x: len(x.sinks[-1].audio_writes) > 0,
+                            timeout=15.0, why="real audio on the new publisher")
+            live = ctx.sinks[-1]
+            state = dict(ctx.state)
+            audio_writes = [n for _, n in live.audio_writes]
+            await stop(ctx)
+
+    assert launched_with == ("s16", 48000, 2), (
+        f"the publisher that was given up on was launched for {launched_with}, "
+        "so this scenario is no longer exercising the matching-shape path and "
+        "has silently become a copy of the previous test")
+    assert live is not dropped_sink, (
+        "the audio was reported as recovered on the SAME publisher whose audio "
+        "input was dropped. That input cannot be reopened, so this is the "
+        "silent-but-claiming-otherwise state, not a recovery")
+    assert live.audio_dropped is False, (
+        f"the recovered publisher still has its audio input dropped: {state}")
+    assert audio_writes and all(n == 960 for n in audio_writes), (
+        f"no real 48 kHz audio reached the recovered publisher: "
+        f"{audio_writes[:5]}")
+    assert state.get("audio_dropped") is False, state
+    assert state.get("publisher_audio_format") == "48000Hz/2ch/s16", state
+    print(f"  ok  settled back to the launched shape ({launched_with}); the "
+          f"publisher was rebuilt anyway and audio really flows")
 
 
 async def test_a_camera_that_never_sends_audio_publishes_video_forever():
@@ -3831,9 +4053,13 @@ async def test_audio_format_rebuilds_are_bounded_and_degrade_to_video_only():
         f"{failed[:1]} -- that is the E81 loop, and each failure destroys the "
         "codec sniff that would have settled it")
 
-    assert len(sinks) == 2, (
-        f"{len(sinks)} publishers across {sessions} sessions -- past the limit "
-        "the audio input is dropped in place, NOT rebuilt again")
+    assert len(sinks) == 3, (
+        f"{len(sinks)} publishers across {sessions} sessions. Expected three: "
+        "the video-only start, the free bootstrap to the first shape observed, "
+        "and ONE genuine change -- after which the audio input is dropped in "
+        "place, NOT rebuilt again. Two would mean the bootstrap is being "
+        "charged to the budget again, which leaves a camera no adaptation at "
+        "all before it is given up on.")
     assert state.get("audio_format_rebuilds") == 1, state
     assert live.audio_dropped is True, (
         "the publisher kept an audio input it can only ever write silence into, "
@@ -3980,7 +4206,7 @@ async def test_the_cameras_real_8khz_mono_audio_flows_through_unchanged():
                             audio_interval=0.02, audio_fmt=fmt,
                             audio_peek=None, audio_samples=160)],
                       SESSION_MAX_LIFETIME_S=0.4, FRAME_SILENCE_TIMEOUT_S=5.0,
-                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                      SESSION_WEDGE_TIMEOUT_S=999) as ctx:
             start(ctx)
             await run_until(ctx, lambda x: len(x.sinks) >= 2 and x.sinks[1].audio_writes,
                             timeout=10.0, why="a rebuilt 8 kHz publisher carrying audio")
@@ -4510,7 +4736,7 @@ async def test_audio_drops_accumulate_separately_from_the_video_count():
     ]
     with consume_knob("all", request="all"):
         with scenario(plans, SESSION_MAX_LIFETIME_S=0.3,
-                      MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                      SESSION_WEDGE_TIMEOUT_S=999) as ctx:
             start(ctx)
             await asyncio.sleep(0.05)
             early = ctx.state.get("dropped_audio_frames", "absent")
@@ -5126,7 +5352,7 @@ async def test_backoff_grows_caps_and_closes_the_session_first():
     """
     with scenario([Plan(connect_error=RuntimeError("no frames received before timeout"))],
                   RECONNECT_BACKOFF_INITIAL_S=0.1, RECONNECT_BACKOFF_MAX_S=0.25,
-                  MAX_CONSECUTIVE_SESSION_FAILURES=99) as ctx:
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
         start(ctx)
         await run_until(ctx, lambda x: len(x.gvs_calls) >= 5, timeout=8.0,
                         why="5 backed-off attempts")
@@ -5189,7 +5415,8 @@ TESTS = [
     test_a_dead_publisher_is_replaced_at_the_next_rotation,
     test_a_frame_size_change_replaces_the_publisher,
     test_the_escape_hatch_ends_the_process,
-    test_a_successful_batch_resets_the_failure_count,
+    test_a_failure_run_that_recovers_does_not_restart_the_container,
+    test_a_successful_batch_restarts_the_wedge_clock,
     test_the_restart_guard_holds_the_process_before_exiting,
     test_a_rate_limit_neither_counts_nor_takes_the_fixed_backoff,
     test_close_with_timeout_is_bounded_and_swallows_errors,
@@ -5215,6 +5442,8 @@ TESTS = [
     test_sparse_audio_converges_instead_of_looping_on_a_rebuild,
     test_a_camera_that_never_sends_audio_publishes_video_forever,
     test_audio_format_rebuilds_are_bounded_and_degrade_to_video_only,
+    test_a_given_up_camera_takes_its_audio_back_when_the_shape_settles,
+    test_recovery_works_when_the_shape_settles_back_to_the_launched_one,
     test_the_cameras_real_8khz_mono_audio_flows_through_unchanged,
     test_ffmpeg_duplicated_frame_warnings_are_counted,
     test_a_malformed_audio_frame_is_skipped_and_a_run_of_them_drops_audio,

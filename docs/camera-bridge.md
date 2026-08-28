@@ -657,10 +657,17 @@ immediately": a broken guard must never be why a genuinely wedged bridge can't
 recycle. The escape hatch never *cancels* an exit; a real wedge still gets its
 fresh process, just not at loop speed.
 
-The consecutive-failure hatch itself fires at
-`MAX_CONSECUTIVE_SESSION_FAILURES = 5`; with the `2/4/8/16/30s` backoff that is
-~60s of continuous failure with no successful frame in between, comfortably past
-what the backoff alone absorbs for a transient blip. It uses `os._exit()` (not a
+The hatch itself fires at `SESSION_WEDGE_TIMEOUT_S = 600`: ten minutes in which
+one camera produced no successful frame batch, the clock starting at the first
+failure after the last success and cleared by any success. It is a DURATION
+rather than a count of failures because those are not the same question -- a
+count cannot separate a wedged local resource from a flaky cloud, since both
+produce failures, and only whether the camera comes back separates them. The
+retired `MAX_CONSECUTIVE_SESSION_FAILURES = 5` fired 21 times in a single day on
+runs that were already recovering, and the restarts demonstrably did not help.
+Every session attempt is bounded by the webrtcup, first-frame and frame-silence
+timeouts, so a run cannot reach ten minutes without many attempts inside it.
+It uses `os._exit()` (not a
 graceful shutdown) deliberately: a graceful path runs through the very cleanup
 code suspected of being wedged, so a hard exit lets the OS reclaim every
 fd/socket/child unconditionally.

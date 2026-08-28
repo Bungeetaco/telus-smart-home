@@ -2,7 +2,7 @@
 
 Two places in this bridge end the process on purpose so Docker's
 `restart: unless-stopped` brings up a clean one: camera_session.py's
-MAX_CONSECUTIVE_SESSION_FAILURES escape hatch (os._exit) and main.py's
+SESSION_WEDGE_TIMEOUT_S escape hatch (os._exit) and main.py's
 _login_with_retry giving up at startup. Both are correct responses to a
 *local* problem -- a leaked/wedged aiortc resource that only a fresh process
 can release, a boot that landed during a blip -- and both are the wrong
