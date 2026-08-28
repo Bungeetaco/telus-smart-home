@@ -71,17 +71,28 @@ AUDIO_TIMEOUT = _AudioTimeout()
 # shorter than that.
 #
 # THE FLOOR AND THE CEILING ARE MEMORY. A decoded 1440x1440 yuv420p frame is
-# 1440*1440*1.5 = 3.11 MB, and this queue is per camera. 8 frames is 24.9 MB,
-# which the container carries comfortably (mem_limit 768 MiB, ~435 MiB in use);
-# 16 would be 49.8 MB per camera and is not a trade worth making for a queue that
-# is not supposed to fill in the first place.
+# 1440*1440*1.5 = 3.11 MB, and this queue is per camera.
+#
+# The ceiling was 8 frames, chosen when mem_limit was 768 MiB, and it was the
+# binding constraint above about 16 fps: at 30 fps it gives 267 ms rather than
+# the 500 ms target, which is LESS tolerance than the 15 fps camera it was sized
+# for. That stopped being hypothetical on 2026-08-28, when the indoor camera
+# began delivering 30 fps and dropped ~150 frames every 17-24 s in steady state,
+# nowhere near a handover, with the container at 31 percent of two cores and
+# 434 MB of 1 GiB. Not starved: under-buffered.
+#
+# mem_limit is now 1 GiB (E83), so the arithmetic that set 8 no longer holds.
+# 16 frames is 49.8 MB at 1440x1440 and 21.2 MB at 1280x720, about 71 MB across
+# both cameras against a limit with roughly 590 MB spare. That restores the
+# 500 ms target up to 32 fps, which covers every rate either camera has been
+# observed delivering.
 #
 # And it is DEFENCE IN DEPTH, not the fix. A deeper queue does not remove a
 # stall, it converts dropped frames into latency: every frame it holds is a frame
 # the viewer sees late. The fix is not to stall the writer.
 VIDEO_QUEUE_TARGET_MS = 500
 VIDEO_QUEUE_MIN_FRAMES = 4      # what shipped; also ~667 ms at 6fps
-VIDEO_QUEUE_MAX_FRAMES = 8      # 24.9 MB at 1440x1440 -- see above
+VIDEO_QUEUE_MAX_FRAMES = 16     # 49.8 MB at 1440x1440 -- see above
 
 # How many drop timestamps one session remembers when config.HANDOVER_TRACE is
 # on (E76). The drop LOG is throttled to the first of a session and then every
