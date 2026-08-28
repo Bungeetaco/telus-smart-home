@@ -44,9 +44,9 @@ and evidence. Grouped by whether anything can actually be done about them.
 - **E87** (DONE) - the integration harness covers eleven modules and the
   mutation pass has been run: eleven mutations, ten caught, one real survivor
   found and closed (`AttributeBinarySensor.is_on`).
-- **E71** (open): E64's adaptive frame rate has never been watched reacting to
-  a real resolution change live. A five-minute operator check; the procedure,
-  now fully readable from `/control/status`, is in the entry.
+- **E89** (open) - the bridge restarts itself on session failures (escape hatch,
+  not OOM), and one of the failures is a plain `TypeError` from a JSON load
+  handed `None`. Separate from E88.
 
 - **E77** (open, minor) - four recorded limits of E76's handover
   instrumentation: it traces proactive rotations only, a record open at camera
@@ -1936,7 +1936,7 @@ entries are the mechanism that keeps it under review
   error). Parsing encoder stderr for control decisions is a step worth taking
   deliberately, not in passing; the settled re-measurement owns corrections.
 
-- **E71 (open) E64's thresholds are argued from measurement, but the mechanism
+- **E71 (DONE, observed live 2026-08-28) E64's thresholds are argued from measurement, but the mechanism
   has not been observed correcting a real setting change end to end.** The
   hysteresis values, the asymmetry and the settle window are each grounded in
   numbers that exist (the in-container `-framerate` table, the 6/7/15/29 spread
@@ -2964,3 +2964,64 @@ entries are the mechanism that keeps it under review
   deficit should be repaid at 2x real time at all rather than rebasing the audio
   origin on pump start (dead air nobody hears, against a permanent A/V offset
   from a partial repayment).
+
+
+- **E71 resolution: the adaptive rate reacts to a real settings change.**
+  Observed end to end rather than argued. Starting state: `live_resolution: 1`,
+  publishing 1280x720, `fps: 5` and `measured_fps: 5` in agreement. Writing
+  `live_resolution: 3` through the control API changed nothing immediately, and
+  on the NEXT rotation the source came up **640x360** and the publisher followed
+  it, which is exactly the behaviour E34 documents (the setting takes effect on
+  stream renegotiation, not on write). `measured_fps` then read **10** against a
+  declared 5, so the rate watcher saw the change, and the declared rate was
+  still the old one because a confirmed change is applied at the following
+  rotation by design (E64) rather than mid-session. Restoring
+  `live_resolution: 1` returned 1280x720 on the next rotation.
+
+  So the two behaviours this entry existed to check are both confirmed on live
+  hardware: the resolution select really does drive the bridge's own restream,
+  and the adaptive rate machinery tracks a genuine device-side change instead of
+  latching the rate it first measured.
+
+- **E89 (open) The bridge is restarting itself on session failures, and one of
+  them is a plain bug.** Two days of watcher history show the container exiting
+  and restarting repeatedly. The cause is NOT memory: `OOMKilled` is false, the
+  kernel log has no OOM events, and every exit is `entrypoint.sh: bridge exited
+  (code 1)`, which is the `MAX_CONSECUTIVE_SESSION_FAILURES` escape hatch doing
+  what it was built to do after five consecutive failures.
+
+  The failures behind it, from the watcher's captured `last_error` fields:
+  `no frames received before timeout (waited 20.0s of 20.0s; webrtcup seen
+  before the wait)` on both cameras, `session dead: track ended:
+  MediaStreamError()`, `no frame for 15s, treating session as dead`, and
+  **`TypeError('the JSON object must be str, bytes or bytearray, not
+  NoneType')`**, which is not an upstream stream failure at all but a JSON load
+  handed `None`. That last one deserves its own investigation: it is a plain
+  defect, it reached the escape-hatch path, and nothing currently records where
+  it was raised.
+
+  Worth separating from E88 before either is worked: E88 is about frames dropped
+  inside a healthy handover; this entry is about sessions failing outright and
+  taking the container with them. They may share a cause and may not.
+
+
+- **E83 follow-up, two days of data: bounded, but with no headroom.** The
+  25-minute reading that closed E83 said "dramatically better, not yet
+  plateaued", and two days of five-minute samples settle it. The container
+  oscillates between about **41 and 99 percent** of its 768 MiB limit, and
+  crucially **`OOMKilled` is false and the kernel log records no OOM events**:
+  jemalloc bounded the growth into a wide sawtooth rather than eliminating it.
+  Every container restart in that window came from the session-failure escape
+  hatch (E89), not from memory.
+
+  So the fix works and the limit is now the wrong size. 768 MiB was chosen
+  against a measured ~326 MB video-only working set; both cameras now consume
+  mu-law audio, which adds a second decode path, a second silence-fill writer
+  and a second ffmpeg audio input. The limit is raised to 1 GiB to restore
+  headroom, and the watcher's 93 percent threshold becomes meaningful again
+  rather than firing against the normal operating range.
+
+  Recorded because the shape of the error repeats: a 25 minute window said
+  "sawtoothing, envelope still rising" and a two day window says "sawtoothing
+  between 41 and 99 with no OOM". Both readings were honest; only the second is
+  actionable. **State the window length with the claim.**

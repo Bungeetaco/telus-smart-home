@@ -58,7 +58,15 @@ services:
     # project) gets capped and OOM-killed into a clean restart instead of being
     # free to consume the whole host. Override via .env if a future host has
     # tighter constraints or more cameras change the real working set.
-    mem_limit: ${BRIDGE_MEM_LIMIT:-768m}
+    # Raised 768m -> 1g on 2026-08-28. The 768 was sized against a measured
+    # ~326MB video-only working set. Consuming mu-law audio on BOTH cameras adds
+    # a second decode path, a second silence-fill writer and a second ffmpeg
+    # audio input, and jemalloc (E83) trades a wider sawtooth for bounded
+    # growth: two days of five-minute samples oscillate between about 41 and 99
+    # percent with no OOM kill, which is bounded but has no headroom left for a
+    # transient. This buys that headroom rather than papering over a leak; E83
+    # establishes there is no leak to paper over.
+    mem_limit: ${BRIDGE_MEM_LIMIT:-1g}
     cpus: ${BRIDGE_CPU_LIMIT:-2.0}
     # No log rotation previously configured -- this container logs continuously
     # (ffmpeg stderr passthrough, per-frame drop warnings, connection state
