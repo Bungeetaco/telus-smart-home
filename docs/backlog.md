@@ -160,6 +160,50 @@ and evidence. Grouped by whether anything can actually be done about them.
   `VIDEO_QUEUE_MIN_FRAMES = 4` is a sensible floor for a camera that swings
   between 1 and 30fps. Neither is addressed by this fix.
 
+- **E96** (open, upstream, NOT a regression from the 2026-08-28 work) - the
+  doorbell degrades badly in the evening and the living room does not. Measured
+  from four days of watcher history:
+
+  ```
+  hour   doorbell    living room (control)
+  17:00    100%          100%
+  18:00     83%          100%
+  19:00     33%           91%
+  20:00     50%          100%
+  21:00      0%          100%
+  ```
+
+  Both cameras run in the SAME process, on the same account, through the same
+  code and the same deploys, so a regression in that code takes both down. The
+  living room was at its best during exactly the hours the doorbell collapsed,
+  which rules the bridge out. On 25th-27th the doorbell held 99% all day and
+  100% through those same evening hours, so this is specific to 2026-08-28 and
+  to that camera's own path.
+
+  The failure is always the same: Janus reports `webrtcup`, then no RTP arrives
+  within `FIRST_FRAME_TIMEOUT_S`. The alarm.com API answers normally throughout
+  and issues fresh stream credentials for every attempt, so the account and the
+  web tier are fine; what is missing is media from the camera into its
+  mountpoint. Runs last 10 to 20 minutes and then clear by themselves (103s,
+  550s, 1080s and ~1080s again all measured), which is not the shape of a wedge.
+
+  **This is the exact case SESSION_WEDGE_PEER_FRESH_S was added for**, and it
+  validates it: restarting the process cannot reach the far end, and doing so
+  would have taken the healthy living room down with it. Before that veto
+  existed the old count-based hatch restarted the container 21 times in a day
+  over precisely these runs.
+
+  A CAUTION ABOUT THE MEASUREMENT, because it nearly produced the wrong answer:
+  aggregating the four days by hour-of-day showed a 19:00-21:00 dip that looked
+  like a stable time-of-day pattern and therefore environmental and long-
+  standing. Splitting today from 25th-27th showed the prior days were 100% in
+  those hours and the dip is entirely today. Same rows, opposite conclusion.
+  Group by day before reading a time-of-day shape.
+
+  Not investigated: whether the camera itself (Wi-Fi, power, thermal) or the
+  TELUS relay is at fault. Nothing in this repo can distinguish them, and no
+  change here would fix either.
+
 **Recently shipped, listed only because the trap is expensive**
 
 - **E79** (DONE) - Frigate records to the NAS vault pool over virtiofs. If the
