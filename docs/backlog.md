@@ -46,8 +46,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   audio advancing ~992 ms per ~1,040 ms of wall clock (about 99% coverage), so
   the timeline is not drifting either. What is actually observed is BIMODAL: a
   session either drops ~21 per rotation or sheds ~150 every 22 seconds (38%
-  sustained), with no audio signal separating the two. The cause is unknown and
-  no hypothesis currently fits. Measure it, do not reason about it.
+  sustained), with no audio signal separating the two. See E95, which fits all
+  of it and is now the lead. Measure it, do not reason about it.
 - **E90** (open, minor, one point answered) - three follow-ons from E88. Point
   (b), "the pump only tops up on its timeout branch", was measured on 2026-08-28
   and is NOT causing drift: audio frames arrive every ~66 ms while the timeout
@@ -102,6 +102,37 @@ and evidence. Grouped by whether anything can actually be done about them.
   `AUDIO_FORMAT_SETTLED_S`, giving up is a cool-down rather than permanent, and
   a recovery whose shape matches what the publisher was LAUNCHED with still
   rebuilds, because `_drop_audio` is latched one-way.
+
+- **E95** (open, and the strongest lead for E92) - the video drops track the gap
+  between the DECLARED frame rate and the delivered one, not audio. Observed
+  live 2026-08-28 19:26: the living room was publishing `960x540@1fps` while
+  shedding 1,216 frames, with `queue maxsize=4`; the doorbell was declared 15fps
+  against a `measured_fps` of 58. The mechanism is arithmetic rather than
+  speculative: janus_client sizes the video queue FROM the declared rate
+  (`round(rate * VIDEO_QUEUE_TARGET_MS / 1000)`, clamped to
+  `[VIDEO_QUEUE_MIN_FRAMES, VIDEO_QUEUE_MAX_FRAMES]`), so a declared 1fps gives
+  the queue floor of 4 frames, and ffmpeg is launched with `-framerate 1` so it
+  also READS at that rate. A low declared rate therefore shrinks the buffer and
+  slows the consumer at the same time, and both compound.
+
+  This fits everything E92 could not. It explains the BIMODAL behaviour (a
+  session whose declared rate matches delivery drops little; one whose declared
+  rate is far below it sheds continuously), it explains the living room being
+  clean at 30fps and dropping at 6 and 1, and it explains the doorbell dropping
+  while its audio ran perfectly, which is what withdrew E92's mechanism.
+
+  Also seen in the same window, and probably the same cause:
+  `ffmpeg has not read a frame from the video pipe in 5s -- the process is alive
+  but is publishing nowhere; rebuilding the encoder`, twice on the living room.
+  At `-framerate 1` a slow read is what the command line asked for.
+
+  NOT YET A DIAGNOSIS. What is confirmed is the correlation and the queue
+  arithmetic, both read directly from the code and the live status. What is not
+  established is WHY the declared rate collapses to 1fps, whether the camera
+  really delivers that at times, and whether `measured_fps` of 58 is a genuine
+  burst or the rotation contamination RateWatcher already documents. Measure
+  that before changing anything, and do not repeat E92's mistake of writing the
+  mechanism down as settled.
 
 **Recently shipped, listed only because the trap is expensive**
 
