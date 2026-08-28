@@ -1091,6 +1091,95 @@ async def test_frame_hold_is_bounded_by_time_since_a_real_frame():
         "an offline camera would look live forever")
 
 
+async def test_the_holds_audio_topup_is_never_behind_its_video_write():
+    """E88: the frame hold's two writers must not be able to wait on each other.
+
+    ffmpeg only reads the VIDEO pipe while it holds audio covering the frame's
+    timestamp (ffmpeg_sink._AUDIO_PRIME_MS), so write_frame's drain does not
+    complete while the audio timeline is behind the wall clock. Awaited inline --
+    which is what the hold used to do -- that video write also holds up the
+    silence top-up in the same loop body, and that top-up is the only thing left
+    that could advance the timeline and release it: the previous session's pump
+    is stopped by the hold's first act and the next one is not created until
+    _stop_hold has finished. Neither writer moves again, and the deficit grows
+    for the whole gap.
+
+    Measured live on three of five doorbell rotations: one video write, two
+    silence calls, then nothing for the remaining 2-3s, the hold task still alive
+    and ended only by _stop_hold's cancel, the muxer lead down to -2.9s, and 6 to
+    19 frames dropped afterwards while that deficit was repaid. NOTHING ELSE
+    REPORTS IT, which is why it is pinned here: write_frame's own drain bound
+    (5s) is longer than the gap, so publisher_stalled never latches, no rebuild
+    is triggered, and the record reads `sink_rebuilt: false` exactly like a
+    healthy rotation.
+
+    The publisher modelled below applies the muxer's real rule to the hold's
+    repeated frames: it will not take one until the audio timeline covers the
+    instant that frame was written. What is asserted is that the audio keeps
+    flowing THROUGH such a stall, which is also what releases it.
+    """
+    gap = {}
+
+    async def slow_second_attempt(idx):
+        if idx == 1:
+            gap["start"] = time.monotonic()
+            await asyncio.sleep(0.8)
+            gap["end"] = time.monotonic()
+
+    async def hold_frames_wait_for_the_audio(sink):
+        writes = sink.writes
+        if len(writes) < 2 or writes[-1][1] != writes[-2][1]:
+            return                      # a live frame, not a repeat from the hold
+        stamped = time.monotonic()
+
+        def covered():
+            timeline = sink.audio_timeline_s
+            return (timeline is None or sink._audio_started_at is None
+                    or sink._audio_started_at + timeline >= stamped)
+
+        while not covered() and time.monotonic() - stamped < 5.0:
+            await asyncio.sleep(0.002)
+
+    with handover_knob(True, settle=0.1):
+        with consume_knob("all", request="all"):
+            with scenario([Plan(frames=steady(10, 0.066),
+                                tail=("repeat", 0.066, 1280, 720),
+                                audio_interval=0.02, audio_fmt=("s16", 8000, 1),
+                                audio_samples=160)],
+                          SESSION_MAX_LIFETIME_S=0.5, FRAME_SILENCE_TIMEOUT_S=5.0,
+                          FRAME_HOLD_MAX_S=10.0) as ctx:
+                ctx.gvs_hook = slow_second_attempt
+                ctx.write_frame_hook = hold_frames_wait_for_the_audio
+                with capture_logs("bridge.handover_trace") as lines:
+                    start(ctx)
+                    await run_until(ctx, lambda x: len(_records(lines)) >= 1,
+                                    timeout=20.0, why="one handover record")
+                    await stop(ctx)
+                record = _records(lines)[0]
+
+    hold = record["hold"]
+    assert hold["silence_calls"] >= 8, (
+        f"the hold made {hold['silence_calls']} audio top-up calls across a "
+        f"{record['span_ms']}ms handover: it stopped ticking. A video write it "
+        "waits on inline stops the audio it is waiting for")
+    assert hold["silence_ms"] >= 0.5 * record["span_ms"], (
+        f"the hold covered {hold['silence_ms']}ms of a {record['span_ms']}ms "
+        "window with audio -- the timeline stopped tracking the wall clock "
+        "while a video write was outstanding")
+    assert record["lead_min_ms"] > -500, (
+        f"the muxer lead reached {record['lead_min_ms']}ms. Live, this defect "
+        "took it to -1721, -1901 and -2905ms, and every frame dropped in the "
+        "window was lost while that deficit was being repaid")
+    assert hold["video_writes"] >= 1 and hold["video_issued"] >= hold["video_writes"], (
+        f"the hold issued {hold['video_issued']} repeated frames and the "
+        f"publisher accepted {hold['video_writes']}: the two are counted "
+        "separately because their difference IS a video pipe ffmpeg has "
+        "stopped reading, seen from inside the gap")
+    assert record["sink_rebuilt"] is False, (
+        "the publisher was rebuilt, so this record is not the ordinary rotation "
+        "the invariant is about")
+
+
 async def test_a_failed_hold_task_does_not_fail_the_next_session():
     """The hold belongs to the PREVIOUS cycle. If it died, awaiting it from
     inside the next one must not fail a fresh, otherwise-healthy session -- and,
@@ -2855,7 +2944,7 @@ async def test_the_silence_fill_tracks_the_wallclock_and_never_bursts():
     is asserted to equal the wall clock EXACTLY; no fixed-per-call implementation
     can satisfy that.
 
-    HALF TWO -- no single write may hand ffmpeg more than
+    HALF TWO -- an ORDINARY top-up may not hand ffmpeg more than
     _AUDIO_SILENCE_MAX_BURST_S of audio, and that is the invariant this whole
     change exists for. It is invisible in production: a 0.5s burst publishes
     perfectly good audio and perfectly good video, and merely makes ffmpeg stop
@@ -2867,6 +2956,27 @@ async def test_the_silence_fill_tracks_the_wallclock_and_never_bursts():
     The ceiling is a CEILING, not a budget: what it clips is still owed, and
     successive calls keep repaying it against the wall clock until the stream is
     whole again.
+
+    HALF THREE -- and a deficit past _AUDIO_CATCHUP_DEFICIT_S is not an ordinary
+    top-up at all. This half pins a DELIBERATELY CHANGED invariant: a 3s deficit
+    used to be repaid across thirty bounded calls, and is now closed in one. The
+    reason is where the damage sits. While the timeline is behind the wall clock
+    the muxer lead is negative, and a negative lead is precisely when ffmpeg
+    stops reading the video pipe -- so repaying seconds at the ordinary ceiling
+    (twice real time at the shipped cadence) means seconds of the video pipe not
+    being read, and the frames behind it lost at frame-interval cadence.
+    Measured live: 6 to 19 frames per handover, the count tracking the size of
+    the deficit. It does not contradict HALF TWO's measurements, it is their
+    other half: what stalled video there was the instant of ZERO lead before
+    each write, never the size of the write, and running ahead was measured
+    harmless. A catch-up cannot even run ahead -- it still only tops up TO the
+    wall clock.
+
+    What the catch-up must never become is the thing the ceiling was written
+    for, a long stall dumping minutes of silence in one write, so it is bounded
+    in BYTES against _AUDIO_PIPE_MAX_BUFFER rather than in seconds: the same
+    three seconds is 48 kB at the 8 kHz mono these cameras send and 576 kB at
+    48 kHz stereo, and only the byte count decides whether it can wedge the pipe.
     """
     rate = 48000
     sink, writes, primed = _silence_rig(rate=rate)
@@ -2897,26 +3007,77 @@ async def test_the_silence_fill_tracks_the_wallclock_and_never_bursts():
         f"{fs._AUDIO_SILENCE_MAX_BURST_S}s ceiling -- this is the burst that "
         "stops ffmpeg reading the video pipe")
 
-    # A long stall: 3s owed at once. It is repaid over successive calls, each
-    # bounded, and never in one burst -- and nothing is lost in the process.
+    # A deficit still INSIDE the catch-up threshold is an ordinary late top-up:
+    # clipped at the ceiling, repaid across calls, and nothing lost.
     writes.clear()
+    late = started + 0.44 + 0.8 * fs._AUDIO_CATCHUP_DEFICIT_S
+    owed_to = int((late - started) * rate)
     calls = 0
-    while sink._audio_samples_written < int(3.0 * rate) and calls < 200:
-        assert await sink.write_silence_to(now=started + 3.0) is True
+    while sink._audio_samples_written < owed_to and calls < 200:
+        assert await sink.write_silence_to(now=late) is True
         calls += 1
     assert calls > 1, (
-        "a 3s deficit was repaid in one write -- the per-call ceiling is not "
-        "being applied")
+        f"a {0.8 * fs._AUDIO_CATCHUP_DEFICIT_S}s deficit was repaid in one "
+        "write -- the per-call ceiling is not being applied to an ordinary "
+        "top-up")
     assert max(writes) == cap_samples * sink._audio_bytes_per_sample, (
         f"the largest catch-up write was {max(writes)} bytes, not the "
         f"{fs._AUDIO_SILENCE_MAX_BURST_S}s ceiling")
-    assert sink._audio_samples_written == int(3.0 * rate), (
+    assert sink._audio_samples_written == owed_to, (
         f"the clipped deficit was lost: the stream holds "
-        f"{sink._audio_samples_written} samples where 3.0s is {int(3.0 * rate)}")
+        f"{sink._audio_samples_written} samples where {late - started:.2f}s is "
+        f"{owed_to}")
     # ...and once whole, it stops: no overrun past the wall clock.
     writes.clear()
-    assert await sink.write_silence_to(now=started + 3.0) is True
+    assert await sink.write_silence_to(now=late) is True
     assert writes == [], f"the fill overran the wall clock: {writes}"
+
+    # A HOLE -- 3s owed at once, six times the threshold. Closed in ONE write,
+    # because every extra call spent repaying it is another top-up interval of
+    # negative lead, which is another top-up interval of ffmpeg not reading the
+    # video pipe.
+    sink, writes, primed = _silence_rig(rate=8000, channels=1)
+    started = sink._audio_started_at
+    assert await sink.write_silence_to(now=started + 3.0) is True
+    assert sink._audio_samples_written == int(3.0 * 8000), (
+        f"a 3s hole was not closed in one write: the stream holds "
+        f"{sink._audio_samples_written} samples against the {int(3.0 * 8000)} "
+        f"elapsed real time calls for. Each further call is another "
+        f"{c.AUDIO_SILENCE_TOPUP_S}s of negative lead, and the frames behind "
+        "the video pipe are lost for the whole of it")
+    assert len(writes) == 1 and writes[0] <= fs._AUDIO_CATCHUP_MAX_BYTES, (
+        f"the catch-up handed {writes} bytes to the pipe transport against a "
+        f"{fs._AUDIO_CATCHUP_MAX_BYTES}-byte bound -- a catch-up must never be "
+        "what pushes the transport toward the depth that already means ffmpeg "
+        "has stopped reading it")
+    # ...and it does not run AHEAD either: a catch-up is still a top-up TO the
+    # wall clock, so the lead it leaves is zero, never a burst past it.
+    writes.clear()
+    assert await sink.write_silence_to(now=started + 3.0) is True
+    assert writes == [], f"the catch-up overran the wall clock: {writes}"
+
+    # The byte bound is what makes an ARBITRARILY long stall safe: the rest is
+    # still owed and still repaid, exactly as a clipped ordinary top-up is.
+    sink, writes, primed = _silence_rig(rate=8000, channels=1)
+    started = sink._audio_started_at
+    assert await sink.write_silence_to(now=started + 3600.0) is True
+    assert writes and max(writes) <= fs._AUDIO_CATCHUP_MAX_BYTES, (
+        f"an hour-long stall dumped {max(writes) if writes else 0} bytes into "
+        "the pipe in one write -- the whole point of a bound in bytes")
+    assert fs._AUDIO_CATCHUP_MAX_BYTES <= fs._AUDIO_PIPE_MAX_BUFFER, (
+        f"the catch-up bound ({fs._AUDIO_CATCHUP_MAX_BYTES} bytes) is not under "
+        f"the {fs._AUDIO_PIPE_MAX_BUFFER}-byte depth at which the sink declares "
+        "ffmpeg to have stopped reading the audio pipe, so a catch-up could be "
+        "what trips it")
+    assert fs._AUDIO_CATCHUP_DEFICIT_S >= 5 * fs._AUDIO_SILENCE_MAX_BURST_S, (
+        f"the catch-up threshold ({fs._AUDIO_CATCHUP_DEFICIT_S}s) is not clear "
+        f"of the ordinary ceiling ({fs._AUDIO_SILENCE_MAX_BURST_S}s) -- ordinary "
+        "top-ups would take the catch-up path and the measured pacing would no "
+        "longer be what ships")
+    assert fs._AUDIO_CATCHUP_DEFICIT_S <= jc.VIDEO_QUEUE_TARGET_MS / 1000.0, (
+        f"the catch-up threshold ({fs._AUDIO_CATCHUP_DEFICIT_S}s) is past the "
+        f"{jc.VIDEO_QUEUE_TARGET_MS}ms the video queue can absorb, so a deficit "
+        "big enough to cost real frames would still be repaid the slow way")
 
     # The cadence every caller of this method is paced at has to stay under the
     # lead the pipe is primed with, or the audio stops covering the next video
@@ -4775,6 +4936,107 @@ async def test_the_muxer_lead_is_read_off_the_sinks_own_sample_counter():
         "the timeline moved without anything being written to the pipe")
 
 
+async def test_the_record_counts_silence_writes_not_silence_calls():
+    """A top-up that was MADE and a top-up that WROTE are different facts, and
+    the record has to keep them apart.
+
+    write_silence_to tops the audio timeline up TO the wall clock, so a call made
+    while the timeline is still ahead of it writes nothing at all and returns
+    True. That is the ordinary state for the first second or more of a hold,
+    because a decoded backlog drained by the previous session's pump legitimately
+    leaves the timeline seconds ahead. Counting those as writes made a live
+    record say the hold wrote 38 silences across an interval whose own `adv` read
+    0.0, and put a reader in front of two halves of one instrument apparently
+    disagreeing (E88). They were not disagreeing: `adv` was right, the count was
+    wrong, and the hold really had written nothing.
+
+    Driven against a hand-driven sink so the numbers are chosen rather than
+    raced: the whole point is that the calls happen and the timeline does not
+    move.
+    """
+    with handover_knob(True):
+        sink = StubTraceSink(timeline=2.0, lead=1.9)
+        trace = ht.begin("cam", sink)
+        assert trace is not None
+        # Eight ticks into a timeline that is already ahead of the wall clock:
+        # every call succeeds, none of them writes.
+        for _ in range(8):
+            trace.hold_silence(sink, True)
+        ahead = trace.record(sink)["hold"]
+        # ...and now the wall clock has caught up, so the same calls write.
+        for _ in range(3):
+            sink.advanced(0.05)
+            trace.hold_silence(sink, True)
+        trace.emit(sink)
+        record = trace.record(sink)
+
+    assert ahead["silence_calls"] == 8, (
+        f"the record lost the hold's cadence: {ahead}. `silence_calls` is what "
+        "says the hold is still ticking, and it is the number that collapses to "
+        "2 when the hold dies")
+    assert ahead["silence_writes"] == 0 and ahead["silence_ms"] == 0.0, (
+        f"eight top-ups into a timeline already ahead of the wall clock were "
+        f"counted as writes: {ahead}. Nothing was written; the sink's own sample "
+        "counter did not move")
+    hold = record["hold"]
+    assert hold["silence_calls"] == 11 and hold["silence_writes"] == 3, (
+        f"eleven calls of which three wrote, recorded as {hold}")
+    assert hold["silence_ms"] == 150.0, (
+        f"three writes of 50ms are 150ms of audio, recorded as "
+        f"{hold['silence_ms']}ms -- the media is read off the sink's timeline, "
+        "not inferred from the number of calls")
+    assert hold["max_gap_ms"] is not None, (
+        "the cadence is reported only when something was WRITTEN, so a hold "
+        "ticking perfectly into a timeline that needs nothing reads as a hold "
+        "that never ran")
+
+
+async def test_the_muxer_lead_is_a_floor_not_a_ceiling():
+    """A lead far above the 100ms prime is a correct reading, not a broken one.
+
+    _AUDIO_PRIME_MS is the lead established when the pipe is OPENED, and nothing
+    afterwards caps it. write_silence_to tops up TO the wall clock, so it can
+    raise the lead to zero and no further; write_audio has no wallclock term at
+    all and writes whatever a decoded frame carries, whenever it arrives. A
+    queued backlog drained by the audio pump therefore puts the timeline seconds
+    ahead -- which is what a live record reporting `lead_min_ms: +1899.2` was,
+    and why that reading was suspected of being an instrument fault when it was
+    not.
+
+    It matters because it is also why a perfectly healthy frame hold can tick for
+    a second or more writing nothing at all (see
+    test_the_record_counts_silence_writes_not_silence_calls).
+    """
+    with scenario([Plan()]):
+        sink = FakeSink("cam")
+        await sink.start(1280, 720, 15, audio_format=("s16", 8000, 1))
+
+    prime_s = fs._AUDIO_PRIME_MS / 1000.0
+    assert sink.audio_lead_s <= prime_s + 1e-6, (
+        f"a freshly primed pipe already leads by {sink.audio_lead_s}s")
+
+    # A backlog: two seconds of decoded audio, in no wall time at all. The
+    # session's queue holds config.AUDIO_QUEUE_MAXSIZE frames and the pump drains
+    # it as fast as the event loop allows, so this is the ordinary shape of a
+    # session start, not a pathology.
+    for _ in range(100):
+        assert await sink.write_audio(FakeAudioFrame(("s16", 8000, 1), 160)) is True
+    assert sink.audio_lead_s > 1.9, (
+        f"100 frames of 20ms each left the lead at {sink.audio_lead_s}s -- "
+        "decoded audio is written on arrival, not against the wall clock, so it "
+        "must be able to put the timeline far ahead of real time")
+
+    # ...and the silence top-up neither adds to that nor trims it back.
+    before = sink._audio_samples_written
+    assert await sink.write_silence_to() is True
+    assert sink._audio_samples_written == before, (
+        "the top-up wrote into a timeline that was already ahead of the wall "
+        "clock; it may only ever top up TO the wall clock")
+    assert sink.audio_lead_s > 1.9, (
+        "the top-up trimmed the lead back toward the prime -- it has no way to "
+        "un-write samples, and a reading above the prime is the truth")
+
+
 async def test_dropped_frames_are_timestamped_only_when_tracing():
     """A dropped frame gets a TIME, and only while tracing is on.
 
@@ -4898,6 +5160,7 @@ TESTS = [
     test_the_streaming_line_reports_how_long_the_first_frame_took,
     test_frame_hold_bridges_the_reconnect_gap,
     test_frame_hold_is_bounded_by_time_since_a_real_frame,
+    test_the_holds_audio_topup_is_never_behind_its_video_write,
     test_a_failed_hold_task_does_not_fail_the_next_session,
     test_fps_is_the_median_delta_not_the_span,
     test_the_fps_fallback_is_never_locked_in,
@@ -4955,6 +5218,8 @@ TESTS = [
     test_a_traced_rotation_emits_one_record_covering_the_whole_window,
     test_the_record_shows_where_the_audio_timeline_stopped,
     test_the_muxer_lead_is_read_off_the_sinks_own_sample_counter,
+    test_the_record_counts_silence_writes_not_silence_calls,
+    test_the_muxer_lead_is_a_floor_not_a_ceiling,
     test_dropped_frames_are_timestamped_only_when_tracing,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,

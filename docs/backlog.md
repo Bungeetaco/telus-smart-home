@@ -37,10 +37,9 @@ and evidence. Grouped by whether anything can actually be done about them.
   run through multi-hour soaks across many rotations with no publisher loss.
   The remaining audio-attributable residual (~14 drops per rotation at the
   handover) is E76's, not this entry's.
-- **E88** (open) - E76's mechanism is measured (the frame hold dies ~60 ms into
-  some doorbell handovers, the lead goes seconds negative, and the bounded
-  repayment holds ffmpeg off the video pipe); the fix is not written, and two
-  anomalies in the trace itself must be settled with it.
+- **E90** (open, minor) - three follow-ons from E88: the prime's lead is spent
+  once and never re-established, the pump only tops up on its timeout branch,
+  and `video_issued` is not independently fail-first proven.
 - **E87** (DONE) - the integration harness covers eleven modules and the
   mutation pass has been run: eleven mutations, ten caught, one real survivor
   found and closed (`AttributeBinarySensor.is_on`).
@@ -2934,7 +2933,7 @@ entries are the mechanism that keeps it under review
   changes nothing, or changes the wrong site, produces a confident and false
   verdict in whichever direction you were already leaning.
 
-- **E88 (open) E76's mechanism is measured; the fix is not written.** Ten
+- **E88 (DONE) E76's mechanism is measured; the fix is not written.** Ten
   steady-state handover records from the live doorbell and living room split
   cleanly into two populations. When the frame hold runs properly
   (`silence_writes` 13 to 41, `video_writes` 11 to 26, `max_gap_ms` 51 to 56)
@@ -3025,3 +3024,68 @@ entries are the mechanism that keeps it under review
   "sawtoothing, envelope still rising" and a two day window says "sawtoothing
   between 41 and 99 with no OOM". Both readings were honest; only the second is
   actionable. **State the window length with the claim.**
+
+
+- **E88 resolution: the hold deadlocked against itself, and the instrument was
+  telling the truth.**
+
+  **Mechanism.** `_hold_frames` awaited `sink.write_frame(last_frame)` inline,
+  three lines above the `write_silence_to()` call in the same loop body.
+  `write_frame` ends in a bounded drain that completes only when ffmpeg *reads*
+  the frame, and ffmpeg reads the video pipe only while it holds audio covering
+  that frame's timestamp. So a video write that blocks for want of audio also
+  blocked the only writer that could supply it: the previous session's pump is
+  stopped by the hold's first act and the next is not created until the hold
+  ends. The two writers waited on each other. Nothing reported it because the
+  drain's own 5 s bound is longer than a 2 to 3 s handover, so it never timed
+  out, `publisher_stalled` never latched, and the task stayed alive until
+  `_stop_hold` cancelled it: no exception, no log line, `sink_rebuilt: false`.
+
+  Reproduced offline through the real loop against a publisher applying the
+  muxer's actual rule: `silence_calls: 2, video_writes: 1, lead_min_ms: -1231.9`,
+  against the live `silence_writes: 2, video_writes: 1, lead_min_ms: -1721 to
+  -2905`. **Fix:** the repeated frame is written by a task of its own and reaped
+  on a later tick, so the top-up runs every tick regardless. Exactly one video
+  write is ever in flight and a `finally` reaps it, so `_stop_hold`'s guarantee
+  is unchanged.
+
+  **Both trace anomalies were one fact, and the trace was right.**
+  `write_silence_to` tops the timeline up TO the wall clock and returns `True`
+  having written nothing when the timeline is already ahead. `hold_silence`
+  counted every such call as a write, so "38 silence writes beside `adv: 0.0`"
+  was literally true and unreadable. The record now separates `silence_calls`
+  (cadence) from `silence_writes` and `silence_ms` (media actually put on the
+  pipe), and `video_issued` from `video_writes`. The +1899 ms lead was
+  legitimate: `_AUDIO_PRIME_MS` is the lead at pipe open, nothing caps it after,
+  and a decoded backlog drained by the pump puts the timeline seconds ahead. It
+  is a floor, not a ceiling, and now says so in the code and the docs.
+
+  **This inverts E88's own reading of its data.** The population called healthy
+  was not healthy; it was coasting on a large positive lead. Its holds wrote
+  nothing either. The difference between the two populations was the size of the
+  lead they started with, not whether the hold worked.
+
+  **Deficit bounding: rebasing the audio origin was considered and rejected on
+  the mechanism.** The audio input carries no `-use_wallclock_as_timestamps`, so
+  its PTS *are* its sample count; skipping N seconds of samples makes the audio
+  permanently N seconds short against wallclock-stamped video, for the life of
+  the publisher, and `aresample=async=1` cannot correct it because it works
+  against the audio's own timeline. The premise that repayment is partial was
+  also false: the deficit is recomputed from the wall clock every call, so it
+  always converges. The defect was the RATE, so past
+  `_AUDIO_CATCHUP_DEFICIT_S` a deficit is now closed in one write rather than at
+  2x real time, bounded in BYTES (`_AUDIO_CATCHUP_MAX_BYTES`) because the real
+  constraint is pipe buffer, and 3 s is 48 kB at 8 kHz mono but 576 kB at 48 kHz
+  stereo.
+
+- **E90 (open, minor) Three follow-ons from E88, none observed failing.**
+  (a) `write_silence_to` restores the timeline to the wall clock, i.e. a lead of
+  exactly zero, so the prime's 100 ms is spent once at pipe open and never
+  re-established: a quiet camera oscillates between 0 and -50 ms. Topping up to
+  `now + prime` would keep the designed lead standing, but it is a pacing
+  constant change with a measured history (E60) and should not be made blind.
+  (b) `_pump_audio` only tops up on its timeout branch, so a camera with
+  continuously arriving audio never tops up at all and a deficit inherited from
+  a handover persists until it next goes quiet for 50 ms. Not observed, but
+  nothing bounds it. (c) `video_issued` is exercised by the hold test but not
+  independently fail-first proven, unlike the silence counters.

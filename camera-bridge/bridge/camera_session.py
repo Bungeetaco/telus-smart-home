@@ -794,49 +794,104 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # move the audio half past that ceiling.
         tick = min(interval, c.AUDIO_SILENCE_TOPUP_S) if sink.audio_enabled else interval
         next_video_at = time.monotonic()
-        while time.monotonic() - last_live < c.FRAME_HOLD_MAX_S:
-            now = time.monotonic()
-            if now >= next_video_at:
-                if not await sink.write_frame(last_frame):
-                    # ffmpeg died, or stopped reading its input; either way the
-                    # next successful session start replaces it, and the repair
-                    # check up there reads publisher_alive to know it must.
-                    _update_status(publisher_alive=sink.publisher_alive)
-                    return
-                next_video_at = max(next_video_at + interval, now)
-                _update_status(last_publish_at=time.time())
-                if handover is not None:
-                    handover.hold_video()
-            # The audio analogue of the repeated frame, and it cannot be built the
-            # same way. A repeated video frame is self-describing: whenever it
-            # lands, it is one frame, so asyncio.sleep jitter is invisible. A
-            # sample stream's duration IS its length, so filling a gap by writing
-            # "one interval's worth of samples per loop" accumulates every bit of
-            # that jitter as a permanent, growing A/V offset -- and on a single-
-            # output RTSP mux there is no separate audio timeline to absorb it.
-            # write_silence_to derives the count from elapsed real time instead,
-            # so the gap is filled with exactly as many samples as the wall clock
-            # says passed, however irregularly this loop actually ran.
-            if sink.audio_enabled:
-                # Split out of the single `and not await ...` condition it used
-                # to be so the trace can see the write's OUTCOME. The
-                # short-circuit is unchanged: write_silence_to is still called
-                # only when audio is enabled, and still exactly once per tick.
-                wrote_silence = await sink.write_silence_to()
-                if handover is not None:
-                    handover.hold_silence(sink, wrote_silence)
-                if not wrote_silence:
-                    _note_audio_dropped(sink)
-                    if not sink.audio_dropped:
+        # THE REPEATED FRAME IS WRITTEN BY A TASK OF ITS OWN, so that the audio
+        # top-up below can never wait on it. That is not tidiness, it is the
+        # whole of E88.
+        #
+        # write_frame's drain only completes once ffmpeg has actually READ the
+        # frame, and ffmpeg only reads the VIDEO pipe while it holds audio
+        # covering that frame's timestamp (ffmpeg_sink._AUDIO_PRIME_MS). Awaited
+        # inline -- which is what this loop used to do -- a video write that
+        # blocks because the lead is gone also blocks the silence write a few
+        # lines below it, and that silence write is the ONLY thing left that
+        # could restore the lead and release it: the previous session's pump was
+        # stopped by this task's first act and the next one is not created until
+        # _stop_hold has finished. The two writers wait on each other and neither
+        # moves.
+        #
+        # Measured live, three of five doorbell rotations: one video write, two
+        # silence CALLS (which wrote nothing, the timeline still being ahead of
+        # the wall clock), then nothing at all for the remaining 2-3 s of the gap,
+        # the hold task still alive and only ever ended by _stop_hold's cancel,
+        # the muxer lead down to -2.9 s, and 6 to 19 frames dropped afterwards
+        # while that deficit was repaid. It is invisible from every other angle:
+        # write_frame's own drain bound (_VIDEO_DRAIN_TIMEOUT_S, 5 s) is longer
+        # than the gap, so nothing ever times out, publisher_stalled is never
+        # latched, and the record reads `sink_rebuilt: false` like any healthy
+        # rotation. A shorter bound would not fix it either -- it would still
+        # cost seconds of dead audio each time. The fix is that the two writers
+        # cannot wait on each other at all.
+        #
+        # Exactly one video write is ever in flight (a second would be a second
+        # writer to the raw video pipe), it is reaped on a later tick, and the
+        # `finally` below guarantees it is finished before this task is -- so
+        # _stop_hold's contract, that nothing is writing to the publisher once it
+        # returns, is unchanged.
+        video_write: asyncio.Task | None = None
+        try:
+            while time.monotonic() - last_live < c.FRAME_HOLD_MAX_S:
+                now = time.monotonic()
+                if video_write is not None and video_write.done():
+                    finished, video_write = video_write, None
+                    if not finished.result():
+                        # ffmpeg died, or stopped reading its input; either way the
+                        # next successful session start replaces it, and the repair
+                        # check up there reads publisher_alive to know it must.
+                        _update_status(publisher_alive=sink.publisher_alive)
                         return
-                    # Audio is gone, video is not: keep holding the frame. Ending
-                    # the hold here would black the RTSP path for the rest of the
-                    # reconnect over an input that has already been given up on.
-                    tick = interval
-            await asyncio.sleep(tick)
-        log.warning("%s: no live frames for %ss, ending frame-hold -- letting "
-                    "the stream go dark until the camera recovers",
-                    camera["id"], c.FRAME_HOLD_MAX_S)
+                    _update_status(last_publish_at=time.time())
+                    if handover is not None:
+                        handover.hold_video()
+                if now >= next_video_at and video_write is None:
+                    video_write = asyncio.ensure_future(sink.write_frame(last_frame))
+                    next_video_at = max(next_video_at + interval, now)
+                    if handover is not None:
+                        handover.hold_video_issued()
+                # The audio analogue of the repeated frame, and it cannot be built the
+                # same way. A repeated video frame is self-describing: whenever it
+                # lands, it is one frame, so asyncio.sleep jitter is invisible. A
+                # sample stream's duration IS its length, so filling a gap by writing
+                # "one interval's worth of samples per loop" accumulates every bit of
+                # that jitter as a permanent, growing A/V offset -- and on a single-
+                # output RTSP mux there is no separate audio timeline to absorb it.
+                # write_silence_to derives the count from elapsed real time instead,
+                # so the gap is filled with exactly as many samples as the wall clock
+                # says passed, however irregularly this loop actually ran.
+                if sink.audio_enabled:
+                    # Split out of the single `and not await ...` condition it used
+                    # to be so the trace can see the write's OUTCOME. The
+                    # short-circuit is unchanged: write_silence_to is still called
+                    # only when audio is enabled, and still exactly once per tick.
+                    wrote_silence = await sink.write_silence_to()
+                    if handover is not None:
+                        handover.hold_silence(sink, wrote_silence)
+                    if not wrote_silence:
+                        _note_audio_dropped(sink)
+                        if not sink.audio_dropped:
+                            return
+                        # Audio is gone, video is not: keep holding the frame. Ending
+                        # the hold here would black the RTSP path for the rest of the
+                        # reconnect over an input that has already been given up on.
+                        tick = interval
+                await asyncio.sleep(tick)
+            log.warning("%s: no live frames for %ss, ending frame-hold -- letting "
+                        "the stream go dark until the camera recovers",
+                        camera["id"], c.FRAME_HOLD_MAX_S)
+        finally:
+            if video_write is not None:
+                # asyncio.wait rather than `await`, for the same reason
+                # _stop_audio_pump uses it: this runs on the cancellation path of
+                # THIS task, and awaiting the inner one directly would make its
+                # CancelledError indistinguishable from our own.
+                video_write.cancel()
+                await asyncio.wait({video_write})
+                # Read purely so nothing is left unretrieved for asyncio to
+                # complain about at GC time -- an abandoned write's failure is
+                # the next session's problem, not this task's, and raising it
+                # from a `finally` would replace whatever ended the hold.
+                if not video_write.cancelled() and video_write.exception() is not None:
+                    log.warning("%s: a held frame's write ended with %r",
+                                camera["id"], video_write.exception())
 
     def _trace_handover(sess):
         """Open the record for the rotation now beginning, or None with tracing
