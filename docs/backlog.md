@@ -37,8 +37,11 @@ and evidence. Grouped by whether anything can actually be done about them.
   run through multi-hour soaks across many rotations with no publisher loss.
   The remaining audio-attributable residual (~14 drops per rotation at the
   handover) is E76's, not this entry's.
-- **E92** (open) - a handover record reported a lead of -167,912 ms with zero
-  audio calls and 53 video ones on a non-rebuilt rotation. Unexplained.
+- **E92** (open, the strongest remaining lead) - video drops track audio
+  STARVATION mid-session, not the handover: 0 drops at +3,398 audio frames
+  against 383 drops at +84, with one session shedding 2,700. Wedged pipe,
+  format mismatch and resource starvation all ruled out by direct reading.
+  Suspect E90(b). Measure it, do not reason about it.
 - **E90** (open, minor) - three follow-ons from E88: the prime's lead is spent
   once and never re-established, the pump only tops up on its timeout branch,
   and `video_issued` is not independently fail-first proven.
@@ -3122,7 +3125,46 @@ entries are the mechanism that keeps it under review
   is that a 30 fps camera gets the same 500 ms of tolerance as a 15 fps one,
   which is all the sizing rule ever claimed to do.
 
-- **E92 (open) A handover record reported a lead of -167,912 ms.** One
+- **E92 (open) Video drops track audio STARVATION, not the handover, and the
+  mechanism is not established.** This is the strongest remaining lead and it is
+  recorded as a correlation rather than a diagnosis.
+
+  Measured after E88 and E91 both landed, five-minute watcher windows on the
+  indoor camera:
+
+  | window | video drops | audio frames decoded |
+  |---|---|---|
+  | 03:25 | **+0** | +3,398 |
+  | 03:30 | +6 | +1,243 |
+  | 03:35 | **+0** | +1,062 |
+  | 03:45 | **+383** | **+84** |
+
+  Video drops when audio stops arriving and not otherwise, and a single session
+  in that state shed 2,700 frames before its rotation cleared it. The handover
+  itself is now clean in the same build (`silence_calls` 599 to 630 with
+  matching writes, `lead_min_ms` -6.6 to -46.9, drops 0), so this is a
+  MID-SESSION failure and a different thing from what E88 fixed.
+
+  **Ruled out by direct reading at the time**: the sink had not given up on audio
+  (`audio_dropped: false` on both cameras), the formats matched
+  (`audio_format` == `publisher_audio_format` == `8000Hz/1ch/s16`), the codec was
+  committed (`pcmu`), and the container was at 31 percent of two cores with
+  590 MB spare, so it is neither the wedged-pipe path, nor a format mismatch, nor
+  resource starvation.
+
+  **The obvious suspect is E90(b)** and it should be tested rather than assumed:
+  `_pump_audio` only calls `write_silence_to` on its `AUDIO_TIMEOUT` branch, so a
+  camera whose audio arrives sporadically, often enough to keep waking the pump
+  but carrying far less media than wallclock, would never have its timeline
+  topped up. That would starve the muxer of audio, stop it reading video, and
+  flood the queue, which is the shape observed. It does not obviously explain the
+  earlier record showing `lead_min_ms: -167912.4` with zero audio calls and 53
+  video ones, so there may be two things here.
+
+  **Do not fix this by reasoning.** Turn `HANDOVER_TRACE` on, catch a starved
+  session, and read what the pump actually did.
+
+- **E92a (open) A handover record reported a lead of -167,912 ms.** One
   `sink_rebuilt: false` rotation on the indoor camera carried
   `lead_min_ms: -167912.4` with `silence_calls: 0` and `video_issued: 53`. That
   is roughly one session lifetime of deficit, which suggests the audio timeline
