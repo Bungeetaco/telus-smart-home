@@ -97,8 +97,10 @@ problem itself.
 response to a **local** wedge (a leaked/stuck media resource that only a fresh
 process can release; a startup login that landed during a blip):
 
-- the per-camera reconnect loop's "too many consecutive session failures"
-  escape hatch (`os._exit`), and
+- the per-camera reconnect loop's escape hatch (`os._exit`), which fires when
+  one camera has gone `SESSION_WEDGE_TIMEOUT_S` with no successful frame AND no
+  other camera in the process is still delivering (a healthy sibling proves the
+  process is not wedged and vetoes the exit), and
 - the startup login giving up after its retries.
 
 Under Docker's `restart: unless-stopped`, both are the *wrong* response to a
