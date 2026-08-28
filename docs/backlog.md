@@ -41,9 +41,9 @@ and evidence. Grouped by whether anything can actually be done about them.
   some doorbell handovers, the lead goes seconds negative, and the bounded
   repayment holds ffmpeg off the video pipe); the fix is not written, and two
   anomalies in the trace itself must be settled with it.
-- **E87** (DONE, with a caveat) - the integration harness now covers eleven
-  modules, but the systematic fail-first campaign was not run; three hand-driven
-  mutations were caught, the rest are spot-checked only.
+- **E87** (DONE) - the integration harness covers eleven modules and the
+  mutation pass has been run: eleven mutations, ten caught, one real survivor
+  found and closed (`AttributeBinarySensor.is_on`).
 - **E71** (open): E64's adaptive frame rate has never been watched reacting to
   a real resolution change live. A five-minute operator check; the procedure,
   now fully readable from `/control/status`, is in the entry.
@@ -79,9 +79,10 @@ and evidence. Grouped by whether anything can actually be done about them.
   `--sandbox=chroot` in `/etc/libvirt/virtiofsd.opt`.
 
 
-- **E85** (open) - E74's arena diagnosis is disproven by test
-  (`MALLOC_ARENA_MAX=2`: no change); the entry needs correcting and the watcher
-  threshold re-deriving under jemalloc.
+- **E85** (DONE) - E74 is corrected in place and marked superseded; its arena
+  diagnosis is disproven by test. The watcher threshold is left at 93 percent
+  deliberately until jemalloc's steady-state working set is known from a full
+  overnight run.
 - **E86** (open, minor, upstream) - aiortc's rate estimator accumulates
   RateBucket objects, ~3 MB per 330 s; invisible under jemalloc, worth an
   upstream check.
@@ -2027,7 +2028,10 @@ entries are the mechanism that keeps it under review
   expiry path that separates a real change from a flap); the live confirmation
   rides on the same soak E71 is waiting on.
 
-- **E74 (DONE) The bridge container's memory is a plateau, not a leak.** The
+- **E74 (SUPERSEDED by E83, mechanism disproven) The bridge container's memory
+  is a plateau, not a leak.** Read the correction at the end of this entry
+  before using anything in it. The observation held; the mechanism named here
+  was wrong, and the fix it recommended was never tested by this entry. The
   whole-stack watcher reported `bridge-memory-high` fourteen times overnight,
   crossing its 85 percent threshold from 05:10 onward. Measured rather than
   assumed:
@@ -2055,6 +2059,29 @@ entries are the mechanism that keeps it under review
   operating range, so the watcher was reporting healthy operation as a failure,
   which is the fastest way to make an operator stop reading an alert. Raised to
   93 percent with the measurement recorded in the script itself.
+
+  **Correction, 2026-08-26 (E85).** This entry named glibc per-thread ARENA
+  COUNT as the mechanism and recommended `MALLOC_ARENA_MAX=2`. It never tested
+  that recommendation. E83 did: the cap was applied live with audio consuming
+  and changed the growth rate by nothing measurable (333 to 623 MB over 25
+  minutes, the same as without it).
+
+  The real mechanism is glibc heap FRAGMENTATION, not arena count. Measured
+  with `mallinfo2` across one 330 s window: python RSS grew 118 MB while
+  `in_use` grew 3 MB, `free_not_returned` went 35.9 to 144.6 MB, and only
+  2.92 MB of that was `releasable`. Freed memory stranded inside fragmented
+  arenas, which `malloc_trim` cannot return. The plateau this entry observed was
+  that same fragmentation reaching a ceiling at the lower pre-E80 allocation
+  churn; when mu-law quintupled the small-allocation rate, the ceiling moved
+  above the container limit and the plateau stopped looking like one.
+
+  The fix is jemalloc, preloaded for the python process only (E83).
+
+  **The lesson this entry is kept for:** it inferred a mechanism from the shape
+  of a curve, recommended a remedy, closed itself, and never ran the one
+  experiment that would have falsified it. A later session then cited it as
+  settled fact and built an hour of reasoning on top. A diagnosis that does not
+  test its own recommendation is a hypothesis wearing a diagnosis's clothes.
 
 - **E75 (open, minor) The stack watcher is versioned but not tested or
   reviewed.** `ops/stack-watch.sh` is now in the repository rather than existing
@@ -2881,9 +2908,31 @@ entries are the mechanism that keeps it under review
   `raise` in a module that maps errors by assignment) which is the same
   verify-the-mutation-applied trap recorded in E72 and hit twice this week.
 
-  So these suites are **spot-checked, not exhaustively proven**. The remaining
-  work is a full mutation pass over the eight new files, and until that happens
-  any of them may contain an assertion that cannot fail.
+  **The mutation pass has since been run** (2026-08-28). Eleven mutations against
+  real source across the new suites: the select's `current_option` forced to
+  `None`, the number's `native_value` to zero, the switch's and the connectivity
+  sensor's `is_on` inverted, the bypass service's 429 mapping broken, unload
+  short-circuited to success, the config flow's `invalid_auth` remapped, the
+  speak service's 413 mapping broken, and all three `is_on` return sites in
+  `binary_sensor.py` inverted one at a time. Ten were caught with precise
+  messages.
+
+  **One real survivor, now closed.** `AttributeBinarySensor.is_on` (the
+  malfunction and battery sub-entities that ride on every device) could be
+  inverted with no test noticing, while the other two `is_on` sites in the same
+  module were pinned. An inversion there would have reported every healthy
+  device as faulty across the whole install.
+  `test_attribute_sensor_reads_its_description_value_fn` closes it, and
+  re-running the same mutation now catches it.
+
+  **Two attempted mutations proved nothing and were discarded rather than
+  counted**, both the same trap: one targeted a `raise` in a module that maps
+  errors by assignment, and one matched the first of three `is_on` definitions
+  in a file rather than the one under test. That trap (E72) has now been hit
+  four times in a week, and the rule earned is narrow enough to state: **diff
+  the file after mutating it and before running anything.** A mutation that
+  changes nothing, or changes the wrong site, produces a confident and false
+  verdict in whichever direction you were already leaning.
 
 - **E88 (open) E76's mechanism is measured; the fix is not written.** Ten
   steady-state handover records from the live doorbell and living room split

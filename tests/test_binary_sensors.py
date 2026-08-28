@@ -191,12 +191,51 @@ async def test_connectivity_sensor_reports_a_down_bridge_instead_of_vanishing():
         "any TELUS device")
 
 
+def make_attribute_sensor(description_key="malfunction", **device_kwargs):
+    """An AttributeBinarySensor built from the real description table.
+
+    Exists because a mutation pass found this class's `is_on` unexercised while
+    both other `is_on` sites in the module were pinned: inverting it changed no
+    test. These are the malfunction and battery sub-entities that ride on every
+    device, so a silent inversion would report a healthy sensor as faulty
+    across the whole install.
+    """
+    kwargs = dict(id_="dev-attr", name="Front Door", partition_id=None,
+                  device_subtype=Subtype.CONTACT_SENSOR, state=State.CLOSED,
+                  malfunction=None, battery_critical=None, battery_low=None)
+    kwargs.update(device_kwargs)
+    device = ha_stubs.LibSensor(**kwargs)
+    description = next(d for d in binary_sensor.ATTRIBUTE_BINARY_SENSORS
+                       if d.key == description_key)
+    controller = types.SimpleNamespace(
+        update_coordinator=ha_stubs.DataUpdateCoordinator(None))
+    return binary_sensor.AttributeBinarySensor(
+        controller=controller, device=device, description=description), device
+
+
+async def test_attribute_sensor_reads_its_description_value_fn():
+    """The malfunction and battery attribute sensors must report the device's
+    own flag, not its negation and not a constant."""
+    entity, device = make_attribute_sensor("malfunction", malfunction=True)
+    assert entity.is_on is True, (
+        f"a malfunctioning device read as {entity.is_on}")
+
+    entity, device = make_attribute_sensor("malfunction", malfunction=False)
+    assert entity.is_on is False, (
+        f"a healthy device read as {entity.is_on}: an inverted attribute sensor "
+        "reports every healthy device as faulty")
+
+    entity, device = make_attribute_sensor("battery", battery_low=True)
+    assert entity.is_on is True, "a low battery must read on"
+    print("  ok  attribute sensors report their description's value_fn verbatim")
+
 TESTS = (
     test_is_on_mapping,
     test_available_guards_against_stale_state,
     test_contact_sensor_door_window_classification,
     test_subtype_device_class_table,
     test_connectivity_sensor_reports_a_down_bridge_instead_of_vanishing,
+    test_attribute_sensor_reads_its_description_value_fn,
 )
 
 
