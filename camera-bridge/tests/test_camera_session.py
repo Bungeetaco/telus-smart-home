@@ -3267,18 +3267,22 @@ async def test_the_frame_queue_is_sized_in_time_not_in_frames():
     deeper queue does not remove one, it converts dropped frames into latency,
     since every frame held is a frame the viewer sees late. The ceiling is
     memory: a decoded 1440x1440 yuv420p frame is 3.11MB, so 8 frames is 24.9MB
-    per camera against the container's 768MiB limit (~435MiB in use), and 16
-    would be 49.8MB for a queue that is not supposed to fill.
+    per camera; the ceiling was raised to 16 once mem_limit became 1GiB (E83), and
+    16 frames is 49.8MB at 1440x1440 against roughly 590MB spare.
     """
     depths = {fps: jc.video_queue_maxsize(fps) for fps in (5, 6, 10, 15, 20, 30)}
     for fps, depth in depths.items():
         held_ms = 1000.0 * depth / fps
         wanted = round(fps * jc.VIDEO_QUEUE_TARGET_MS / 1000.0)
         if wanted > jc.VIDEO_QUEUE_MAX_FRAMES:
-            # Above ~16fps the memory ceiling binds before the time target does,
-            # and that is a deliberate choice rather than an oversight: 8 frames
-            # is 24.9MB at 1440x1440 and the target would ask for 15 at 30fps.
-            # Even there it is twice the flat 4 this replaces.
+            # The ceiling still binds eventually, but it now sits above every
+            # rate either camera has been observed delivering (32fps), so this
+            # branch is reachable only by a source faster than anything seen.
+            # Raised from 8 to 16 on 2026-08-28 after the indoor camera began
+            # delivering 30fps and dropped ~150 frames every 17-24s in STEADY
+            # STATE, nowhere near a handover, with the container at 31 percent
+            # of two cores: under-buffered, not starved. At 8 frames 30fps got
+            # 267ms, LESS than the 15fps camera the ceiling was sized for.
             assert depth == jc.VIDEO_QUEUE_MAX_FRAMES, (fps, depths)
             assert held_ms >= 250, (fps, held_ms)
         else:
@@ -3287,16 +3291,25 @@ async def test_the_frame_queue_is_sized_in_time_not_in_frames():
                 f"which is not the ~{jc.VIDEO_QUEUE_TARGET_MS}ms this is supposed "
                 f"to mean on every camera: {depths}")
     assert depths[15] == 8 and depths[6] == 4, depths
+    assert depths[30] == 15, (
+        f"30fps must now get its full {jc.VIDEO_QUEUE_TARGET_MS}ms rather than "
+        f"the ceiling: {depths}")
     assert min(depths.values()) >= 4, (
         f"some camera got a shallower queue than the flat 4 that shipped: {depths}")
     assert jc.video_queue_maxsize(None) == jc.video_queue_maxsize(15), (
         "a camera whose rate has not been measured yet must get the same 15fps "
         "assumption the fps fallback uses")
-    # Memory, in the units that matter: the doorbell's own frame size.
-    frame_mb = 1440 * 1440 * 1.5 / (1024 * 1024)
-    assert max(depths.values()) * frame_mb <= 25.0, (
-        f"{max(depths.values())} frames of 1440x1440 is "
-        f"{max(depths.values()) * frame_mb:.1f}MB per camera")
+    # Memory, in the units that matter: the doorbell's own frame size, and BOTH
+    # cameras, because the limit is per container and the queue is per camera.
+    # 50MB is the ceiling's worth at 1440x1440; the bound is stated for the pair
+    # so raising the ceiling again cannot silently double the real cost.
+    doorbell_mb = 1440 * 1440 * 1.5 / (1024 * 1024)
+    indoor_mb = 1280 * 720 * 1.5 / (1024 * 1024)
+    worst_pair = jc.VIDEO_QUEUE_MAX_FRAMES * (doorbell_mb + indoor_mb)
+    assert worst_pair <= 80.0, (
+        f"both queues at the ceiling would hold {worst_pair:.1f}MB, which is "
+        f"more than the 1GiB limit has spare once the ~430MB working set and "
+        f"ffmpeg are counted")
 
     # ...and the loop actually hands the rate down. The first session of a camera
     # has nothing to hand down; the ones after it carry the measured rate, which

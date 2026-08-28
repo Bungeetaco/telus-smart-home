@@ -37,6 +37,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   run through multi-hour soaks across many rotations with no publisher loss.
   The remaining audio-attributable residual (~14 drops per rotation at the
   handover) is E76's, not this entry's.
+- **E92** (open) - a handover record reported a lead of -167,912 ms with zero
+  audio calls and 53 video ones on a non-rebuilt rotation. Unexplained.
 - **E90** (open, minor) - three follow-ons from E88: the prime's lead is spent
   once and never re-established, the pump only tops up on its timeout branch,
   and `video_issued` is not independently fail-first proven.
@@ -3089,3 +3091,42 @@ entries are the mechanism that keeps it under review
   a handover persists until it next goes quiet for 50 ms. Not observed, but
   nothing bounds it. (c) `video_issued` is exercised by the hold test but not
   independently fail-first proven, unlike the silence counters.
+
+- **E91 (DONE) The video queue ceiling was sized for a 768 MiB limit and a
+  15 fps camera.** After E88 landed, the indoor camera was dropping about 150
+  frames every 17 to 24 seconds in **steady state**, nowhere near a handover,
+  while the container sat at 31 percent of two cores and 434 MB of 1 GiB. Not
+  starved: under-buffered.
+
+  The cause is a rate change, not a regression. That camera began delivering
+  **30 fps** where it had been 5 to 10 earlier the same day. `video_queue_maxsize`
+  is `round(fps x 500 ms)` clamped to 4 to 8 frames, so at 30 fps the clamp gave
+  **267 ms** of tolerance, which is LESS than the 15 fps camera the ceiling was
+  sized for. E62 recorded that exact limitation ("above ~16 fps the memory
+  ceiling binds before the time target") as a deliberate trade against a 768 MiB
+  container. `mem_limit` is now 1 GiB, so the arithmetic that set 8 no longer
+  holds.
+
+  Ceiling raised to 16, which restores the 500 ms target up to 32 fps and so
+  covers every rate either camera has been observed delivering. 16 frames is
+  49.8 MB at 1440x1440 and 21.2 MB at 1280x720, about 71 MB for the pair against
+  roughly 590 MB spare.
+
+  The test that guards this **caught the change before the mutation pass did**:
+  it asserted the ceiling's worth stayed under 25 MB and failed the moment the
+  ceiling moved. That bound is now stated for BOTH cameras rather than one, so a
+  future raise cannot silently double the real cost.
+
+  **Still not the fix, by the same reasoning E62 gave.** A deeper queue converts
+  dropped frames into latency; it does not stop a writer stalling. What it buys
+  is that a 30 fps camera gets the same 500 ms of tolerance as a 15 fps one,
+  which is all the sizing rule ever claimed to do.
+
+- **E92 (open) A handover record reported a lead of -167,912 ms.** One
+  `sink_rebuilt: false` rotation on the indoor camera carried
+  `lead_min_ms: -167912.4` with `silence_calls: 0` and `video_issued: 53`. That
+  is roughly one session lifetime of deficit, which suggests the audio timeline
+  did not advance at all for that session while video did, and the hold made no
+  audio calls in a window where it made 53 video ones. Not reproduced, not
+  explained, and not obviously the same thing E88 fixed, since the fix is
+  present in that build. Recorded rather than rationalised.
