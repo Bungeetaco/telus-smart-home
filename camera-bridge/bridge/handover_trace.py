@@ -31,7 +31,23 @@ DERIVED, NOT RE-COUNTED. The lead and the timeline come from
 FfmpegSink.audio_lead_s / audio_timeline_s, which are read off the sample
 counter write_silence_to already maintains; the queue depth is the real queue's
 own qsize; the drop times are recorded where the drop happens. Nothing here
-keeps a parallel tally that could disagree with the thing it describes.
+keeps a parallel tally that could disagree with the thing it describes. The
+frame hold's per-tick counters are held to the same rule: what a top-up wrote is
+read off that same sample counter, never inferred from the call having been made
+or from it returning True (see HandoverTrace.__init__).
+
+THE LEAD IS A FLOOR, NOT A CEILING, and a record showing seconds of it is
+correct rather than broken. ffmpeg_sink._AUDIO_PRIME_MS (100 ms) is the lead
+established when the pipe is OPENED; after that only two things move the audio
+timeline, and neither caps it. write_silence_to tops up TO the wall clock, so it
+can raise the lead to zero and no further. write_audio has no wallclock term at
+all -- it writes whatever a decoded frame carries, whenever it arrives -- so a
+queued backlog drained by the audio pump (the session's queue holds up to
+config.AUDIO_QUEUE_MAXSIZE frames, ~1 s, and the pump drains it as fast as the
+event loop allows) legitimately leaves the timeline SECONDS ahead of real time.
+A `lead` of +1.9 s on the `rotation` mark is that, and it is also why the frame
+hold's top-ups can be perfectly regular and still write nothing for the first
+second or more of a gap.
 
 WHAT IT CANNOT SEE, stated rather than papered over:
 
@@ -156,8 +172,24 @@ class HandoverTrace:
         # gap, which is hundreds of events: one mark each would bury the record,
         # so the hold contributes its FIRST write as a mark and the rest as this
         # summary.
-        self._hold_silence = 0
-        self._hold_video = 0
+        #
+        # A CALL AND A WRITE ARE DIFFERENT EVENTS and the record keeps them
+        # apart, because conflating them is what made this instrument lie
+        # (E88). write_silence_to tops the audio timeline up TO the wall clock,
+        # so a top-up made while the timeline is still ahead of it writes
+        # nothing at all and returns True. That is the ordinary state for the
+        # first second or more of a hold -- a decoded backlog drained by the
+        # previous session's pump can leave the timeline seconds ahead (see
+        # `lead` on the `rotation` mark) -- so a record read "38 silence
+        # writes" beside "adv: 0.0" for the same interval and looked like two
+        # halves of one instrument disagreeing. They were not: `adv` was right
+        # and the count was wrong.
+        self._hold_silence_calls = 0    # top-ups that were accepted
+        self._hold_silence = 0          # ...of those, the ones that wrote samples
+        self._hold_silence_media = 0.0  # seconds of audio the hold really added
+        self._hold_timeline = None      # the sink's timeline at the previous call
+        self._hold_video = 0            # repeated frames ffmpeg ACCEPTED
+        self._hold_video_issued = 0     # ...of those, how many were started
         self._hold_first_at = None
         self._hold_last_at = None
         self._hold_max_gap = 0.0
@@ -214,13 +246,32 @@ class HandoverTrace:
 
         The hold is the only writer to the audio pipe for the length of the gap,
         so its cadence IS the audio timeline's cadence there -- that is what
-        `max_gap_ms` in the emitted record is, and why the first of these writes
+        `max_gap_ms` in the emitted record is, and why the first of these calls
         is promoted to a mark of its own.
+
+        What the call PUT ON THE PIPE is a separate question from whether it was
+        made, and it is answered the way everything here is answered: read off
+        the sink's own sample counter, never inferred from the call's return
+        value. See __init__ for what inferring it cost.
         """
         if self._closed:
             return
         try:
             now = time.monotonic()
+            timeline = _read(sink, "audio_timeline_s")
+            # Before the first of these the last reading is whatever the
+            # previous mark took -- `pump_stopped`, an instant earlier -- so the
+            # hold's very first write is measured like every other one.
+            previous = self._hold_timeline
+            if previous is None:
+                previous = self._last_timeline
+            if timeline is not None and previous is not None and timeline > previous:
+                self._hold_silence += 1
+                self._hold_silence_media += timeline - previous
+            if timeline is not None:
+                self._hold_timeline = timeline
+            if wrote:
+                self._hold_silence_calls += 1
             if self._hold_first_at is None:
                 self._hold_first_at = now
                 self.mark("hold_first_silence", sink)
@@ -229,15 +280,25 @@ class HandoverTrace:
                 if gap > self._hold_max_gap:
                     self._hold_max_gap = gap
             self._hold_last_at = now
-            if wrote:
-                self._hold_silence += 1
             self._note_lead(_read(sink, "audio_lead_s"), "hold")
         except Exception:
             log.debug("%s: handover hold sample failed", self.camera_id,
                       exc_info=True)
 
+    def hold_video_issued(self):
+        """One repeated video frame handed to the publisher by the frame hold.
+
+        Counted where the write STARTS, against hold_video's count of the ones
+        that finished. The two differing is a video pipe ffmpeg has stopped
+        reading, seen from inside the gap -- the shape of E88 -- and a record
+        that carried only the second could not distinguish it from a hold that
+        was never scheduled at all.
+        """
+        if not self._closed:
+            self._hold_video_issued += 1
+
     def hold_video(self):
-        """One repeated video frame written by the frame hold."""
+        """One repeated video frame the publisher ACCEPTED."""
         if not self._closed:
             self._hold_video += 1
 
@@ -335,13 +396,26 @@ class HandoverTrace:
             "sink_rebuilt": bool(self.sink_rebuilt),
             "queue_limit": _read(session, "video_queue_limit"),
             "hold": {
+                # The cadence (calls) and the content (writes, and what they
+                # carried) are separate numbers because they answer separate
+                # questions and are routinely different: silence_calls high with
+                # silence_ms at 0 is a hold running normally into a timeline
+                # that is already ahead of the wall clock, which is healthy;
+                # silence_calls collapsing to 2 is the hold itself stopping.
+                "silence_calls": self._hold_silence_calls,
                 "silence_writes": self._hold_silence,
+                "silence_ms": _ms(self._hold_silence_media),
+                "video_issued": self._hold_video_issued,
                 "video_writes": self._hold_video,
                 "first_ms": (_ms(self._hold_first_at - self.started)
                              if self._hold_first_at is not None else None),
                 "last_ms": (_ms(self._hold_last_at - self.started)
                             if self._hold_last_at is not None else None),
-                "max_gap_ms": _ms(self._hold_max_gap) if self._hold_silence else None,
+                # The cadence's own worst case, so it is gated on CALLS: a hold
+                # ticking perfectly into an audio timeline that needs nothing
+                # has no writes to space out and still has a cadence to report.
+                "max_gap_ms": (_ms(self._hold_max_gap)
+                               if self._hold_silence_calls else None),
             },
             "drops": self._drops(session),
             "marks": self.marks,

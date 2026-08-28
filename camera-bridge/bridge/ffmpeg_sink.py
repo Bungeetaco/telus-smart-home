@@ -78,8 +78,16 @@ config.JANUS_CONSUME_AUDIO):
   Sharing one clock also means the audio input must stay AHEAD of the video,
   continuously, or ffmpeg stops reading the VIDEO pipe and the camera drops
   frames -- the audio input paces the whole publisher. _AUDIO_PRIME_MS
-  establishes that lead and config.AUDIO_SILENCE_TOPUP_S maintains it; both
-  carry the measurements.
+  establishes that lead when the pipe is opened; both carry the measurements.
+
+  The lead is a FLOOR, not a fixed quantity, and the two writers move it in
+  opposite ways. write_silence_to tops the timeline up TO the wall clock, so it
+  can only ever raise the lead to zero -- it stops the lead going negative, it
+  does not restore the prime. write_audio has no wallclock term at all, so a
+  decoded backlog drained by the pump legitimately puts the timeline seconds
+  AHEAD. That is why config.AUDIO_SILENCE_TOPUP_S is chosen against the prime
+  (the cadence is what has to stay under it) and why a lead far above the prime
+  in a handover record is a correct reading rather than a broken one.
 
   An audio input that goes bad mid-session is DROPPED, not repaired: video is
   worth more than audio, so the sink degrades to video-only (see _drop_audio)
@@ -192,6 +200,43 @@ _AUDIO_PRIME_MS = 100
 # reading a pipe running a minute ahead -- which is what _AUDIO_PIPE_MAX_BUFFER
 # and this ceiling together bound.
 _AUDIO_SILENCE_MAX_BURST_S = 0.1
+# ...and the point past which a deficit stops being a late top-up and becomes a
+# HOLE, which is a different event and gets closed in one write instead.
+#
+# The ceiling above bounds a routine top-up, and at the 0.05 s cadence every
+# caller uses it repays a backlog at about twice real time. That is the right
+# answer for a deficit of tens of milliseconds and the wrong one for a deficit of
+# seconds, because of WHERE the damage is: while the audio timeline is behind the
+# wall clock the lead is negative, and a negative lead is exactly when ffmpeg
+# stops reading the VIDEO pipe. Repaying 2.9 s at 2x therefore means 2.9 s of the
+# video pipe not being read, and the frames behind it are lost at frame-interval
+# cadence for the whole of it (measured live: 6 to 19 frames per handover, drop
+# count tracking deficit size). Closing the hole in one write ends that window
+# immediately.
+#
+# That is not a contradiction of the table above, it is its other half: what
+# stalled video there was the instant of ZERO lead before each write, never the
+# size of the write. Running ahead was measured harmless -- "the same rig fed 2x
+# real time showed no video stall at all" -- and a catch-up cannot even run
+# ahead, since write_silence_to only ever tops up TO the wall clock.
+#
+# The threshold is the video queue's own tolerance (janus_client's
+# VIDEO_QUEUE_TARGET_MS, 500 ms): under it, a deficit repaid across calls costs
+# at most buffer the queue already carries, so the ordinary ceiling keeps its
+# job; past it frames are lost either way and the only question is for how long.
+_AUDIO_CATCHUP_DEFICIT_S = 0.5
+# The catch-up's own bound, and it is in BYTES rather than seconds on purpose.
+# What must never happen is the thing _AUDIO_SILENCE_MAX_BURST_S was written
+# for -- dumping minutes of silence into the pipe after a long stall -- and
+# "minutes" is a quantity of bytes, not of seconds: the same 3 s means 48 kB at
+# the 8 kHz mono the cameras on this account actually send and 576 kB at the
+# 48 kHz stereo the SDP implies. Expressed against _AUDIO_PIPE_MAX_BUFFER, a
+# catch-up can never be what pushes the transport past the depth that already
+# means "ffmpeg has stopped reading" -- it is a quarter of it. At 8 kHz mono s16
+# that is 8.2 s of silence, comfortably past the worst deficit ever measured
+# here (2.9 s); at any shape, a deficit larger than this still repays across
+# calls at the ordinary ceiling, exactly as before.
+_AUDIO_CATCHUP_MAX_BYTES = _AUDIO_PIPE_MAX_BUFFER // 4
 # How many CONSECUTIVE decoded audio frames may fail write_audio's byte-count
 # check before the audio input is given up on. One mismatched frame is a
 # glitch (a partially-decoded frame) and is skipped -- its span is filled with
@@ -947,12 +992,34 @@ class FfmpegSink:
         frames (a frame is a frame whenever it lands) but is real, accumulating
         A/V drift on audio, because a sample stream's duration IS its length.
 
-        CALL IT OFTEN. A single call can only ever close the gap up to
+        CALL IT OFTEN. An ordinary call can only ever close the gap up to
         _AUDIO_SILENCE_MAX_BURST_S, and -- far more importantly -- the audio has
         to stay AHEAD of the video for ffmpeg to keep reading the video pipe at
         all (see _AUDIO_PRIME_MS for the mechanism and the measurements). Every
         caller here tops up at config.AUDIO_SILENCE_TOPUP_S, which is half the
         lead the prime establishes.
+
+        TWO REGIMES, and which one a call is in is decided by what it finds, not
+        by who called it. A deficit up to _AUDIO_CATCHUP_DEFICIT_S is a top-up
+        that ran late and is clipped at the ordinary ceiling, repaying across
+        successive calls; a deficit past it is a HOLE, and is closed in one write
+        bounded by _AUDIO_CATCHUP_MAX_BYTES. Both constants carry the reasoning.
+        Neither regime ever writes past the wall clock, so nothing here can
+        overfill the pipe, and neither loses anything: the count is recomputed
+        from elapsed real time on every call, so the total written always
+        converges on exactly what the wall clock says.
+
+        WHAT IS NOT DONE HERE, because it looks like the obvious shortcut and is
+        wrong: moving `_audio_started_at` forward to make a deficit read zero --
+        rebasing the audio origin, accepting the gap as dead air. The audio input
+        carries no -use_wallclock_as_timestamps (see start()), so its PTS ARE its
+        sample count. Skipping N seconds of samples does not skip N seconds of
+        presentation time; it makes the audio stream N seconds shorter than the
+        wallclock-stamped video beside it, so every later sample is presented N
+        seconds early, for the life of the publisher. `-af aresample=async=1`
+        cannot correct that either: it fills and trims against the audio's own
+        timeline, not against the video's. A slow repayment is a bounded, one-off
+        video stall; a rebase is a permanent A/V offset.
 
         Returns False if nothing was written because the audio input is gone,
         like write_audio -- and, like write_audio, that never means "rebuild".
@@ -964,7 +1031,11 @@ class FfmpegSink:
         deficit = int((now - self._audio_started_at) * rate) - self._audio_samples_written
         if deficit <= 0:
             return True     # real audio is already at or ahead of the wallclock
-        deficit = min(deficit, int(rate * _AUDIO_SILENCE_MAX_BURST_S))
+        ceiling = int(rate * _AUDIO_SILENCE_MAX_BURST_S)
+        if deficit > int(rate * _AUDIO_CATCHUP_DEFICIT_S):
+            ceiling = max(ceiling,
+                          _AUDIO_CATCHUP_MAX_BYTES // max(1, self._audio_bytes_per_sample))
+        deficit = min(deficit, ceiling)
         return self._write_audio_bytes(self._silence_bytes(deficit), deficit)
 
     async def stop(self):

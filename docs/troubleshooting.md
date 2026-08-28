@@ -20,6 +20,7 @@ the component READMEs.
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
 - [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
+- [Frames lost at every rotation, in a burst just after the new session starts](#frames-lost-at-every-rotation-in-a-burst-just-after-the-new-session-starts)
 - [Measuring what a session rotation costs the audio timeline](#measuring-what-a-session-rotation-costs-the-audio-timeline)
 - [Attributing the container's memory](#attributing-the-containers-memory)
 - [The status says `streaming` but MediaMTX has no path](#the-status-says-streaming-but-mediamtx-has-no-path)
@@ -388,11 +389,15 @@ stalled none. Two hypotheses that look obvious here are **disproven**: the
 per-frame pixel copy costs 0.24 ms of a 66.7 ms frame interval, and pre-scaling
 the source changes the stall count by exactly zero.
 
-**Fix / design.** `AUDIO_SILENCE_TOPUP_S` is 0.05 s, half the lead, and no single
-write may hand ffmpeg more than the lead's worth of PCM
+**Fix / design.** `AUDIO_SILENCE_TOPUP_S` is 0.05 s, half the lead, and no
+ordinary top-up may hand ffmpeg more than the lead's worth of PCM
 (`_AUDIO_SILENCE_MAX_BURST_S`). The frame hold ticks on whichever deadline is
 shorter (the camera's frame interval or the top-up cadence) because one top-up
-per repeated frame is 167 ms on a 6 fps camera. See
+per repeated frame is 167 ms on a 6 fps camera. A deficit past
+`_AUDIO_CATCHUP_DEFICIT_S` (0.5 s) is a hole rather than a late top-up and is
+closed in one write bounded by `_AUDIO_CATCHUP_MAX_BYTES`, because repaying
+seconds at the ordinary ceiling means seconds of negative lead and every frame
+behind the video pipe lost for the whole of it. See
 [camera-bridge.md](camera-bridge.md#the-audio-path).
 
 **Diagnosis.** Frames dropping on the camera that has `audio_consumed: true`
@@ -405,6 +410,43 @@ sessions. A session that drops fourteen therefore leaves exactly one line, and
 reading the log alone suggests one drop per rotation. If the drops cluster at
 rotations rather than running through the session, the section below is the way
 to see it.
+
+---
+
+## Frames lost at every rotation, in a burst just after the new session starts
+
+**Symptom.** With `HANDOVER_TRACE` on, some rotations of the camera that
+consumes audio report `hold.silence_calls` of 0 to 2 across a two to three
+second window, `hold.video_writes` of 0 or 1, `hold.last_ms` a few tens of
+milliseconds into a window whose `hold_stopped` mark is seconds later,
+`lead_min_ms` in the negative thousands, and 6 to 19 dropped frames whose
+timestamps all land after the new session's audio pump starts, spaced one frame
+interval apart. `sink_rebuilt` reads `false` and nothing in the ordinary log says
+anything at all.
+
+**Cause.** The frame hold stopped writing. ffmpeg reads the video pipe only
+while it holds audio covering the frame's timestamp, so `write_frame`'s drain
+does not complete while the audio timeline is behind the wall clock. With the
+hold's video write awaited inline, that blocked write also held up the silence
+top-up in the same loop pass, and that top-up was the only thing left that could
+advance the timeline: the previous session's audio pump is stopped as the hold's
+first act and the next one is not created until the hold has finished. The two
+writers waited on each other for the rest of the gap. Nothing detected it,
+because `write_frame`'s own drain bound is 5 s and the gap is shorter, so the
+publisher was never marked stalled and no rebuild was triggered. The drops
+themselves come afterwards, while the multi-second deficit is repaid.
+
+**Fix.** The hold writes its repeated frame from a task of its own and reaps it
+on a later tick, so the audio top-up runs on every tick whatever the video write
+is doing; and a deficit past 0.5 s is closed in one bounded write rather than at
+twice real time. Both are described in
+[camera-bridge.md](camera-bridge.md#the-audio-path).
+
+**Diagnosis.** `hold.silence_calls` is the number to read: it is the hold's
+cadence, and it collapses when the hold stops. `hold.silence_writes` and
+`hold.silence_ms` being 0 while `silence_calls` is in the tens is a different and
+healthy thing, namely a timeline that is already ahead of the wall clock and owes
+nothing.
 
 ---
 
@@ -434,9 +476,9 @@ sudo docker logs telus-cam-bridge 2>&1 \
 | --- | --- |
 | `marks[]` | The window, in order, from `rotation` to `settled`. Each carries `t` (ms from the rotation), `dt` (ms since the previous mark), **`adv`** (ms of audio actually written to ffmpeg since the previous mark), **`lead`** (ms the audio timeline is ahead of the wallclock-stamped video) and `q` (video frames queued for the publisher). |
 | `worst_gap` | The interval where the audio timeline fell furthest behind the wall clock, and the two marks bracketing it. `ms` is `dt - adv`: real time that interval did **not** cover with audio. A few ms is scheduling jitter. |
-| `lead_min_ms` / `lead_min_at` | The lowest lead seen, and where. **Negative means the audio no longer covers the video**, which is when ffmpeg stops reading the video pipe (`_AUDIO_PRIME_MS`). |
+| `lead_min_ms` / `lead_min_at` | The lowest lead seen, and where. **Negative means the audio no longer covers the video**, which is when ffmpeg stops reading the video pipe (`_AUDIO_PRIME_MS`). A lead far **above** the 100 ms prime is normal and not an instrument fault: the prime is the lead established when the pipe opens, the silence top-up can only raise the lead back to zero, and decoded audio is written as it arrives, so a queued backlog drained by the pump puts the timeline seconds ahead. |
 | `drops` | Every dropped frame in the window, in ms from the rotation, split into the `retiring` session and the `new` one. `session_total` beside each is that session's own lifetime count. |
-| `hold` | The frame hold's work through the gap: silence writes, repeated video frames, and `max_gap_ms`, the longest interval between two silence writes. It must stay under the 100 ms lead. |
+| `hold` | The frame hold's work through the gap, with the **cadence and the content kept apart**. `silence_calls` is how many top-ups it made and `max_gap_ms` the longest interval between two of them; both describe the tick, and `max_gap_ms` must stay under the 100 ms lead. `silence_writes` is how many of those calls actually put samples on the pipe and `silence_ms` how much audio they carried, both read off the sink's sample counter. `video_issued` and `video_writes` are the same distinction for the repeated frames: started, against accepted by ffmpeg. |
 | `audio_ms` vs `span_ms` | Audio written across the whole window against wall time across the whole window. **These two should match.** |
 | `first_frame_ms` | When the new session's first frame arrived, as opposed to when the loop noticed it. |
 | `sink_rebuilt` | Whether this rotation also rebuilt the publisher. A rebuild opens a new audio pipe with a fresh 100 ms prime, so such a record is not comparable with an ordinary rotation. |
@@ -450,13 +492,28 @@ yet), `pump_created` (the new pump is scheduled, not yet running),
 pipe are mutually exclusive by design, and if the audio timeline stops advancing
 anywhere in there, that is where it happens.
 
-**What a healthy rotation looks like:** `adv` tracking `dt` at every mark,
-`lead` staying positive, `worst_gap.ms` in the low tens of ms, `drops.total` 0
-or 1.
+**What a healthy rotation looks like:** `hold.silence_calls` in the tens with
+`max_gap_ms` around 50, `hold.silence_ms` roughly covering the part of `span_ms`
+the timeline actually owed, `lead_min_ms` no worse than a few tens of ms
+negative, and `drops.total` 0 or 1. `adv` of 0 across a long `dt` is only a fault
+when the lead is at or below zero: with the timeline seconds ahead, nothing is
+owed and nothing is written, and `hold.silence_calls` beside it is what says the
+hold is still running.
 
-**What the suspected fault looks like:** `worst_gap.from = hold_stopped`,
-`worst_gap.to = pump_first_write` with `adv: 0`, `lead_min_ms` negative, and
-`drops.new.at_ms` landing inside that same interval.
+**What a frame hold that has stopped looks like** (E88, fixed): `hold.silence_calls`
+collapsing to 0 to 2 against a two to three second `span_ms`, `hold.video_writes`
+at 0 or 1, `hold.last_ms` tens of milliseconds into a window whose `hold_stopped`
+mark is seconds later, `lead_min_ms` in the negative thousands, and every entry in
+`drops.new.at_ms` landing after the new pump starts, at frame-interval cadence,
+while the deficit is repaid. `sink_rebuilt` reads `false` throughout, because
+nothing detected anything: the hold's video write was parked inside a drain whose
+own 5 s bound is longer than the gap.
+
+**What a stalled serialization window would look like:** `worst_gap.from =
+hold_stopped`, `worst_gap.to = pump_first_write` with `adv: 0`, `lead_min_ms`
+negative, and `drops.new.at_ms` inside that same interval. Ten live records show
+that window at a fraction of a millisecond, so it is not where this deployment's
+drops come from.
 
 **The limits of the measurement**, so a reading is not over-claimed: the lead is
 what the *bridge* has handed ffmpeg, not what ffmpeg's muxer has consumed (the

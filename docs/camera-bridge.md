@@ -410,6 +410,18 @@ come from the resolution setting.
   video interval is at most 1/30 = 33 ms and the tick can never exceed the 50 ms
   top-up, half the 100 ms muxer lead the whole pacing fix depends on. No measured
   rate can push the audio half of that loop past the lead.
+- **The hold's audio top-up is never gated behind its video write.** The
+  repeated frame is written by a task of its own and reaped on a later tick, so
+  the top-up runs on every tick whatever the video write is doing. That is
+  load-bearing rather than tidy: `write_frame`'s drain completes only once ffmpeg
+  has read the frame, and ffmpeg reads the video pipe only while it holds audio
+  covering that frame's timestamp, so a video write awaited inline blocks on the
+  very audio write that would release it. The previous session's pump is already
+  stopped and the next one does not exist yet, so nothing else can advance the
+  timeline and neither writer moves again. Exactly one video write is in flight
+  at a time (a second would be a second writer to the raw video pipe) and it is
+  always finished before the hold task is, so the guarantee that nothing is
+  writing to the publisher once the hold has stopped is unchanged.
 
 ## ffmpeg encode and RTSP publish
 
@@ -769,8 +781,9 @@ logs the first drop of a session and then every 150th, so a session that drops
 fourteen leaves one line and no way to place it against anything.
 
 The record carries, for one rotation: when the previous session's audio pump
-actually stopped, when the frame hold took over the audio pipe and how often it
-wrote through the gap, the **muxer lead** at every step (how far the audio
+actually stopped, when the frame hold took over the audio pipe, how often it
+ticked and how much audio it actually wrote through the gap, the **muxer lead**
+at every step (how far the audio
 timeline runs ahead of the wallclock-stamped video, the quantity every pacing
 constant here is chosen against), when the new session's first frame arrived and
 when it was written to ffmpeg, when its pump first wrote, the video queue depth
@@ -778,6 +791,17 @@ at each of those, and the timestamp of every dropped frame relative to the
 rotation. Each mark pairs `dt` (wall clock since the previous mark) with `adv`
 (audio actually written since it), so an interval where the timeline stopped
 advancing is visible as `adv` of zero across a long `dt`.
+
+**A call and a write are different facts and the record keeps them apart.**
+`hold.silence_calls` is the hold's cadence, `hold.silence_writes` is how many of
+those calls put samples on the pipe, and `hold.silence_ms` is how much audio they
+carried, read off the sink's own sample counter. They differ routinely and
+legitimately: a top-up made while the audio timeline is still ahead of the wall
+clock writes nothing and succeeds. The same rule applies to the repeated video
+frames, where `hold.video_issued` counts the writes started and
+`hold.video_writes` counts the ones ffmpeg accepted, so a video pipe ffmpeg has
+stopped reading is visible from inside the gap rather than only from the frames
+that go missing afterwards.
 
 Three properties are deliberate:
 
@@ -898,8 +922,45 @@ Five properties of that path are load-bearing:
   lets `avformat_find_stream_info` complete and the **lead** the audio keeps over
   the wallclock-stamped video. That lead decays by elapsed real time between
   top-ups, so `AUDIO_SILENCE_TOPUP_S` (0.05 s) must stay comfortably under it,
-  and a single write may never exceed it either
+  and an ordinary top-up may never exceed it either
   (`_AUDIO_SILENCE_MAX_BURST_S` = 0.1 s).
+
+  **The lead is a floor, not a fixed quantity**, and the two writers move it in
+  opposite ways. `write_silence_to` tops the timeline up *to* the wall clock, so
+  it can raise the lead to zero and no further: it stops the lead going negative,
+  it does not restore the prime. `write_audio` has no wallclock term at all and
+  writes whatever a decoded frame carries, whenever it arrives, so a queued
+  backlog drained by the audio pump legitimately puts the timeline **seconds
+  ahead** of real time. Both matter when reading a handover record: a `lead` far
+  above 100 ms is a correct reading, and a frame hold that ticks perfectly while
+  writing nothing at all is what a big positive lead looks like from the other
+  side.
+
+  **A deficit past `_AUDIO_CATCHUP_DEFICIT_S` (0.5 s) is closed in one write**,
+  not repaid at the ordinary ceiling. The two regimes exist because the damage is
+  in the *duration* of a negative lead rather than in the deficit itself: at the
+  shipped cadence the ordinary ceiling repays at about twice real time, so
+  clearing a 3 s hole would mean 3 s of ffmpeg not reading the video pipe and
+  every frame behind it lost. That is not in tension with the table below, it is
+  its other half: what stalls video is the instant of zero lead before a write,
+  never the size of the write, and a catch-up cannot even run ahead, since it
+  still only tops up to the wall clock. The catch-up's own bound is in **bytes**
+  (`_AUDIO_CATCHUP_MAX_BYTES`, a quarter of `_AUDIO_PIPE_MAX_BUFFER`) rather than
+  in seconds, because "a long stall must not dump minutes of silence in one
+  write" is a quantity of bytes: the same three seconds is 48 kB at the 8 kHz
+  mono these cameras send and 576 kB at 48 kHz stereo. Anything past the bound is
+  still owed and still repaid across later calls.
+
+  **Rebasing the audio origin instead, and accepting the gap as dead air, is
+  wrong here** and is worth stating because it looks like the obvious shortcut.
+  The audio input carries no `-use_wallclock_as_timestamps`, so its PTS *are* its
+  sample count: skipping N seconds of samples does not skip N seconds of
+  presentation time, it makes the audio stream N seconds shorter than the
+  wallclock-stamped video beside it, and every later sample is presented N
+  seconds early for the life of the publisher. `-af aresample=async=1` cannot
+  correct that, because it fills and trims against the audio's own timeline
+  rather than against the video's. A slow repayment is a bounded, one-off video
+  stall; a rebase is a permanent A/V offset.
 
   Getting this wrong is **invisible from the audio side**: the published audio is
   correct and the published video is correct, and the only symptom is video
