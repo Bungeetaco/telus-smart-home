@@ -678,6 +678,32 @@ graceful shutdown) deliberately: a graceful path runs through the very cleanup
 code suspected of being wedged, so a hard exit lets the OS reclaim every
 fd/socket/child unconditionally.
 
+## The outbound call leg (`bridge/sip_call.py`)
+
+A minimal SIP/RTP user agent that places one authenticated outbound call
+through a VoIP.ms POP: INVITE with MD5 digest auth (with and without
+`qop=auth`), SDP offer/answer pinned to G.711 mu-law (PCMU), symmetric RTP,
+BYE. Exposed as `POST /control/call/test`, which rings the configured target
+and plays a tone on answer; inert unless the deployment provides a sub-account
+(see `docs/configuration.md`). It is the foundation for ring-to-phone with the
+doorbell's audio bridged into the call -- both doorbell audio paths are
+already mu-law at 8 kHz, so the splice is packet plumbing rather than
+transcoding (backlog E99 tracks the milestones).
+
+Hand-rolled subset of RFC 3261 rather than a SIP library, for the same reason
+talkdown re-implements its protocol: the leg needs exactly one scenario, and
+the libraries that cover it are alpha-quality or C toolkits with their own
+event loop to embed. UAC only -- nothing listens for inbound calls and
+REGISTER is never sent (registration routes inbound calls; an authenticated
+INVITE stands alone). One call at a time, enforced with a lock at the control
+route. The SIP password is used for digest computation only and never appears
+in a message or a log.
+
+`tests/test_sip_call.py` runs the whole state machine against a fake POP that
+verifies the digest with an independent implementation, answers with SDP and
+collects the RTP; see `docs/development.md` for what silent failure each
+assertion exists to catch.
+
 ## Container and runtime
 
 Defined by `Dockerfile`, `entrypoint.sh`, and `docker-compose.yml`.

@@ -613,6 +613,24 @@ AUDIO_FORMAT_REBUILD_LIMIT = 1
 # lasts exactly one, so this clears it several times over while still being far
 # shorter than the hours a process now runs for.
 AUDIO_FORMAT_SETTLED_S = 900
+# --- VoIP.ms call leg (backlog E99; milestone 1 is a test call) -------------
+# All empty by default, which leaves the call endpoint disabled: the bridge
+# ships inert and a deployment opts in by providing the sub-account in its env
+# (gitignored .env on this deployment). The password is used for digest
+# computation only and never appears in a SIP message or a log line.
+VOIPMS_SIP_SERVER = os.environ.get("VOIPMS_SIP_SERVER", "")
+VOIPMS_SIP_ACCOUNT = os.environ.get("VOIPMS_SIP_ACCOUNT", "")
+VOIPMS_SIP_PASSWORD = os.environ.get("VOIPMS_SIP_PASSWORD", "")
+VOIPMS_DID = os.environ.get("VOIPMS_DID", "")
+DOORBELL_CALL_TARGET = os.environ.get("DOORBELL_CALL_TARGET", "")
+SIP_PORT = int(os.environ.get("SIP_PORT", "5060"))
+# Long enough to hear it clearly, short enough that a pocket-answered call
+# costs cents, not minutes.
+CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))
+# Bounds the WHOLE call attempt including ring time. VoIP.ms gives a mobile
+# ~30s of ring before voicemail; this has to outlive that plus the tone.
+CALL_TIMEOUT_S = float(os.environ.get("CALL_TIMEOUT_S", "75"))
+
 # Loudness normalization applied to every published audio stream, appended to
 # the encoder's -af chain AFTER the aresample fill-and-trim (timestamps are
 # repaired before any gain decision). One filter for every camera on purpose:

@@ -1197,6 +1197,34 @@ curl -s -H "Authorization: Bearer $SECRET" \
 
 ---
 
+## `POST /control/call/test`
+
+Places one outbound test call through the configured VoIP.ms sub-account:
+rings the target, plays a ~10 s tone on answer, hangs up, and returns a
+timeline of the SIP/RTP milestones. Exists to prove the call leg (INVITE,
+digest auth, SDP, NAT, two-way RTP) independently of any doorbell event; the
+doorbell splice builds on it (backlog E99).
+
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+Body (optional): `{"target": "<number>"}` -- overrides the configured
+`DOORBELL_CALL_TARGET` for this one call.
+
+Responses:
+
+      200 {"result": "completed", "frames_sent": n, "rtp_received": n,
+           "timeline": [...]}          -- the call was answered and torn down
+      200 {"result": "rejected", "status": n, "reason": "...", ...}
+                                       -- the POP refused it (bad auth, bad number)
+      200 {"result": "timeout", ...}   -- nothing answered inside CALL_TIMEOUT_S
+      400 {"error": "no_target"}       -- no target configured or supplied
+      403 {"error": "call_disabled"}   -- no VoIP.ms sub-account in the env
+      409 {"error": "call_in_progress"} -- one call at a time
+      502 {"error": "call_failed"}     -- unexpected local failure (logged)
+
+The route holds the request open for the life of the call (ring time plus the
+tone), so give the HTTP client a generous timeout.
+
 ## `POST /control/cameras/{camera_id}/settings/volume`
 
 Sets the camera's speaker/call volume: the level talkdown is heard at. The

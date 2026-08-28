@@ -249,6 +249,33 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E99** (milestone 1 shipped; milestones 2-3 open) - the ring-to-phone call
+  feature. The end state: doorbell ring with no notification response calls the
+  operator's phone via VoIP.ms and bridges the call to the doorbell's two audio
+  paths (both already G.711 mu-law at 8 kHz, so the splice is packet plumbing).
+
+  **Milestone 1, done:** `bridge/sip_call.py`, a hand-rolled RFC 3261 subset
+  (authenticated outbound INVITE, MD5 digest with and without qop, SDP
+  offer/answer pinned to PCMU, symmetric RTP tone, BYE), exposed as
+  `POST /control/call/test` and inert unless the env provides a sub-account.
+  Hand-rolled rather than a SIP library for the same reason talkdown is: one
+  scenario, and the libraries that cover it are alpha-quality or a C toolkit
+  with its own event loop. The suite runs the whole state machine against a
+  fake POP that verifies the digest INDEPENDENTLY (an early fake reused the
+  module's own digest function and agreed with a deliberately broken HA2
+  order; only an independent implementation can disagree). The suite also
+  caught the tone frequency: 440 Hz is 8.8 cycles per 20 ms frame, so the
+  repeated frame clicked 50 times a second; 450 Hz is exactly 9.
+
+  **Milestone 2, open:** splice the answered call's RTP to the doorbell --
+  uplink from the Janus listen path, downlink into the talkdown PUT -- with the
+  tone kept as a fallback self-test. **Milestone 3, open:** trigger from the
+  ring automation (ring, no notification action within the loiter window, then
+  call), plus the operator's decided constraints in the automation notes.
+
+  Sub-account provisioning is deployment state (gitignored env), deliberately
+  not recorded here.
+
 **Recently shipped, listed only because the trap is expensive**
 
 - **E79** (DONE) - Frigate records to the NAS vault pool over virtiofs. If the

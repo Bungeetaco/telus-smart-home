@@ -573,6 +573,7 @@ from . import config as c
 from . import metrics
 from . import talk as talk_mod
 from . import talk_fullduplex
+from . import sip_call
 from .mobile_auth import mint_if_stale
 # _jget/_json_bool are module-private in mws_client and imported anyway, on
 # purpose: they are the canonical way this codebase reads an MWS JSON scalar, and
@@ -2444,6 +2445,37 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app = web.Application()
     app[APP_CURRENT_SECRET] = current_secret
 
+    # One call at a time: the leg holds a real phone call and a second
+    # concurrent INVITE from the same sub-account helps nobody.
+    call_lock = asyncio.Lock()
+
+    async def handle_call_test(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+        # Ships inert: the endpoint exists only when a deployment has provided
+        # the sub-account (see config's VoIP.ms section), same pattern as
+        # talkdown's enable flag.
+        if not (c.VOIPMS_SIP_SERVER and c.VOIPMS_SIP_ACCOUNT
+                and c.VOIPMS_SIP_PASSWORD):
+            return web.json_response({"error": "call_disabled"}, status=403)
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            return web.json_response({"error": "malformed"}, status=400)
+        target = (body.get("target") or "").strip() or c.DOORBELL_CALL_TARGET
+        if not target:
+            return web.json_response({"error": "no_target"}, status=400)
+        if call_lock.locked():
+            return web.json_response({"error": "call_in_progress"}, status=409)
+        async with call_lock:
+            log.info("Control endpoint: placing test call")
+            try:
+                result = await sip_call.place_test_call(target=target)
+            except Exception:
+                log.exception("Control endpoint: test call failed")
+                return web.json_response({"error": "call_failed"}, status=502)
+        return web.json_response(result)
+
     async def handle_talk_stop(request: web.Request) -> web.Response:
         """Stop the talk currently playing on this camera.
 
@@ -2471,6 +2503,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_get("/control/cameras/{camera_id}/snapshot", handle_snapshot)
     app.router.add_post("/control/cameras/{camera_id}/talk", handle_talk)
     app.router.add_post("/control/cameras/{camera_id}/talk/stop", handle_talk_stop)
+    app.router.add_post("/control/call/test", handle_call_test)
     app.router.add_get("/control/events", handle_events)
     app.router.add_get("/control/clip/{video_event_id}", handle_clip)
     app.router.add_get("/control/automations", handle_automations)

@@ -254,6 +254,7 @@ graph TB
         MMTX["MediaMTX (RTSP :8554)"]
         TALK["talk.py + talk_fullduplex<br/>+ mobile_auth + mws_client"]
         SET["settings + config clients<br/>camera_settings.py<br/>arming_devices.py<br/>partitions.py"]
+        SIPC["sip_call.py<br/>outbound call leg"]
         BAUTH["telus_auth.py (website SSO)"]
     end
 
@@ -261,6 +262,7 @@ graph TB
 
     WEB["Website AJAX/cookie API<br/>smarthome-security.telus.com<br/>state, video source, snapshots,<br/>clips, events, automations,<br/>device settings + alarm config"]
     MWS["Mobile MWS XML API<br/>mobile.alarm.com/MobileServlet<br/>two-way audio, siren/privacy,<br/>chime-type labels"]
+    VOIP["VoIP.ms POP<br/>SIP/RTP (G.711 mu-law)"]
 
     INT -->|"HTTP control API<br/>(loopback)"| CS
     INT <-->|"secrets + credential fallback"| SHARE
@@ -268,6 +270,7 @@ graph TB
     CS --> VID
     CS --> TALK
     CS --> SET
+    CS --> SIPC
     INT -->|"RTSP (authenticated)"| MMTX
     VID --> MMTX
 
@@ -278,6 +281,7 @@ graph TB
     TALK -->|"mint SessionToken +<br/>GetLiveVideoStream"| MWS
     SET -.->|"chime-type labels<br/>(GetCurrentDoorbellSettings)"| MWS
     BAUTH -.->|"MWS token minted off<br/>website session"| MWS
+    SIPC -->|"authenticated INVITE +<br/>symmetric RTP"| VOIP
 ```
 
 ## Where to go next
