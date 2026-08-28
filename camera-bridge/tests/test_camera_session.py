@@ -4288,9 +4288,12 @@ async def test_the_cameras_real_8khz_mono_audio_flows_through_unchanged():
             audio_in = ["-f", "s16le", "-ar", "8000", "-ac", "1",
                         "-analyzeduration", "0", "-probesize", "32",
                         "-i", f"pipe:{fd}"]
+            # The -af chain is pinned as a literal, aresample FIRST: the
+            # normalizer (E98) must see a repaired timeline, and a config edit
+            # that broke the chain would otherwise ship silently.
             audio_out = ["-map", "0:v:0", "-map", "1:a:0",
                          "-c:a", "aac", "-ac", "1", "-ar", "8000", "-b:a", "64k",
-                         "-af", "aresample=async=1"]
+                         "-af", "aresample=async=1,dynaudnorm=f=500:g=15:p=0.9:m=12"]
             assert _subsequence_at(args, audio_in) > 0, (
                 f"{backend}: the 8 kHz mono raw input is missing or not "
                 f"contiguous: {args}")
@@ -4643,7 +4646,7 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
                 f"ffmpeg stops reading the audio pipe within seconds: {args}")
             audio_out = ["-map", "0:v:0", "-map", "1:a:0",
                          "-c:a", "aac", "-ac", "1", "-ar", "48000", "-b:a", "64k",
-                         "-af", "aresample=async=1"]
+                         "-af", "aresample=async=1,dynaudnorm=f=500:g=15:p=0.9:m=12"]
             at_in = _subsequence_at(args, audio_in)
             at_out = _subsequence_at(args, audio_out)
             assert at_in > 0, (

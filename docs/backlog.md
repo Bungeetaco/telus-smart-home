@@ -231,7 +231,7 @@ and evidence. Grouped by whether anything can actually be done about them.
   exists, is a camera/portal setting or an accepted limitation. Frigate's
   audio-based detection on this camera would also be blind during the gaps.
 
-- **E98** (open, decide-then-tune) - the two cameras' recorded audio levels are
+- **E98** (implemented bridge-side, live calibration pending) - the two cameras' recorded audio levels are
   wildly asymmetric: the living room peaks at -0.2 to -0.6 dB (at or brushing
   full scale, so loud content likely clips) with means of -15 to -39 dB, while
   the doorbell means sit at -47 to -72 dB with peaks near -14 dB at their
@@ -239,12 +239,15 @@ and evidence. Grouped by whether anything can actually be done about them.
   decode of a quiet porch (the loud pre-E80 readings were decode garbage), and
   the level difference is real microphone/gain difference between the devices.
   Neither camera exposes a microphone-gain entity (`*_speaker_volume` is
-  talkdown output, unrelated). Options, none implemented: check the alarm.com
-  portal for a per-camera microphone/audio-volume setting (the settings survey
-  has not looked for one); apply a fixed gain on the doorbell's audio encode in
-  the bridge; or normalize per camera in Frigate's ffmpeg output args. Pick
-  deliberately -- boosting the doorbell also boosts its noise floor, and
-  attenuating the living room trades clipping for quieter speech.
+  talkdown output, unrelated). The bridge now normalizes every published audio
+  stream (`config.AUDIO_NORMALIZE_FILTER`, dynaudnorm appended to the encoder's
+  -af chain), which covers the NVR, live view and HA from one place; the
+  constant's comment carries the parameter reasoning. What remains is LIVE
+  CALIBRATION: measure fresh NVR segments from both cameras after a real
+  conversation at each, and move the max-gain cap if the doorbell is still too
+  quiet or its porch hiss too loud. The alarm.com portal has not been checked
+  for a per-camera microphone-volume setting; if one exists it composes with
+  this rather than replacing it.
 
 **Recently shipped, listed only because the trap is expensive**
 

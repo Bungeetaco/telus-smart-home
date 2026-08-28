@@ -613,6 +613,31 @@ AUDIO_FORMAT_REBUILD_LIMIT = 1
 # lasts exactly one, so this clears it several times over while still being far
 # shorter than the hours a process now runs for.
 AUDIO_FORMAT_SETTLED_S = 900
+# Loudness normalization applied to every published audio stream, appended to
+# the encoder's -af chain AFTER the aresample fill-and-trim (timestamps are
+# repaired before any gain decision). One filter for every camera on purpose:
+# the two live devices sit at opposite extremes (backlog E98) -- the doorbell's
+# correct quiet-porch decode means -47 to -72 dB, the living room brushes full
+# scale at -0.2 dB peaks -- and a single dynamic normalizer pulls both toward
+# the same level, riding gain UP for the quiet source and DOWN for frames that
+# would clip, with no per-camera knob to drift.
+#
+# dynaudnorm rather than loudnorm: it is designed for one-pass live use at this
+# frame size and does not resample internally (loudnorm upsamples to 192 kHz,
+# absurd for an 8 kHz mono stream). The parameters, and why each is load-bearing:
+#   f=500 (frame 500 ms) g=15 (gaussian window, ~7.5 s of smoothing): gain moves
+#     over seconds, so speech does not pump and a door slam does not duck the
+#     next sentence;
+#   p=0.9: target peak below full scale, which is what ATTENUATES the living
+#     room's near-clipping frames;
+#   m=12: max gain ~21.6 dB, the cap that stops a silent porch's noise floor
+#     being amplified into hiss. Raise it and the doorbell gets louder at the
+#     cost of more porch hiss; the value is a first calibration, not measured
+#     truth, and E98 tracks the live verification.
+# The silence the bridge itself writes (rotation fill, sparse-audio top-up) is
+# digital zero, and zero times any gain is zero: normalization cannot turn the
+# E97 cutouts into noise.
+AUDIO_NORMALIZE_FILTER = "dynaudnorm=f=500:g=15:p=0.9:m=12"
 # Bound on the per-session decoded-audio queue in janus_client. Audio arrives in
 # 20 ms frames, so this is ~1s of buffer: enough to ride out an encode hiccup,
 # short enough that a stalled consumer drops audio (and says so) instead of

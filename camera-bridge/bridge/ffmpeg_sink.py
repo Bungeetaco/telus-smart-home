@@ -538,8 +538,10 @@ class FfmpegSink:
                 "-c:a", "aac", "-ac", "1", "-ar", str(audio_rate), "-b:a", "64k",
                 # Fill-and-trim only (async=1 does not stretch), against the
                 # wallclock timestamps both inputs carry: it absorbs the small
-                # drift between "silence written on a sleep schedule" and real time.
-                "-af", "aresample=async=1",
+                # drift between "silence written on a sleep schedule" and real
+                # time. Normalization comes AFTER it in the chain, so gain is
+                # decided on a repaired timeline (see AUDIO_NORMALIZE_FILTER).
+                "-af", "aresample=async=1," + c.AUDIO_NORMALIZE_FILTER,
             ]
 
         # The camera's frame rate is declared with the rawvideo demuxer's own
