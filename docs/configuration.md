@@ -215,6 +215,8 @@ crash-restart guard.
 | `SIP_PORT` | `5060` | The POP's SIP port. |
 | `CALL_ENABLED` | `true` | Master gate for the call feature. Home Assistant manages this live (options flow -> `call_settings.json` + `/control/call/settings`), so the env value is only the bootstrap. |
 | `CALL_MAX_S` | `600` | Hard ceiling on one bridged call, so a forgotten call cannot hold the doorbell session and bill by the minute indefinitely. |
+| `CALL_LIVE_PREBUFFER_MS` | `150` | Jitter-buffer lead for a live bridged call, small and fixed. A live source cannot be buffered ahead, so the clip lead (`TALK_PREBUFFER_MS`) and its adaptive growth would be latency the caller hears. Does not affect clip talkdown. |
+| `CALL_UPLINK_TAP_FRAMES` | `5` | Depth of the decoded-audio tap feeding the call uplink, in 20 ms frames (~100 ms). Keeps the bridge from adding latency on top of the doorbell mic's inherent cloud-relay delay. |
 | `CALL_TONE_SECONDS` | `10` | How long the test call plays its tone after answer. |
 | `CALL_TIMEOUT_S` | `75` | Bound on the whole call attempt including ring time; must outlive a mobile's ~30 s of ring plus the tone. |
 | `AUDIO_NORMALIZE_FILTER` | `dynaudnorm=f=500:g=15:p=0.9:m=12` | Loudness normalization appended to every publisher's audio filter chain, after the `aresample` timestamp repair. One filter for all cameras: it rides gain up for a quiet source (capped at ~21.6 dB so a silent scene's noise floor is not amplified into hiss) and down for frames that would clip. Bridge-written silence is digital zero and stays zero through it. |

@@ -620,7 +620,8 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                           pace: bool = True, timeout_s: float | None = None,
                           renegotiate=None, session_deadline: float | None = None,
                           stop_event: "asyncio.Event | None" = None,
-                          cert_pin: "_CertPin | None" = None) -> dict:
+                          cert_pin: "_CertPin | None" = None,
+                          live: bool = False) -> dict:
     """Play `audio_source` through the doorbell speaker via chunked Digest PUT.
 
     put_url  -- the PutAudioStream endpoint (duae/luae for LAN, puae/uae for WAN)
@@ -681,7 +682,10 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                               # reconnect/renegotiation so the resume offset is
                               # exact even though a stream cannot be rewound
     idx = 0                   # chunks sent overall, drives the pacing schedule
-    lead_ms = float(PREBUFFER_MS)
+    # A live call keeps a small FIXED lead: it cannot be buffered ahead, so the
+    # clip lead and its adaptive growth would be pure latency (see
+    # config.CALL_LIVE_PREBUFFER_MS). A clip keeps the tuned lead.
+    lead_ms = float(c.CALL_LIVE_PREBUFFER_MS if live else PREBUFFER_MS)
     rtts_ms: list = []
     late_chunks = 0
     max_late_ms = 0.0
@@ -717,9 +721,11 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
 
     def _maybe_adapt_lead() -> None:
         """E6, opt-in: raise the jitter-buffer lead to cover the worst observed
-        PUT round trip. One-directional by design -- see config."""
+        PUT round trip. One-directional by design -- see config. NEVER for a
+        live call: growing the lead there is latency the caller hears, and the
+        lead is held small and fixed instead (config.CALL_LIVE_PREBUFFER_MS)."""
         nonlocal lead_ms
-        if not c.TALK_PREBUFFER_ADAPTIVE or not rtts_ms:
+        if live or not c.TALK_PREBUFFER_ADAPTIVE or not rtts_ms:
             return
         window = rtts_ms[-_ADAPT_WINDOW_CHUNKS:]
         want = min(float(c.TALK_PREBUFFER_MAX_MS),

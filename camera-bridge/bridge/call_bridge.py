@@ -133,7 +133,8 @@ class CallBridge:
 
     async def _run(self, camera_id: str, target: str,
                    stop_event: asyncio.Event) -> None:
-        tap = camera_session.subscribe_decoded_audio(camera_id)
+        tap = camera_session.subscribe_decoded_audio(
+            camera_id, maxsize=c.CALL_UPLINK_TAP_FRAMES)
         live_source = talk_fullduplex.LiveMulawSource()
         ulaw_buf = bytearray()
 

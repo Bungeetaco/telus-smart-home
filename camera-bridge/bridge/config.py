@@ -640,6 +640,20 @@ CALL_SETTINGS_PATH = f"{SHARED_DIR}/call_settings.json"
 # doorbell's talk session and pays VoIP.ms by the minute until someone
 # notices; ten minutes is far past any door conversation.
 CALL_MAX_S = float(os.environ.get("CALL_MAX_S", "600"))
+# Jitter-buffer lead for a LIVE bridged call, kept small and fixed. A live
+# source cannot be buffered ahead, so the clip-tuned lead (TALK_PREBUFFER_MS)
+# and especially the adaptive growth (TALK_PREBUFFER_ADAPTIVE) become pure
+# added latency: measured on a real call the adaptive lead grew to 2000 ms,
+# all of it delay. This is the floor a live call pays for jitter and no more.
+# It does NOT address the doorbell PUT endpoint's throughput ceiling -- a
+# separate device-side limit that sheds audio on a real-time feed -- it only
+# stops the bridge adding avoidable latency on top of it.
+CALL_LIVE_PREBUFFER_MS = float(os.environ.get("CALL_LIVE_PREBUFFER_MS", "150"))
+# Decoded-audio tap depth for the call uplink, in 20 ms frames (~100 ms). The
+# doorbell mic already arrives cloud-relayed with seconds of inherent latency
+# (the same path the video takes); a deep tap would only add more. This caps
+# the bridge-side backlog and sheds older frames past it.
+CALL_UPLINK_TAP_FRAMES = int(os.environ.get("CALL_UPLINK_TAP_FRAMES", "5"))
 # Long enough to hear it clearly, short enough that a pocket-answered call
 # costs cents, not minutes.
 CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))

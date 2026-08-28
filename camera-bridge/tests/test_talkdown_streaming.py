@@ -673,6 +673,34 @@ async def test_prebuffer_measurement(tmp):
         await runner.cleanup()
 
 
+async def test_a_live_call_uses_a_small_fixed_lead_and_never_adapts(tmp):
+    """A live call must not pay the clip lead or its adaptive growth as latency.
+
+    On a real bridged call the adaptive lead grew to 2000 ms, all of it delay
+    the caller heard, because a live source cannot be buffered ahead the way a
+    clip can. So live mode holds a small fixed lead and skips adaptation
+    ENTIRELY, even with TALK_PREBUFFER_ADAPTIVE on -- which is exactly when a
+    regression would be silent, since clips would still behave."""
+    src = await _make_clip(f"{tmp}/live.wav", seconds=6)
+    doorbell = Doorbell(latency_s=0.005)
+    runner = await _serve(doorbell, 8793)
+    try:
+        with _Mode(TALK_PREBUFFER_ADAPTIVE=True):
+            result = await tf.stream_talkdown(
+                "http://127.0.0.1:8793/s1", "pw", src, username=USER,
+                codec="mulaw", audio_filter="", pace=True, live=True)
+        assert result["prebuffer_ms"] == c.CALL_LIVE_PREBUFFER_MS, (
+            f"a live call used a {result['prebuffer_ms']}ms lead, not the small "
+            f"fixed {c.CALL_LIVE_PREBUFFER_MS}ms -- the clip lead or its adaptive "
+            "growth is latency the caller hears")
+        assert c.CALL_LIVE_PREBUFFER_MS < c.TALK_PREBUFFER_MS, (
+            "the live lead must be smaller than the clip lead or it saves nothing")
+        print(f"  ok  live call held a fixed {c.CALL_LIVE_PREBUFFER_MS}ms lead "
+              f"with adaptation on (clips use {c.TALK_PREBUFFER_MS}ms)")
+    finally:
+        await runner.cleanup()
+
+
 async def main():
     import tempfile
     failures = 0
@@ -682,7 +710,8 @@ async def main():
                  test_stale_nonce_is_handled_by_the_middleware,
                  test_reconnect_beats_renegotiation, test_cert_pin,
                  test_cert_pin_degrades_without_a_pin,
-                 test_endpoint_selection, test_prebuffer_measurement]
+                 test_endpoint_selection, test_prebuffer_measurement,
+                 test_a_live_call_uses_a_small_fixed_lead_and_never_adapts]
         sync_tests = [test_recovery_classification]
         for test in sync_tests:
             try:

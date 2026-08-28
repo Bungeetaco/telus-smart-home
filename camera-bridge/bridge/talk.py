@@ -680,7 +680,7 @@ class TalkManager:
                     put_url, password, source_obj, username=username,
                     codec="mulaw", audio_filter="", renegotiate=_renegotiate,
                     session_deadline=session_deadline, stop_event=stop_event,
-                    cert_pin=talk_fullduplex.make_cert_pin(kind))
+                    cert_pin=talk_fullduplex.make_cert_pin(kind), live=True)
             finally:
                 try:
                     await asyncio.wait_for(

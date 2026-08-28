@@ -277,12 +277,32 @@ and evidence. Grouped by whether anything can actually be done about them.
   /control/call/settings), the same two-channel pattern as the TELUS
   credentials; nothing is hardcoded in the bridge.
 
+  **LIVE QUALITY, measured on a real call 2026-08-28.** The bridged call
+  connects both ways (answered, `remote_bye`, talkdown streamed 19.7 s), but
+  audio is laggy with dropouts, and the cause is a hardware/cloud ceiling, not
+  the wiring. Two mechanisms, from the call's own result:
+    * Downlink (voice -> speaker) shed ~50% (`downlink_dropped_bytes: 110560`
+      = 13.8 s of a 27.8 s call). The doorbell speaker is an HTTP PUT endpoint
+      and the sends are SEQUENTIAL with round trips up to 1518 ms; while a PUT
+      is in flight the incoming voice backs up past the source buffer and is
+      dropped. This is the endpoint's real-time throughput ceiling -- talkdown
+      was built to play finite clips, which wait out each slow PUT because they
+      hold the whole clip.
+    * Uplink (mic -> caller) is cloud-relayed: the doorbell mic arrives over
+      the same Janus path as the video, with the same inherent multi-second
+      latency. There is no lower-latency path (E55: the doorbell runs no direct
+      media server).
+  Tuned what is tunable (operator's call, "cut the lag I can, accept the
+  rest"): `CALL_LIVE_PREBUFFER_MS = 150` holds a small fixed downlink lead and
+  skips the adaptive growth (which had reached 2000 ms of pure latency on the
+  live call), and `CALL_UPLINK_TAP_FRAMES = 5` shrinks the uplink tap to
+  ~100 ms. This cuts avoidable bridge-added latency; it does NOT fix the PUT
+  throughput ceiling or the cloud-relay uplink delay, which are device/cloud
+  limits. A usable real-time call on this doorbell may not be achievable.
+
   **Milestone 3, open:** trigger from the ring automation (ring, no
   notification action within the loiter window, then call), plus the
-  operator's decided constraints in the automation notes. NOT yet verified
-  live end to end: the tone call (M1) rang and was heard, but a full bridged
-  call -- doorbell mic to phone AND phone voice to doorbell speaker -- has
-  passed its unit suites and not yet been placed against the real doorbell.
+  operator's decided constraints in the automation notes.
 
   Sub-account provisioning is deployment state (gitignored env), deliberately
   not recorded here.
