@@ -73,6 +73,16 @@ DOORBELL_MULAW = bytes.fromhex("7effff7f7efe7ffffffffefefeff7efe") * 10
 # The living room camera's, from the same account on the same day: ordinary
 # varying audio as mu-law rather than near-silence.
 LIVING_ROOM_MULAW = bytes.fromhex("332038a8a9bd2223989e1e289e9f3a1d") * 10
+# G.711 mu-law bytes that libopus ACCEPTS. Both cameras send payloads like this
+# and the acceptance is not hypothetical: on 2026-08-28 the live doorbell sniffed
+# 15 and 16 of 20 packets as Opus across six sessions, while mu-law read 20 of
+# 20 in every one of them. A mu-law payload is any byte string, so nothing stops
+# its first byte being a valid Opus TOC (0x20 is config 4, mono, code 0), and
+# once libopus accepts the TOC it will accept the frame. Decoded as what it is,
+# this payload is 160 samples of 8 kHz mono -- the same shape as every other
+# payload here.
+MULAW_LIBOPUS_ACCEPTS = bytes.fromhex("20fe387e7fa97f20bd7ea9ff7e7f3838") * 10
+
 # An Ogg Opus identification header: TOC byte 0x4f is frame-count code 3, which
 # libopus rejects outright. Not what the cameras send (that is the mu-law above)
 # but a second, differently-shaped reproducer of the same rejection, and unlike
@@ -588,10 +598,55 @@ def test_the_guard_fires_when_the_upstream_shape_changes():
           "an unmodified aiortc")
 
 
+def test_the_accidental_opus_rate_the_live_cameras_actually_produce():
+    """The 2026-08-28 audio outages, in one assertion.
+
+    OPUS_CONFIDENCE was 0.75 and the test is `>=`, so a mu-law stream whose
+    packets libopus accepts 15 times in 20 -- 0.75 exactly -- committed to Opus
+    while mu-law was reading 20 of 20. The comment above the constant asserted
+    that 0.75 sat "far above a mu-law stream's accidental-success rate"; the
+    live rate is 0.75 to 0.80, so the threshold sat ON the collision rather than
+    above it. Six sessions in 24 hours committed wrongly.
+
+    What that costs is not a bad-sounding session. The mis-committed session
+    emits 48 kHz stereo frames into a publisher launched for 8 kHz mono, which
+    trips the format guard, spends the camera's audio-format rebuild budget and
+    drops the camera to VIDEO ONLY for the rest of the process. The living room
+    camera lost audio for 54 minutes this way and got it back only because an
+    unrelated escape hatch restarted the container.
+
+    Both live ratios are asserted, not just the boundary, because 16/20 is the
+    one that proves this is a band rather than an off-by-one at 0.75.
+    """
+    for opus_hits in (15, 16):
+        packets = ([MULAW_LIBOPUS_ACCEPTS] * opus_hits
+                   + [DOORBELL_MULAW] * (SNIFF - opus_hits))
+        assert len(packets) == SNIFF
+        decoder = OpusDecoder()
+        frames = _feed(decoder, packets)
+
+        assert _committed(decoder) == aiortc_opus_patch.PCMU, (
+            f"a mu-law stream libopus accepted {opus_hits} of {SNIFF} times -- "
+            f"while mu-law read all {SNIFF} -- committed to "
+            f"{_committed(decoder)!r}. This is the live doorbell's own rate, so "
+            f"OPUS_CONFIDENCE ({aiortc_opus_patch.OPUS_CONFIDENCE}) is at or "
+            f"below the accidental-success rate rather than above it.")
+
+        shapes = {audio_format_of(f) for _, f in frames}
+        assert shapes == {("s16", 8000, 1)}, (
+            f"at {opus_hits}/{SNIFF} a frame escaped in a shape other than the "
+            f"stream's own 8 kHz mono: {shapes}. A 48 kHz stereo frame is what "
+            f"camera_session sizes the ffmpeg audio input from, and it is what "
+            f"takes the camera to video-only for the rest of the process.")
+    print(f"  ok  a mu-law stream libopus accepts 15 and 16 of {SNIFF} times "
+          f"still commits to mu-law")
+
+
 TESTS = (
     test_a_mulaw_stream_is_decoded_as_mulaw_not_discarded,
     test_a_real_opus_stream_still_commits_to_opus_and_loses_nothing,
     test_no_frame_escapes_in_the_losing_codecs_shape,
+    test_the_accidental_opus_rate_the_live_cameras_actually_produce,
     test_the_counters_account_for_every_packet,
     test_the_codec_is_derivable_from_a_decoded_frames_shape,
     test_a_rejected_packet_is_dropped_not_fatal,

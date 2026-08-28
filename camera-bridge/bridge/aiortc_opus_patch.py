@@ -165,12 +165,40 @@ SNIFF_PACKETS = 20
 # today's behaviour alone: Opus is the advertised codec and the status quo, so
 # it wins ties, wins when nothing decoded at all, and wins whenever libopus is
 # reading most of the stream. Only a stream libopus largely CANNOT read is
-# re-labelled. 0.75 sits far above a mu-law stream's accidental-success rate and
-# far below the 100% a real Opus stream produces, so there is no realistic
-# stream in between; a real Opus feed would have to be losing a quarter of its
-# packets to libopus before this could mistake it, and a feed that damaged has
-# already lost its audio.
-OPUS_CONFIDENCE = 0.75
+# re-labelled.
+#
+# 0.9 IS A MEASURED NUMBER, NOT A MARGIN OF TASTE, and the value it replaces was
+# the second kind. This constant read 0.75 and the comment here asserted that
+# 0.75 sat "far above a mu-law stream's accidental-success rate ... so there is
+# no realistic stream in between". That was an assumption, and the live cameras
+# falsified it. A mu-law payload is any byte string, so nothing stops its first
+# byte being a valid Opus TOC; over 24 hours on 2026-08-28 the two cameras ran
+# 619 sessions, and six of them sniffed 15 or 16 of 20 packets as Opus -- an
+# accidental rate of 0.75 to 0.80, landing ON the threshold rather than under
+# it, since the comparison is `>=`. The other 613 read 20 of 20 as mu-law.
+#
+# So the real gap is between 0.80 (the highest accidental rate observed) and the
+# 1.00 a real Opus stream produces, and 0.9 is the middle of it. A real Opus
+# feed now has to lose a tenth of its packets to libopus before this could
+# mistake it, rather than a quarter -- a smaller cushion than the old comment
+# claimed to have, but a real one, where 0.75's was negative.
+#
+# WHAT A WRONG COMMIT COSTS, because it is not "one session of bad audio" and
+# that is why this number is worth measuring: the session emits 48 kHz stereo
+# frames into a publisher launched for 8 kHz mono, which trips
+# ffmpeg_sink.write_audio's format guard, spends the camera's audio-format
+# rebuild budget in camera_session, and drops that camera to VIDEO ONLY for the
+# rest of the process. On 2026-08-28 the living room camera lost audio for 54
+# minutes that way and recovered only because an unrelated escape hatch
+# restarted the container.
+#
+# The counting rule is NOT the thing to change here, and was tried: requiring
+# `opus_ok >= pcmu_ok` as well as the confidence test looks like the obvious
+# tightening and is wrong, because mu-law decoding accepts very nearly any byte
+# string, so pcmu_ok is ~100% on a REAL Opus stream too. Making that clause a
+# requirement rather than an alternative re-labels genuine Opus feeds; the
+# suite's real-Opus cases catch it.
+OPUS_CONFIDENCE = 0.9
 
 # Throttle for the post-commit discard log. The commit line already says what
 # the session decided, so this only ever fires for packets the CHOSEN decoder
