@@ -91,6 +91,10 @@ STATUS_STREAMING = {
     "audio_consumed": True,
     "decoded_audio_frames": 4800,
     "audio_format": "48000Hz/2ch/s16",
+    # The decoder that produced the frames, present on every bridge that
+    # reports the codec sniff (E80). Consistent with the shape above: aiortc
+    # pins its Opus decoder to 48 kHz stereo, so this fixture's codec is opus.
+    "audio_codec": "opus",
     "dropped_audio_frames": 0,
     # Present on every v1.21.0+ bridge, so the healthy fixture carries them.
     # A bridge that predates them omits both; test_audio_says_why_it_stopped
@@ -394,6 +398,46 @@ def test_audio_says_why_it_stopped_when_the_bridge_dropped_the_pipe():
     print("  ok  audio: a deliberately dropped pipe reports why, not just stalled")
 
 
+def test_audio_codec_rides_along_and_is_never_fabricated():
+    """`audio_codec` names the decoder the camera's frames actually came from
+    ("pcmu"/"opus", from the observed frame -- see docs/control-api.md). It
+    rides along verbatim beside `audio_format`, and on a bridge too old to
+    report it the attribute reads None, the same absent-is-absent rule as
+    `audio_dropped`: a fabricated value would claim a codec decision the
+    bridge never made."""
+    coordinator = make_coordinator()
+    entity = CameraAudioStateSensor(coordinator, CAMERA_ID)
+
+    poll(entity, coordinator, {CAMERA_ID: status(
+        decoded_audio_frames=4800,
+        audio_format="8000Hz/1ch/s16",
+        audio_codec="pcmu",
+    )})
+    attrs = entity.extra_state_attributes
+    assert attrs["audio_codec"] == "pcmu", (
+        "the bridge's observed codec must reach the attribute verbatim"
+    )
+
+    # Null until a frame has decoded, exactly as the bridge reports it.
+    coordinator2 = make_coordinator()
+    entity2 = CameraAudioStateSensor(coordinator2, CAMERA_ID)
+    poll(entity2, coordinator2, {CAMERA_ID: status(
+        decoded_audio_frames=0, audio_format=None, audio_codec=None)})
+    assert entity2.extra_state_attributes["audio_codec"] is None
+
+    # A bridge predating the field omits the key entirely. Absent must read
+    # as absent (None), never as a fabricated codec.
+    older = dict(status(decoded_audio_frames=4800))
+    older.pop("audio_codec")
+    coordinator3 = make_coordinator()
+    entity3 = CameraAudioStateSensor(coordinator3, CAMERA_ID)
+    poll(entity3, coordinator3, {CAMERA_ID: older})
+    assert entity3.extra_state_attributes["audio_codec"] is None, (
+        "an older bridge is unknown, not a guessed codec"
+    )
+    print("  ok  audio: audio_codec rides along verbatim, None when unreported")
+
+
 def test_audio_flowing_then_stalled():
     """The state this entity exists for: a counter that stops moving while every
     other signal stays green."""
@@ -563,6 +607,7 @@ def main():
         test_audio_old_bridge_is_unknown_not_fabricated,
         test_audio_first_poll_is_never_stalled,
         test_audio_says_why_it_stopped_when_the_bridge_dropped_the_pipe,
+        test_audio_codec_rides_along_and_is_never_fabricated,
         test_audio_flowing_then_stalled,
         test_audio_zero_stays_no_audio_yet,
         test_audio_unanswered_poll_is_never_stalled,

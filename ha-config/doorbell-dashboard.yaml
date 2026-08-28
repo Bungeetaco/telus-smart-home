@@ -1,0 +1,111 @@
+# Doorbell panel: a Lovelace VIEW modelled on the TELUS/Alarm.com Android
+# app's doorbell screen. Live view up top, talk controls under it, then the
+# chime and audio settings, then diagnostics.
+#
+# Install: this is one view, not a whole dashboard. Add it to an existing
+# dashboard via the raw configuration editor; see README.md in this directory.
+# (Comments are for the reader of this file; the raw editor stores JSON and
+# will drop them.)
+#
+# Every entity id below was verified against the live entity registry on
+# 2026-08-25. Stock cards only, except where noted: the webrtc-camera card
+# (AlexxIT, v3.6.1) IS installed on this deployment and can replace the
+# picture-glance camera card for sub-second latency; the swap is included as
+# a comment rather than the default so the view stays installable on a stock
+# setup.
+title: Doorbell
+path: doorbell
+icon: mdi:doorbell-video
+cards:
+  # Live view with one-glance chime/privacy state, like the app's header.
+  # camera_view: live streams immediately instead of stills. For sub-second
+  # latency replace this card with the installed custom card:
+  #   type: custom:webrtc-camera
+  #   url: camera.doorbell
+  - type: picture-glance
+    title: Doorbell
+    camera_image: camera.doorbell
+    camera_view: live
+    entities:
+      - entity: switch.doorbell_indoor_chime
+      - entity: switch.doorbell_outdoor_tone
+      - entity: switch.doorbell_privacy_mode
+      - entity: switch.doorbell_status_led
+      - entity: binary_sensor.telus_smart_home_integration_camera_bridge
+
+  # The intercom: the same three canned phrases the phone notification
+  # offers, plus a stop button. telus_smarthome.speak opens a real talkdown
+  # session on the doorbell; stop_speaking is safe to call when nothing is
+  # playing, so the stop button needs no guard.
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: On my way
+        icon: mdi:run-fast
+        tap_action:
+          action: perform-action
+          perform_action: telus_smarthome.speak
+          data:
+            entity_id: camera.doorbell
+            message: Hi! I'll be right with you, just give me a moment.
+            engine: tts.home_assistant_cloud
+      - type: button
+        name: Leave at door
+        icon: mdi:package-variant-closed
+        tap_action:
+          action: perform-action
+          perform_action: telus_smarthome.speak
+          data:
+            entity_id: camera.doorbell
+            message: Please leave it at the door. Thank you!
+            engine: tts.home_assistant_cloud
+      - type: button
+        name: Can't come now
+        icon: mdi:door-closed
+        tap_action:
+          action: perform-action
+          perform_action: telus_smarthome.speak
+          data:
+            entity_id: camera.doorbell
+            message: >-
+              Sorry, I can't come to the door right now. Please try again
+              later.
+            engine: tts.home_assistant_cloud
+      - type: button
+        name: Stop
+        icon: mdi:stop-circle-outline
+        tap_action:
+          action: perform-action
+          perform_action: telus_smarthome.stop_speaking
+          data:
+            entity_id: camera.doorbell
+
+  # Chime and audio settings, the app's "Doorbell settings" block.
+  - type: entities
+    title: Chime and audio
+    entities:
+      - entity: switch.doorbell_indoor_chime
+      - entity: switch.doorbell_outdoor_tone
+      - entity: select.doorbell_wired_chime_type
+      - entity: number.doorbell_speaker_volume
+
+  # Recent doorbell activity plus this package's notification mute.
+  - type: entities
+    title: Activity
+    entities:
+      - entity: event.doorbell_button_press
+      - entity: event.doorbell_recent_activity
+      - entity: input_boolean.telus_doorbell_notifications_muted
+
+  # Stream-health diagnostics from the camera bridge, plus the camera's own
+  # signal and status. Audio state is the one to watch after changing
+  # anything about talkdown or audio: a doorbell publishing silence reads
+  # `stalled` here while every other signal stays green.
+  - type: entities
+    title: Diagnostics
+    entities:
+      - entity: sensor.doorbell_audio_state
+      - entity: sensor.doorbell_stream_state
+      - entity: sensor.doorbell_dropped_frames
+      - entity: sensor.doorbell_signal_strength
+      - entity: sensor.doorbell_camera_status

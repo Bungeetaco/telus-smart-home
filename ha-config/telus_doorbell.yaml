@@ -1,0 +1,321 @@
+# TELUS doorbell intercom package.
+#
+# An actionable-notification intercom for the TELUS doorbell: the phone gets a
+# notification with a snapshot when someone rings (or stands at the door
+# without ringing), and three quick-reply buttons that speak through the
+# doorbell's own speaker via the integration's `telus_smarthome.speak`
+# talkdown service.
+#
+# DESIGN CONSTRAINT, settled by the operator: nothing here speaks, plays a
+# deterrent, or escalates on its own. Every spoken phrase is the direct result
+# of a human tapping a button. Do not "improve" this with automatic talkdown.
+#
+# Install: this is a Home Assistant package. See README.md in this directory
+# for how to wire `homeassistant: packages:` (this deployment does not have
+# packages configured yet) and for every entity id's provenance.
+#
+# Latency, stated honestly: `event.doorbell_button_press` is fed by the
+# integration's polled Activity feed (30 s poll interval, on top of TELUS's
+# own feed latency), so the press notification lands tens of seconds after
+# the physical press. The Frigate zone path (automation b) is sub-second and
+# is what fires first for a visitor who walks up; the press event is the
+# authoritative "they rang the bell" signal, not the fast one.
+
+input_boolean:
+  # Master mute for the PHONE NOTIFICATIONS in this package only. Speaking on
+  # tap is always allowed (a tap is an explicit human action; muting it would
+  # only break the intercom), and nothing else in the house is affected.
+  # No `initial:` on purpose: it would override the restored state on every
+  # restart and silently unmute (same reasoning as the live
+  # input_boolean.doorbell_detection_box).
+  telus_doorbell_notifications_muted:
+    name: Doorbell phone notifications muted
+    icon: mdi:bell-off
+
+template:
+  # "Is a person standing at the doorstep RIGHT NOW?", from Frigate's events
+  # topic, filtered to the DOORBELL camera.
+  #
+  # Deliberately NOT the frigate/front_door/person zone-occupancy topic: the
+  # living_room camera also defines a zone named front_door (the interior side
+  # of the same door), and Frigate merges same-named zones across cameras into
+  # one occupancy count, so that topic reads "someone is inside the house near
+  # the door" as "someone is at the doorstep". Filtering frigate/events on
+  # after.camera == 'doorbell' cannot be fooled that way.
+  #
+  # ON: a tracked person is credited to the doorbell camera's front_door zone
+  #     (entered_zones transition, the same test the live template sensors
+  #     use; loitering_time 5 means zone credit already implies 5 continuous
+  #     seconds standing at the door).
+  # OFF: that tracked object ends, or an update shows the zone is no longer in
+  #     current_zones. `current_zones` read with a default so a payload
+  #     without it turns the sensor off (skipping the follow-up) rather than
+  #     erroring or latching on.
+  # auto_off is a 10 minute failsafe against a missed `end` (Frigate restart
+  # mid-event); it cannot mask a real visitor inside the 15 s follow-up
+  # window this sensor exists for.
+  - trigger:
+      - platform: mqtt
+        topic: frigate/events
+    condition:
+      - condition: template
+        value_template: >-
+          {{ trigger.payload_json is defined
+             and trigger.payload_json.after is defined
+             and trigger.payload_json.after.camera == 'doorbell'
+             and trigger.payload_json.after.label == 'person' }}
+    binary_sensor:
+      - name: TELUS doorbell person at door
+        unique_id: telus_doorbell_person_at_door
+        state: >-
+          {{ trigger.payload_json.type != 'end'
+             and 'front_door' in
+                 trigger.payload_json.after.get('current_zones', []) }}
+        auto_off: "00:10:00"
+
+automation:
+  # (a) Doorbell press: actionable notification with a live snapshot and the
+  # three canned replies. Each reply id is namespaced TELUS_DB_* so the action
+  # handler below cannot collide with any other actionable notification in
+  # this deployment.
+  - id: telus_doorbell_press_notification
+    alias: telus_doorbell_press_notification
+    description: >-
+      Actionable phone notification on a doorbell button press. The snapshot
+      is a live camera_proxy grab (relative URL, resolved and authenticated by
+      the companion app) rather than a Frigate best-frame: the Frigate
+      integration is not installed on this deployment (MQTT only), so the
+      /api/frigate/notifications snapshot path does not exist, and Frigate's
+      best frame is only finalised at event end, long after this should fire.
+    triggers:
+      - trigger: state
+        entity_id: event.doorbell_button_press
+        not_to:
+          - unknown
+          - unavailable
+    conditions:
+      # A real press is a state change from a previous real state (or from
+      # unknown: the entity starts at unknown every HA start and does not
+      # restore, so unknown -> timestamp IS the first press after a restart).
+      # from_state None is entity creation, not a press.
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: state
+        entity_id: input_boolean.telus_doorbell_notifications_muted
+        state: "off"
+    actions:
+      - action: notify.mobile_app_cph2655
+        data:
+          title: Doorbell
+          # The press event trails the physical press by the polled-feed
+          # latency (see the header comment); the message says "rang", not
+          # "is ringing", on purpose.
+          message: Someone rang the doorbell.
+          data:
+            # One shared tag across (a), (b) and (c): the phone shows at most
+            # one current doorbell notification, and a press replaces the
+            # earlier "someone is at the door" for the same visit instead of
+            # stacking on it.
+            tag: telus_doorbell
+            channel: Doorbell
+            notification_icon: mdi:doorbell-video
+            # Companion app resolves relative URLs against the HA server and
+            # authenticates them, so no hostname lives in this file.
+            image: /api/camera_proxy/camera.doorbell
+            # Actions go stale: auto-dismiss after 10 minutes.
+            timeout: 600
+            actions:
+              - action: TELUS_DB_ONMYWAY
+                title: On my way
+              - action: TELUS_DB_LEAVEIT
+                title: Leave it at the door
+              - action: TELUS_DB_CANTCOME
+                title: Can't come now
+    # single: one press = one notification; a second press while this run is
+    # still delivering is the same visitor leaning on the button.
+    mode: single
+    max_exceeded: silent
+
+  # (b) Genuine visitor without a press: Frigate credits the doorbell
+  # camera's front_door zone (loitering_time 5, so zone credit already means
+  # someone stood at the door for 5 continuous seconds; walkway traffic never
+  # enters the zone). Same actions as (a).
+  - id: telus_doorbell_visitor_notification
+    alias: telus_doorbell_visitor_notification
+    description: >-
+      Actionable phone notification when someone stands at the door without
+      ringing. Triggers on the zone-entry transition on frigate/events, the
+      same test the deployment's frigate_doorbell_person template sensors use.
+      Deduplicated against (a): if a press event fired within the preceding
+      20 s, skip. In practice the press event trails Frigate by tens of
+      seconds (polled feed), so the commoner overlap is (a) arriving AFTER
+      this one; the shared notification tag makes that a replacement on the
+      phone, not a second buzz with a second card.
+    triggers:
+      - trigger: mqtt
+        topic: frigate/events
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.payload_json is defined
+             and trigger.payload_json.after is defined
+             and trigger.payload_json.after.camera == 'doorbell'
+             and trigger.payload_json.after.label == 'person'
+             and 'front_door' in trigger.payload_json.after.entered_zones
+             and 'front_door' not in
+                 trigger.payload_json.get('before', {}).get('entered_zones', []) }}
+      # Dedup against (a): a press within the preceding ~20 s already produced
+      # the actionable notification for this visit.
+      - condition: template
+        value_template: >-
+          {{ states.event.doorbell_button_press is none
+             or states.event.doorbell_button_press.state
+                  in ['unknown', 'unavailable']
+             or (now() - states.event.doorbell_button_press.last_changed)
+                  .total_seconds() > 20 }}
+      - condition: state
+        entity_id: input_boolean.telus_doorbell_notifications_muted
+        state: "off"
+    actions:
+      - action: notify.mobile_app_cph2655
+        data:
+          title: Doorbell
+          message: Someone is at the front door (no ring).
+          data:
+            tag: telus_doorbell
+            channel: Doorbell
+            notification_icon: mdi:motion-sensor
+            image: /api/camera_proxy/camera.doorbell
+            timeout: 600
+            actions:
+              - action: TELUS_DB_ONMYWAY
+                title: On my way
+              - action: TELUS_DB_LEAVEIT
+                title: Leave it at the door
+              - action: TELUS_DB_CANTCOME
+                title: Can't come now
+    # single: the zone-entry transition fires once per tracked person, and two
+    # people arriving together are one doorstep moment; a queued second
+    # notification would just buzz twice for it.
+    mode: single
+    max_exceeded: silent
+
+  # (c) Still there 15 s after the press: ONE follow-up notification.
+  #
+  # PLACEHOLDER for the future call-my-phone feature: when that lands, this
+  # automation's action becomes the call; until then it is deliberately a
+  # notification and nothing more (no deterrent, no automatic speech, per the
+  # operator's constraint). The 15 s runs from the press EVENT, which itself
+  # trails the physical press by the polled-feed latency, so "still there" is
+  # really 45 to 75 s after the finger left the button. A visitor still at
+  # the door then is genuinely waiting.
+  - id: telus_doorbell_still_there_followup
+    alias: telus_doorbell_still_there_followup
+    description: >-
+      15 s after a doorbell press event, if Frigate still shows a person in
+      the doorbell camera's front_door zone, send one follow-up notification.
+    triggers:
+      - trigger: state
+        entity_id: event.doorbell_button_press
+        not_to:
+          - unknown
+          - unavailable
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+    actions:
+      - delay: "00:00:15"
+      - condition: state
+        entity_id: binary_sensor.telus_doorbell_person_at_door
+        state: "on"
+      # The mute gate is checked HERE, after the delay, so flipping the mute
+      # on during the window silences the follow-up too.
+      - condition: state
+        entity_id: input_boolean.telus_doorbell_notifications_muted
+        state: "off"
+      - action: notify.mobile_app_cph2655
+        data:
+          title: Doorbell
+          message: The visitor is still waiting at the door.
+          data:
+            tag: telus_doorbell
+            channel: Doorbell
+            notification_icon: mdi:account-clock
+            image: /api/camera_proxy/camera.doorbell
+            timeout: 600
+            actions:
+              - action: TELUS_DB_ONMYWAY
+                title: On my way
+              - action: TELUS_DB_LEAVEIT
+                title: Leave it at the door
+              - action: TELUS_DB_CANTCOME
+                title: Can't come now
+    # single + silent: exactly ONE follow-up per visit. A re-press during the
+    # 15 s window must not queue a second follow-up.
+    mode: single
+    max_exceeded: silent
+
+  # The intercom itself: a tapped notification action speaks through the
+  # doorbell. This is the only automation in the package that makes sound at
+  # the door, and it only ever runs off a human tap.
+  - id: telus_doorbell_speak_on_action
+    alias: telus_doorbell_speak_on_action
+    description: >-
+      Speak the canned phrase matching the tapped notification action through
+      the doorbell speaker via telus_smarthome.speak. Never gated on the mute
+      toggle: the tap is an explicit human action.
+    triggers:
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: TELUS_DB_ONMYWAY
+        id: onmyway
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: TELUS_DB_LEAVEIT
+        id: leaveit
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: TELUS_DB_CANTCOME
+        id: cantcome
+    conditions: []
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: onmyway
+            sequence:
+              - action: telus_smarthome.speak
+                data:
+                  entity_id: camera.doorbell
+                  message: Hi! I'll be right with you, just give me a moment.
+                  # Nabu Casa cloud voice (active on this deployment); swap to
+                  # tts.google_translate_en_com if cloud TTS is ever dropped.
+                  engine: tts.home_assistant_cloud
+          - conditions:
+              - condition: trigger
+                id: leaveit
+            sequence:
+              - action: telus_smarthome.speak
+                data:
+                  entity_id: camera.doorbell
+                  message: Please leave it at the door. Thank you!
+                  engine: tts.home_assistant_cloud
+          - conditions:
+              - condition: trigger
+                id: cantcome
+            sequence:
+              - action: telus_smarthome.speak
+                data:
+                  entity_id: camera.doorbell
+                  message: >-
+                    Sorry, I can't come to the door right now. Please try
+                    again later.
+                  engine: tts.home_assistant_cloud
+    # queued: two deliberate taps are two deliberate utterances and must both
+    # be spoken, in order; max 3 bounds a tap storm to the three phrases.
+    mode: queued
+    max: 3
+    max_exceeded: silent

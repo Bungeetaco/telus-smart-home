@@ -1337,9 +1337,13 @@ caught is exactly a counter that quietly stops. Comparing across polls turns
 not lost; they ride along as attributes: `audio_consumed`,
 `decoded_audio_frames`, `decoded_audio_frames_last_poll` (the delta),
 `audio_format` (`null` until a frame has genuinely decoded; a value here is
-proof audio decoded at least once), `dropped_audio_frames`, `last_audio_at`
-(when this poller last saw the counter move; empty until it does, and reset by a
-Home Assistant restart), and `audio_dropped` / `audio_dropped_reason`.
+proof audio decoded at least once), `audio_codec` (which decoder those frames
+came from, `pcmu` or `opus`, the bridge's per-session verdict on the codec the
+camera really sends; `null` until a frame has decoded, and `null` on a bridge
+too old to report it, never a fabricated value), `dropped_audio_frames`,
+`last_audio_at` (when this poller last saw the counter move; empty until it
+does, and reset by a Home Assistant restart), and `audio_dropped` /
+`audio_dropped_reason`.
 
 Those last two say **why** audio stopped. The bridge drops a wedged audio pipe
 deliberately and keeps publishing video rather than restarting the encoder, so
@@ -1369,10 +1373,12 @@ a counter against itself, so a stream decoding a few frames a second reads
 `flowing` exactly like one decoding the ~50/s that 20 ms audio frames imply.
 That difference is audible (fragments of speech separated by silence fill) and
 was real on this account, where the audio track advertised as Opus turned out to
-carry G.711 mu-law. The bridge answers it directly, and the integration does not
-surface it: read `audio_codec` and the process-wide `audio_decoder` counters on
-[`/control/status`](control-api.md#get-controlstatus), or watch
-`decoded_audio_frames` move by ~1500 across a 30 s poll rather than by tens.
+carry G.711 mu-law. The `audio_codec` attribute carries the bridge's verdict on
+which codec is really arriving; for the discard fraction behind it, read the
+process-wide `audio_decoder` counters on
+[`/control/status`](control-api.md#get-controlstatus) (which the integration
+does not surface), or watch `decoded_audio_frames` move by ~1500 across a 30 s
+poll rather than by tens.
 
 Nor whether the audio is on the **published stream** yet. `decoded_audio_frames`
 counts what the bridge decodes, and a publisher that came up video-only (which

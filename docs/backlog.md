@@ -37,10 +37,13 @@ and evidence. Grouped by whether anything can actually be done about them.
   run through multi-hour soaks across many rotations with no publisher loss.
   The remaining audio-attributable residual (~14 drops per rotation at the
   handover) is E76's, not this entry's.
-- **E66** (open): the integration now has a test harness (E63), but it covers
-  three modules. The config flow, the three services, the settings-backed
-  platforms and every setup/teardown path are still verified by reading and
-  `py_compile` alone.
+- **E88** (open) - E76's mechanism is measured (the frame hold dies ~60 ms into
+  some doorbell handovers, the lead goes seconds negative, and the bounded
+  repayment holds ffmpeg off the video pipe); the fix is not written, and two
+  anomalies in the trace itself must be settled with it.
+- **E87** (DONE, with a caveat) - the integration harness now covers eleven
+  modules, but the systematic fail-first campaign was not run; three hand-driven
+  mutations were caught, the rest are spot-checked only.
 - **E71** (open): E64's adaptive frame rate has never been watched reacting to
   a real resolution change live. A five-minute operator check; the procedure,
   now fully readable from `/control/status`, is in the entry.
@@ -2467,7 +2470,11 @@ entries are the mechanism that keeps it under review
 
   **Deferred, recorded rather than lost:**
 
-    * **The Home Assistant integration does not surface `audio_codec`.** The
+    * **`audio_codec` is surfaced by the Home Assistant integration** as an
+    attribute on each camera's Audio state sensor, passed through verbatim
+    (null until a frame decodes, null on a bridge too old to report it, pinned
+    by a test). Still open: `flowing` compares the counter against itself, so a
+    fragment stream reads `flowing` exactly like a whole one.
       `Audio state` sensor (E61) carries `audio_format` as an attribute but not
       the codec, and its `flowing` state compares a counter against itself, so a
       fragment stream reads `flowing` exactly like a whole one. Adding the
@@ -2854,3 +2861,57 @@ entries are the mechanism that keeps it under review
   that jemalloc handles the churn. Worth checking whether aiortc's
   RemoteBitrateEstimator ever prunes its buckets, and filing upstream if not.
   Not load-bearing for this deployment.
+
+
+- **E87 (DONE) The integration test harness now covers eleven modules.** E66
+  left it at three. Added: the config flow (user and reconfigure paths, error
+  mapping), the speak/bypass/unpair services, the settings-backed number, select
+  and switch platforms, the arming-device entities, the connectivity binary
+  sensor, and the setup/unload/reload lifecycle, plus a shared `tests/fakes.py`.
+  Eleven suites, all green, and CI picks up new `tests/test_*.py` automatically.
+
+  **Recorded because it is a real gap, not a footnote: the systematic fail-first
+  campaign was NOT run.** The agent building these suites was terminated by a
+  credit limit at exactly the point it announced the mutation pass. Three
+  mutations were then driven by hand against real source and all three were
+  caught with precise messages: the config flow's `invalid_auth` mapping
+  remapped to `unknown`, the speak service's 413 mapping broken, and the
+  connectivity sensor forced permanently unavailable. A fourth attempt proved
+  nothing and was discarded, because the mutation never applied (it targeted a
+  `raise` in a module that maps errors by assignment) which is the same
+  verify-the-mutation-applied trap recorded in E72 and hit twice this week.
+
+  So these suites are **spot-checked, not exhaustively proven**. The remaining
+  work is a full mutation pass over the eight new files, and until that happens
+  any of them may contain an assertion that cannot fail.
+
+- **E88 (open) E76's mechanism is measured; the fix is not written.** Ten
+  steady-state handover records from the live doorbell and living room split
+  cleanly into two populations. When the frame hold runs properly
+  (`silence_writes` 13 to 41, `video_writes` 11 to 26, `max_gap_ms` 51 to 56)
+  the muxer lead stays between +1899 ms and -922 ms and drops are 0 to 9. When
+  it dies about 60 ms in (`silence_writes=2, video_writes=1` across a 2 to 3
+  second window, though `hold_stopped` is not marked until 1.9 to 3.0 s later)
+  the lead falls to -1721 to -2905 ms and drops are 6 to 19. Three of five
+  doorbell rotations show the early death; zero of five living-room rotations
+  do.
+
+  Every drop timestamp lands in the window after the new pump starts, at frame
+  interval cadence, which is the bounded silence repayment
+  (`_AUDIO_SILENCE_MAX_BURST_S` 0.1 per top-up at 0.05 cadence, about 2x real
+  time) holding ffmpeg off the video pipe until a multi-second deficit clears.
+  Drop count tracks deficit size.
+
+  **Two anomalies in the instrument itself, to be settled before trusting it
+  further:** `worst_gap` is always `connected->batch_collected` with `adv=0.0`
+  even on rotations where the hold demonstrably wrote 38 silences inside that
+  window, and one record reports `lead_min` of +1899 ms, far above the 100 ms
+  prime that `write_silence_to`'s wallclock tracking should permit. Either the
+  trace derives audio advance from a source that misses hold writes, or the hold
+  writes somewhere other than assumed. A misleading instrument is worse than
+  none, so this is part of the fix, not a separate cleanup.
+
+  Not attempted yet: why the hold exits early, and whether a multi-second
+  deficit should be repaid at 2x real time at all rather than rebasing the audio
+  origin on pump start (dead air nobody hears, against a permanent A/V offset
+  from a partial repayment).
