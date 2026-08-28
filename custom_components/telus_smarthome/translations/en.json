@@ -75,6 +75,22 @@
         },
         "description": "Set arming behavior for each arming mode.",
         "title": "Arming Mode Profiles"
+      },
+      "call": {
+        "title": "Doorbell Call",
+        "description": "Ring-to-phone: the camera bridge can call your phone and connect the call to the doorbell's microphone and speaker. Needs a VoIP.ms sub-account; settings are pushed to the camera bridge and survive its restarts.",
+        "data": {
+          "call_enabled": "Enable doorbell calls",
+          "call_sip_server": "VoIP.ms POP hostname",
+          "call_sip_account": "SIP sub-account",
+          "call_sip_password": "SIP password",
+          "call_did": "Caller ID number (your DID)",
+          "call_target": "Phone number to call"
+        },
+        "data_description": {
+          "call_sip_server": "For example montreal10.voip.ms -- the POP your sub-account is registered against.",
+          "call_target": "The number the doorbell dials, in E.164 form (+1...)."
+        }
       }
     }
   },

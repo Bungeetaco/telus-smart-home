@@ -37,6 +37,7 @@ handler never assigns the read-only config_entry property), and the
 fallback-file writer's mode, atomicity and never-raise contract.
 """
 import asyncio
+import json
 import pathlib
 import sys
 import tempfile
@@ -72,7 +73,8 @@ from pyalarmdotcomajax.exceptions import (  # noqa: E402
 )
 
 from custom_components.telus_smarthome import config_flow  # noqa: E402
-from custom_components.telus_smarthome.const import (  # noqa: E402
+from custom_components.telus_smarthome.const import (
+    CONF_CALL_ENABLED,  # noqa: E402
     CONF_2FA_COOKIE,
     CONF_ARM_CODE,
     CONF_CLIP_LINK_SECRET,
@@ -425,6 +427,7 @@ async def test_reconfigure_maps_errors_and_merges_on_success():
 async def test_options_flow_clears_code_and_merges():
     entry = FakeConfigEntry(options={**CONF_OPTIONS_DEFAULT, CONF_ARM_CODE: "1234"})
     handler = config_flow.ADCOptionsFlowHandler(entry)
+    handler.hass = FakeHass()
     assert "config_entry" not in vars(handler), (
         "the options handler assigned self.config_entry -- that is a read-only "
         "property on current HA core and broke the gear icon entirely")
@@ -436,6 +439,16 @@ async def test_options_flow_clears_code_and_merges():
         CONF_WEBSOCKET_RECONNECT_TIMEOUT: 60})
     assert result["type"] == "form" and result["step_id"] == "modes"
     result = await handler.async_step_modes({"arm_home_options": ["arming_option_bypass"]})
+    # Modes is no longer the last step: it advances to the doorbell-call step,
+    # which is where the entry is created.
+    assert result["type"] == "form" and result["step_id"] == "call", (
+        f"modes must lead to the call step, got {result!r}")
+    with tempfile.TemporaryDirectory() as tmp:
+        saved = fakes.patch(config_flow, CAMERA_BRIDGE_SHARE_DIR=str(tmp))
+        try:
+            result = await handler.async_step_call({CONF_CALL_ENABLED: False})
+        finally:
+            fakes.restore(config_flow, saved)
     assert result["type"] == "create_entry", f"expected saved options, got {result!r}"
     assert result["data"][CONF_ARM_CODE] == "", (
         "the documented CLEAR! sentinel must empty the arm code -- there is no "
@@ -444,6 +457,73 @@ async def test_options_flow_clears_code_and_merges():
     assert result["data"]["arm_home_options"] == ["arming_option_bypass"]
     assert result["data"]["arm_away_options"] == [], (
         "options from the entry that the user did not touch must survive the save")
+
+
+async def test_call_settings_step_writes_the_fallback_and_pushes():
+    """The doorbell-call options step must behave like the credential push:
+    write the shared-dir fallback (so a restarted bridge still gets it) AND
+    live-push /control/call/settings, with the SIP password never leaving the
+    two channels the bridge reads. A bridge that is down must not fail the
+    save."""
+    entry = FakeConfigEntry(options={**CONF_OPTIONS_DEFAULT})
+    handler = config_flow.ADCOptionsFlowHandler(entry)
+    handler.hass = FakeHass()
+    with tempfile.TemporaryDirectory() as tmp:
+        share = pathlib.Path(tmp)
+        (share / "control_secret").write_text("bridge-secret\n")
+        session = FakeSession([FakeResponse(200, {"status": "applied"})])
+        saved = fakes.patch(
+            config_flow, CAMERA_BRIDGE_SHARE_DIR=str(share),
+            async_get_clientsession=fakes.clientsession_for(session))
+        try:
+            result = await handler.async_step_call({
+                CONF_CALL_ENABLED: True,
+                "call_sip_server": " montreal10.voip.ms ",
+                "call_sip_account": "215317_doorbell",
+                "call_sip_password": "s3cret-sip",
+                "call_did": "8190000000",
+                "call_target": "+18195551234",
+            })
+        finally:
+            fakes.restore(config_flow, saved)
+        assert result["type"] == "create_entry", result
+        # Fallback file written, private, and shape-correct.
+        written = json.loads((share / "call_settings.json").read_text())
+        assert written["enabled"] is True
+        assert written["sip_server"] == "montreal10.voip.ms", "not stripped"
+        assert written["sip_password"] == "s3cret-sip"
+        assert "updated_at" in written
+        mode = (share / "call_settings.json").stat().st_mode & 0o777
+        assert mode == 0o600, f"call settings not private: {mode:o}"
+        # Pushed with the bearer secret.
+        assert session.requests, "the settings were never pushed to the bridge"
+        req = session.requests[-1]
+        assert req["headers"]["Authorization"] == "Bearer bridge-secret"
+        assert req["json"]["sip_account"] == "215317_doorbell"
+    print("  ok  call step wrote the private fallback and pushed with the secret")
+
+
+async def test_call_settings_step_survives_an_unreachable_bridge():
+    entry = FakeConfigEntry(options={**CONF_OPTIONS_DEFAULT})
+    handler = config_flow.ADCOptionsFlowHandler(entry)
+    handler.hass = FakeHass()
+    with tempfile.TemporaryDirectory() as tmp:
+        share = pathlib.Path(tmp)
+        (share / "control_secret").write_text("bridge-secret\n")
+        session = FakeSession([aiohttp.ClientError("bridge down")])
+        saved = fakes.patch(
+            config_flow, CAMERA_BRIDGE_SHARE_DIR=str(share),
+            async_get_clientsession=fakes.clientsession_for(session))
+        try:
+            result = await handler.async_step_call({CONF_CALL_ENABLED: True})
+        finally:
+            fakes.restore(config_flow, saved)
+        assert result["type"] == "create_entry", (
+            "an unreachable bridge failed the options save; the fallback file is "
+            "written, so the save must still succeed")
+        assert (share / "call_settings.json").exists(), (
+            "the fallback file must be written even when the push fails")
+    print("  ok  call step survives an unreachable bridge")
 
 
 async def test_fallback_file_is_private_and_atomic():
@@ -545,6 +625,8 @@ TESTS = (
     test_duplicate_account_aborts,
     test_reconfigure_maps_errors_and_merges_on_success,
     test_options_flow_clears_code_and_merges,
+    test_call_settings_step_writes_the_fallback_and_pushes,
+    test_call_settings_step_survives_an_unreachable_bridge,
     test_fallback_file_is_private_and_atomic,
     test_fallback_write_failure_never_raises,
     test_credential_push_reaches_the_bridge_with_the_secret,

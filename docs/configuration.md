@@ -213,6 +213,8 @@ crash-restart guard.
 | `VOIPMS_DID` | (empty) | Caller ID number presented on outbound calls. |
 | `DOORBELL_CALL_TARGET` | (empty) | Default number the call leg dials when a request supplies no target. |
 | `SIP_PORT` | `5060` | The POP's SIP port. |
+| `CALL_ENABLED` | `true` | Master gate for the call feature. Home Assistant manages this live (options flow -> `call_settings.json` + `/control/call/settings`), so the env value is only the bootstrap. |
+| `CALL_MAX_S` | `600` | Hard ceiling on one bridged call, so a forgotten call cannot hold the doorbell session and bill by the minute indefinitely. |
 | `CALL_TONE_SECONDS` | `10` | How long the test call plays its tone after answer. |
 | `CALL_TIMEOUT_S` | `75` | Bound on the whole call attempt including ring time; must outlive a mobile's ~30 s of ring plus the tone. |
 | `AUDIO_NORMALIZE_FILTER` | `dynaudnorm=f=500:g=15:p=0.9:m=12` | Loudness normalization appended to every publisher's audio filter chain, after the `aresample` timestamp repair. One filter for all cameras: it rides gain up for a quiet source (capped at ~21.6 dB so a silent scene's noise floor is not amplified into hiss) and down for frames that would clip. Bridge-written silence is digital zero and stays zero through it. |

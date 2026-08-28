@@ -573,6 +573,7 @@ from . import config as c
 from . import metrics
 from . import talk as talk_mod
 from . import talk_fullduplex
+from . import call_bridge
 from . import sip_call
 from .mobile_auth import mint_if_stale
 # _jget/_json_bool are module-private in mws_client and imported anyway, on
@@ -1165,6 +1166,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         # camera's own "audio_codec".
         return web.json_response({"cameras": camera_status,
                                   "talk": metrics.talk.summary(),
+                                  "call": call_bridge_mgr.status(),
                                   "audio_decoder": aiortc_opus_patch.decode_stats()})
 
     async def handle_metrics(request: web.Request) -> web.Response:
@@ -2446,18 +2448,84 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app[APP_CURRENT_SECRET] = current_secret
 
     # One call at a time: the leg holds a real phone call and a second
-    # concurrent INVITE from the same sub-account helps nobody.
+    # concurrent INVITE from the same sub-account helps nobody. The lock
+    # covers the tone test; the bridge below enforces the same rule for
+    # live calls (and the two also exclude each other via _call_busy()).
     call_lock = asyncio.Lock()
+    call_bridge_mgr = call_bridge.CallBridge(talk_manager)
+
+    def _call_ready() -> web.Response | None:
+        if not c.CALL_ENABLED:
+            return web.json_response({"error": "call_disabled"}, status=403)
+        if not (c.VOIPMS_SIP_SERVER and c.VOIPMS_SIP_ACCOUNT
+                and c.VOIPMS_SIP_PASSWORD):
+            return web.json_response({"error": "call_disabled"}, status=403)
+        return None
+
+    def _call_busy() -> bool:
+        return call_lock.locked() or call_bridge_mgr.active
+
+    async def handle_call_doorbell(request: web.Request) -> web.Response:
+        """Start a LIVE bridged call: doorbell mic to the phone, phone voice
+        to the doorbell speaker. Returns immediately; progress is the "call"
+        section of /control/status, and /control/call/stop ends it."""
+        if (err := _check_auth(request)) is not None:
+            return err
+        if (err := _call_ready()) is not None:
+            return err
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            return web.json_response({"error": "malformed"}, status=400)
+        camera_id = (body.get("camera_id") or "").strip()
+        target = (body.get("target") or "").strip() or c.DOORBELL_CALL_TARGET
+        if not camera_id or camera_id not in camera_registry:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+        if not target:
+            return web.json_response({"error": "no_target"}, status=400)
+        if _call_busy():
+            return web.json_response({"error": "call_in_progress"}, status=409)
+        result = await call_bridge_mgr.start(camera_id, target)
+        if "error" in result:
+            status = 409 if result["error"] == "call_in_progress" else 403
+            return web.json_response(result, status=status)
+        log.info("Control endpoint: live doorbell call started for %s", camera_id)
+        return web.json_response(result)
+
+    async def handle_call_stop(request: web.Request) -> web.Response:
+        if (err := _check_auth(request)) is not None:
+            return err
+        stopped = call_bridge_mgr.stop()
+        return web.json_response({"stopped": stopped})
+
+    async def handle_call_settings(request: web.Request) -> web.Response:
+        """Live-apply the HA-managed call settings, mirroring
+        /control/credentials: HA writes call_settings.json to the shared dir
+        first (the restart-surviving copy), then pushes the same payload here
+        (the no-restart apply). Empty strings clear a value; a missing key
+        leaves the current value alone, so a toggle-only push cannot wipe the
+        credentials."""
+        if (err := _check_auth(request)) is not None:
+            return err
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("not an object")
+        except Exception:
+            log.warning("Control endpoint: malformed call-settings push", exc_info=True)
+            return web.json_response({"error": "malformed"}, status=400)
+        applied = call_bridge.apply_settings(body)
+        log.info("Control endpoint: call settings applied (%s)", applied)
+        return web.json_response({"status": "applied", "fields": applied})
 
     async def handle_call_test(request: web.Request) -> web.Response:
         if (err := _check_auth(request)) is not None:
             return err
         # Ships inert: the endpoint exists only when a deployment has provided
-        # the sub-account (see config's VoIP.ms section), same pattern as
-        # talkdown's enable flag.
-        if not (c.VOIPMS_SIP_SERVER and c.VOIPMS_SIP_ACCOUNT
-                and c.VOIPMS_SIP_PASSWORD):
-            return web.json_response({"error": "call_disabled"}, status=403)
+        # the sub-account and left the feature enabled (HA-managed), same
+        # pattern as talkdown's enable flag.
+        if (err := _call_ready()) is not None:
+            return err
         try:
             body = await request.json() if request.can_read_body else {}
         except Exception:
@@ -2465,7 +2533,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         target = (body.get("target") or "").strip() or c.DOORBELL_CALL_TARGET
         if not target:
             return web.json_response({"error": "no_target"}, status=400)
-        if call_lock.locked():
+        if _call_busy():
             return web.json_response({"error": "call_in_progress"}, status=409)
         async with call_lock:
             log.info("Control endpoint: placing test call")
@@ -2504,6 +2572,9 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     app.router.add_post("/control/cameras/{camera_id}/talk", handle_talk)
     app.router.add_post("/control/cameras/{camera_id}/talk/stop", handle_talk_stop)
     app.router.add_post("/control/call/test", handle_call_test)
+    app.router.add_post("/control/call/doorbell", handle_call_doorbell)
+    app.router.add_post("/control/call/stop", handle_call_stop)
+    app.router.add_post("/control/call/settings", handle_call_settings)
     app.router.add_get("/control/events", handle_events)
     app.router.add_get("/control/clip/{video_event_id}", handle_clip)
     app.router.add_get("/control/automations", handle_automations)

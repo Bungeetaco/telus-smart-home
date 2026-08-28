@@ -84,6 +84,27 @@ def _mulaw_encode(sample: int) -> int:
     return ~(sign | (exponent << 4) | mantissa) & 0xFF
 
 
+# One 20 ms frame of mu-law digital silence (0xFF encodes linear 0), sent
+# whenever a live call has no fresh uplink frame: RTP must keep flowing at
+# 50 packets/s or the far end's jitter buffer declares the stream dead, and
+# the carrier's NAT latch (see the module docstring) needs the cadence too.
+SILENCE_FRAME = b"\xff" * _FRAME_SAMPLES
+
+# 16-bit linear -> mu-law, precomputed for the uplink path: the doorbell's
+# decoded mic audio arrives as s16 PCM and re-encoding it per sample with the
+# function above would put a python loop on a 50 Hz hot path. Indexed by
+# (sample >> 2) & 0x3FFF is NOT valid mu-law (the low bits matter near zero),
+# so the table is full 16-bit, built once at import (~64k entries, <1 MB).
+LIN2ULAW = bytes(_mulaw_encode(x - 32768) for x in range(65536))
+
+
+def pcm_s16le_to_mulaw(pcm: bytes) -> bytes:
+    """Encode little-endian s16 mono PCM to mu-law using the table."""
+    t = LIN2ULAW
+    return bytes(t[(pcm[i] | (pcm[i + 1] << 8)) ^ 0x8000]
+                 for i in range(0, len(pcm) - 1, 2))
+
+
 TONE_FRAME = bytes(
     _mulaw_encode(int(12000 * math.sin(2 * math.pi * _TONE_HZ * i / 8000)))
     for i in range(_FRAME_SAMPLES)
@@ -171,15 +192,25 @@ class _Sip(asyncio.DatagramProtocol):
 
 
 class _Rtp(asyncio.DatagramProtocol):
-    def __init__(self):
+    def __init__(self, payload_sink=None):
         self.received = 0
         self.transport = None
+        self._sink = payload_sink
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
         self.received += 1
+        if self._sink is not None and len(data) > 12:
+            # Strip the fixed RTP header. CSRC lists/extensions are not sent
+            # on a plain PCMU leg; if one ever appears the payload is noise
+            # for one packet, which the doorbell's speaker absorbs better
+            # than a parser absorbs a malformed header.
+            try:
+                self._sink(data[12:])
+            except Exception:
+                log.exception("rtp payload sink failed; dropping this payload")
 
 
 def _local_ip_toward(host: str, port: int) -> str:
@@ -195,9 +226,22 @@ class SipCall:
     """One outbound call: INVITE/auth/ACK, tone RTP, BYE. See module docstring."""
 
     def __init__(self, *, server: str, username: str, password: str,
-                 target: str, caller_id: str, sip_port: int = 5060):
+                 target: str, caller_id: str, sip_port: int = 5060,
+                 frame_source=None, payload_sink=None,
+                 stop_event: "asyncio.Event | None" = None):
+        """frame_source: optional zero-arg callable returning one 160-byte
+        mu-law frame, or None for "nothing fresh" (silence is sent). When
+        given, the call is LIVE: it runs until stop_event, a remote hangup or
+        config.CALL_MAX_S. When absent, the milestone-1 tone is played for
+        tone_seconds and the call hangs itself up.
+        payload_sink: optional callable handed each received RTP payload
+        (mu-law bytes, header stripped). Never raises into the RTP path.
+        stop_event: cooperative hangup, same idiom as talkdown's stop."""
         self.server = server
         self.sip_port = sip_port
+        self.frame_source = frame_source
+        self.payload_sink = payload_sink
+        self.stop_event = stop_event
         self.username = username
         self._password = password
         self.target = re.sub(r"[^\d+]", "", target).lstrip("+")
@@ -293,7 +337,7 @@ class SipCall:
             _Sip, local_addr=(local_ip, 0),
             remote_addr=(self.server, self.sip_port))
         rtp_t, rtp_p = await loop.create_datagram_endpoint(
-            _Rtp, local_addr=(local_ip, 0))
+            lambda: _Rtp(self.payload_sink), local_addr=(local_ip, 0))
         local_port = sip_t.get_extra_info("sockname")[1]
         rtp_port = rtp_t.get_extra_info("sockname")[1]
         try:
@@ -350,30 +394,83 @@ class SipCall:
         self._mark("answered", rtp=f"{remote_addr}:{remote_port}")
         sip_t.sendto(self._ack(local_ip, local_port, to_header))
 
-        # Tone. Sent from the same socket the SDP offered (symmetric RTP), on a
-        # wall-clock schedule so the stream is exactly real-time.
+        # Media. Sent from the same socket the SDP offered (symmetric RTP), on
+        # a wall-clock schedule so the stream is exactly real-time. Tone mode
+        # (milestone 1, no frame_source) runs a fixed frame budget; live mode
+        # runs until the operator hangs up (stop_event), the far end does
+        # (BYE, handled below), or config.CALL_MAX_S.
         ssrc = random.getrandbits(32)
         seq = random.getrandbits(15)
         ts = random.getrandbits(31)
-        frames = int(tone_seconds * 50)
+        live = self.frame_source is not None
+        frames_budget = None if live else int(tone_seconds * 50)
+        max_frames = int(c.CALL_MAX_S * 50)
         started = time.monotonic()
-        for i in range(frames):
+        ended_by = None
+        i = 0
+        while True:
+            if not live and i >= frames_budget:
+                ended_by = "tone_done"
+                break
+            if live and self.stop_event is not None and self.stop_event.is_set():
+                ended_by = "stopped"
+                break
+            if i >= max_frames:
+                ended_by = "max_duration"
+                break
+            # A remote hangup arrives as a BYE REQUEST on the SIP socket;
+            # _recv only returns responses, so requests are watched here,
+            # between frames, where the 20 ms cadence bounds the answer delay.
+            bye = self._pending_bye(sip_p)
+            if bye is not None:
+                sip_t.sendto(bye)
+                ended_by = "remote_bye"
+                break
+            payload = None
+            if live:
+                try:
+                    payload = self.frame_source()
+                except Exception:
+                    log.exception("uplink frame source failed; sending silence")
+            frame = payload if payload else (SILENCE_FRAME if live else TONE_FRAME)
             hdr = bytes([0x80, 0x00]) + seq.to_bytes(2, "big") + \
                 ts.to_bytes(4, "big") + ssrc.to_bytes(4, "big")
-            rtp_t.sendto(hdr + TONE_FRAME, (remote_addr, remote_port))
+            rtp_t.sendto(hdr + frame, (remote_addr, remote_port))
             seq = (seq + 1) & 0xFFFF
             ts = (ts + _FRAME_SAMPLES) & 0xFFFFFFFF
-            await asyncio.sleep(max(0.0, started + (i + 1) * 0.02 - time.monotonic()))
-        self._mark("tone_done", frames_sent=frames, rtp_received=rtp_p.received)
+            i += 1
+            await asyncio.sleep(max(0.0, started + i * 0.02 - time.monotonic()))
+        self._mark("media_done", reason=ended_by, frames_sent=i,
+                   rtp_received=rtp_p.received)
 
-        sip_t.sendto(self._bye(local_ip, local_port, to_header))
-        self._mark("bye_sent")
-        try:
-            await asyncio.wait_for(self._recv(sip_p), 3.0)
-        except asyncio.TimeoutError:
-            pass                              # best-effort; the call is over
-        return {"result": "completed", "frames_sent": frames,
-                "rtp_received": rtp_p.received, "timeline": self.timeline}
+        if ended_by != "remote_bye":
+            sip_t.sendto(self._bye(local_ip, local_port, to_header))
+            self._mark("bye_sent")
+            try:
+                await asyncio.wait_for(self._recv(sip_p), 3.0)
+            except asyncio.TimeoutError:
+                pass                          # best-effort; the call is over
+        return {"result": "completed", "reason": ended_by, "frames_sent": i,
+                "rtp_received": rtp_p.received,
+                "seconds": round(time.monotonic() - started, 1),
+                "timeline": self.timeline}
+
+    def _pending_bye(self, sip_p) -> bytes | None:
+        """A 200 OK for a BYE the far end sent, or None. Non-blocking: drains
+        whatever sits in the SIP queue, answering retransmitted 200s' ACKs by
+        ignoring them (UDP duplicates are normal, not errors)."""
+        while not sip_p.queue.empty():
+            data = sip_p.queue.get_nowait()
+            text = data.decode(errors="replace")
+            if not text.startswith("BYE "):
+                continue
+            self._mark("remote_bye")
+            head = text.split("\r\n\r\n", 1)[0].split("\r\n")
+            keep = [l for l in head[1:] if l.split(":", 1)[0].strip().lower()
+                    in ("via", "from", "to", "call-id", "cseq")]
+            return ("SIP/2.0 200 OK\r\n" + "\r\n".join(keep) +
+                    "\r\nContent-Length: 0\r\n\r\n").encode()
+        return None
 
     def _bye(self, local_ip, local_port, to_header) -> bytes:
         self.cseq += 1

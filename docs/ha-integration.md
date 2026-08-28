@@ -420,6 +420,8 @@ Two important behaviors:
 `config_flow.py` implements the UI-driven setup, reauth, reconfigure, and
 options flows.
 
+The options flow's final step, **Doorbell Call**, configures the ring-to-phone feature: the enable toggle, the VoIP.ms sub-account and the number to call. On save it writes the camera bridge's `call_settings.json` and pushes `/control/call/settings`, the same shared-dir + live-push channel the TELUS credentials use, so the bridge needs no hand-edited env for it.
+
 ### Initial setup (`async_step_user`)
 
 Prompts for username/password (both trimmed of whitespace to guard against a

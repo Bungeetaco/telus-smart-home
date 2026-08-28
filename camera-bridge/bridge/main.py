@@ -11,6 +11,7 @@ from . import memory_trace
 from . import restart_guard
 from .telus_auth import RateLimited, TelusSession, relogin_if_stale
 from .telus_rest import list_cameras, get_video_source
+from . import call_bridge
 from .camera_session import run_camera_forever
 from .lifecycle import CameraLifecycleManager
 from .mobile_auth import MobileSession
@@ -149,6 +150,55 @@ def _load_fallback_credentials_if_present() -> str | None:
     log.info("Loaded credentials from fallback file (updated_at=%s), overriding .env",
               data.get("updated_at"))
     return data.get("updated_at")
+
+
+def _load_call_settings_if_present() -> str | None:
+    """Adopt call_settings.json (written by HA's options flow) if present,
+    overriding the .env bootstrap -- the call-feature twin of the credentials
+    fallback above, with the same shape-guard reasoning. Returns the
+    'updated_at' marker for the watcher."""
+    try:
+        with open(c.CALL_SETTINGS_PATH) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError):
+        log.warning("call_settings.json present but unreadable/corrupt; using "
+                    ".env call settings", exc_info=True)
+        return None
+    applied = call_bridge.apply_settings(data)
+    log.info("Loaded call settings from fallback file (updated_at=%s, fields=%s)",
+             data.get("updated_at"), applied)
+    return data.get("updated_at")
+
+
+async def watch_call_settings(last_seen) -> None:
+    """The call-settings twin of watch_credentials_fallback: catches a push
+    the bridge was down for. No re-login side effect -- applying is just
+    config assignment -- so this is the whole loop."""
+    while True:
+        await asyncio.sleep(c.CREDENTIALS_FALLBACK_POLL_S)
+        try:
+            with open(c.CALL_SETTINGS_PATH) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            continue
+        except (ValueError, OSError):
+            log.warning("call_settings.json unreadable/corrupt this cycle, "
+                        "skipping", exc_info=True)
+            continue
+        if not isinstance(data, dict):
+            log.warning("call_settings.json is not a JSON object this cycle, skipping")
+            continue
+        updated_at = data.get("updated_at")
+        if updated_at in (None, last_seen):
+            continue
+        last_seen = updated_at
+        applied = call_bridge.apply_settings(data)
+        log.info("Detected updated call settings (updated_at=%s, fields=%s)",
+                 updated_at, applied)
 
 
 def _camera_registry_entry(cam: dict) -> dict:
@@ -353,6 +403,8 @@ async def main():
 
             discovery_task = asyncio.ensure_future(
                 discover_and_launch_cameras(telus, camera_registry, lifecycle))
+            call_settings_task = asyncio.ensure_future(
+                watch_call_settings(_load_call_settings_if_present()))
             fallback_task = asyncio.ensure_future(
                 watch_credentials_fallback(telus, login_lock, last_seen_creds_ts))
 
@@ -361,7 +413,8 @@ async def main():
             # transient (started/stopped on demand) so, unlike before, there's no
             # fixed set of them to include here -- CameraLifecycleManager logs any
             # unexpected exception from one itself (see its deactivate()).
-            await asyncio.gather(discovery_task, fallback_task)
+            await asyncio.gather(discovery_task, fallback_task,
+                                 call_settings_task)
         finally:
             if memory_task is not None:
                 memory_task.cancel()

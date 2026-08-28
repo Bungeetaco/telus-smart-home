@@ -685,10 +685,20 @@ through a VoIP.ms POP: INVITE with MD5 digest auth (with and without
 `qop=auth`), SDP offer/answer pinned to G.711 mu-law (PCMU), symmetric RTP,
 BYE. Exposed as `POST /control/call/test`, which rings the configured target
 and plays a tone on answer; inert unless the deployment provides a sub-account
-(see `docs/configuration.md`). It is the foundation for ring-to-phone with the
-doorbell's audio bridged into the call -- both doorbell audio paths are
-already mu-law at 8 kHz, so the splice is packet plumbing rather than
-transcoding (backlog E99 tracks the milestones).
+(see `docs/configuration.md`). `bridge/call_bridge.py` builds on it for the full bridged call: the doorbell
+mic reaches the caller through a decoded-audio tap on `camera_session` (the
+same frames the RTSP publisher gets), re-encoded to mu-law and pulled by the
+SIP leg's uplink; the caller's voice reaches the doorbell speaker as the SIP
+leg's received RTP fed into a `talk_fullduplex.LiveMulawSource`, which
+talkdown's existing chunked-PUT transport drains. Every leg is mu-law at
+8 kHz, so nothing transcodes. One call at a time; either half ending ends the
+other. Started with `POST /control/call/doorbell`, stopped with
+`/control/call/stop`.
+
+The feature's credentials and gate are Home-Assistant-managed exactly like the
+TELUS credentials: the options flow writes `call_settings.json` to the shared
+dir and live-pushes `/control/call/settings`, and `config.py` only bootstraps
+from the env. No value is hardcoded in the bridge.
 
 Hand-rolled subset of RFC 3261 rather than a SIP library, for the same reason
 talkdown re-implements its protocol: the leg needs exactly one scenario, and

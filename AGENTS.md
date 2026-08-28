@@ -111,7 +111,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   suites additionally **stub `homeassistant.*` rather than installing Home
   Assistant**: `tests/ha_stubs.py` carries the reasoning and the rule that
   nothing in that tree may be auto-magic.
-- **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes**: fixes, tuning, tests, docs, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes**: a new capability, a changed default, anything a user would notice or react to. Bias towards patch. Details in `docs/development.md`.
+- **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes**: fixes, tuning, tests, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes**: a new capability, a changed default, anything a user would notice or react to. Bias towards patch. **Documentation-only commits do not bump or tag at all**: they ride untagged on master and ship with the next code release. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)
 

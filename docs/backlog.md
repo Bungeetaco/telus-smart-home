@@ -267,11 +267,22 @@ and evidence. Grouped by whether anything can actually be done about them.
   caught the tone frequency: 440 Hz is 8.8 cycles per 20 ms frame, so the
   repeated frame clicked 50 times a second; 450 Hz is exactly 9.
 
-  **Milestone 2, open:** splice the answered call's RTP to the doorbell --
-  uplink from the Janus listen path, downlink into the talkdown PUT -- with the
-  tone kept as a fallback self-test. **Milestone 3, open:** trigger from the
-  ring automation (ring, no notification action within the loiter window, then
-  call), plus the operator's decided constraints in the automation notes.
+  **Milestone 2, shipped:** `bridge/call_bridge.py` splices an answered call
+  to the doorbell -- uplink from a decoded-audio tap on camera_session
+  (re-encoded to mu-law), downlink from the SIP leg's RTP into a
+  talk_fullduplex.LiveMulawSource that the existing chunked-PUT transport
+  drains. `POST /control/call/doorbell` starts it, `/control/call/stop` ends
+  it, and either half ending ends the other. Credentials and the gate are
+  Home-Assistant-managed (options flow -> call_settings.json +
+  /control/call/settings), the same two-channel pattern as the TELUS
+  credentials; nothing is hardcoded in the bridge.
+
+  **Milestone 3, open:** trigger from the ring automation (ring, no
+  notification action within the loiter window, then call), plus the
+  operator's decided constraints in the automation notes. NOT yet verified
+  live end to end: the tone call (M1) rang and was heard, but a full bridged
+  call -- doorbell mic to phone AND phone voice to doorbell speaker -- has
+  passed its unit suites and not yet been placed against the real doorbell.
 
   Sub-account provisioning is deployment state (gitignored env), deliberately
   not recorded here.

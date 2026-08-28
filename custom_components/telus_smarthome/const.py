@@ -70,6 +70,16 @@ CONF_ARM_MODE_OPTIONS = {
     CONF_NO_ENTRY_DELAY: "No Entry Delay",
 }
 
+# Doorbell call feature (camera-bridge call leg; backlog E99). Managed here so
+# the credentials and the gate live in HA like everything else; the flow writes
+# them to the bridge's shared dir and live-pushes /control/call/settings.
+CONF_CALL_ENABLED = "call_enabled"
+CONF_CALL_SIP_SERVER = "call_sip_server"
+CONF_CALL_SIP_ACCOUNT = "call_sip_account"
+CONF_CALL_SIP_PASSWORD = "call_sip_password"
+CONF_CALL_DID = "call_did"
+CONF_CALL_TARGET = "call_target"
+
 CONF_OPTIONS_DEFAULT = {
     CONF_ARM_CODE: "",
     CONF_ARM_HOME: [],
@@ -77,6 +87,12 @@ CONF_OPTIONS_DEFAULT = {
     CONF_ARM_NIGHT: [],
     CONF_UPDATE_INTERVAL: CONF_DEFAULT_UPDATE_INTERVAL_SECONDS,
     CONF_WEBSOCKET_RECONNECT_TIMEOUT: CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT,
+    CONF_CALL_ENABLED: False,
+    CONF_CALL_SIP_SERVER: "",
+    CONF_CALL_SIP_ACCOUNT: "",
+    CONF_CALL_SIP_PASSWORD: "",
+    CONF_CALL_DID: "",
+    CONF_CALL_TARGET: "",
 }
 
 SENSOR_SUBTYPE_BLACKLIST = [
@@ -166,7 +182,8 @@ CAMERA_BRIDGE_SHARE_DIR = "/share/telus_cam_bridge"
 # Both the HA container and the camera bridge container run with
 # `--network host`, so 127.0.0.1 here really is the host's loopback that the
 # bridge's control server (bound to 127.0.0.1:8199) is listening on.
-CAMERA_BRIDGE_CONTROL_URL = "http://127.0.0.1:8199/control/credentials"
+CAMERA_BRIDGE_CONTROL_BASE = "http://127.0.0.1:8199"
+CAMERA_BRIDGE_CONTROL_URL = f"{CAMERA_BRIDGE_CONTROL_BASE}/control/credentials"
 
 # Read-only endpoint the camera platform (camera.py) polls to learn which
 # cameras currently exist and their RTSP publish URLs -- see

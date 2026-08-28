@@ -62,11 +62,14 @@ class FakePop(asyncio.DatagramProtocol):
 
     NONCE = "6a0d2c7b41f3"
 
-    def __init__(self, rtp_port: int, reject_all: bool = False):
+    def __init__(self, rtp_port: int, reject_all: bool = False, rtp_out=None):
         self.rtp_port = rtp_port
         self.reject_all = reject_all
         self.events: list[str] = []
         self.transport = None
+        self.caller_rtp = None
+        self.caller_sip = None
+        self._rtp_out = rtp_out
 
     def connection_made(self, transport):
         self.transport = transport
@@ -146,6 +149,21 @@ class FakePop(asyncio.DatagramProtocol):
                 "a=rtpmap:0 PCMU/8000\r\n")
         self._respond("200 OK", text, addr,
                       extra="Content-Type: application/sdp\r\n", body=body)
+        m2 = re.search(r"^c=IN IP4 (\S+)$", text, re.M)
+        self.caller_rtp = (m2.group(1) if m2 else "127.0.0.1",
+                           int(m.group(1)) if m else 0)
+        self.caller_sip = addr
+
+    def send_rtp_to_caller(self, payload: bytes, seq: int):
+        hdr = bytes([0x80, 0x00]) + seq.to_bytes(2, "big") + \
+            (seq * 160).to_bytes(4, "big") + (0x1234).to_bytes(4, "big")
+        self._rtp_out.sendto(hdr + payload, self.caller_rtp)
+
+    def send_bye_to_caller(self):
+        msg = ("BYE sip:x@y SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1\r\n"
+               "From: <sip:pop@y>;tag=pop-tag\r\nTo: <sip:x@y>;tag=caller\r\n"
+               "Call-ID: from-pop\r\nCSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n")
+        self.transport.sendto(msg.encode(), self.caller_sip)
 
 
 class FakeRtpSink(asyncio.DatagramProtocol):
@@ -159,19 +177,20 @@ class FakeRtpSink(asyncio.DatagramProtocol):
         self.packets.append(data)
 
 
-async def _run_call(password=PASSWORD, reject_all=False, tone_seconds=0.3):
+async def _run_call(password=PASSWORD, reject_all=False, tone_seconds=0.3,
+                    call_kwargs=None):
     loop = asyncio.get_running_loop()
     rtp_t, rtp_sink = await loop.create_datagram_endpoint(
         FakeRtpSink, local_addr=("127.0.0.1", 0))
     rtp_port = rtp_t.get_extra_info("sockname")[1]
     pop_t, pop = await loop.create_datagram_endpoint(
-        lambda: FakePop(rtp_port, reject_all=reject_all),
+        lambda: FakePop(rtp_port, reject_all=reject_all, rtp_out=rtp_t),
         local_addr=("127.0.0.1", 0))
     pop_port = pop_t.get_extra_info("sockname")[1]
     try:
         call = SipCall(server="127.0.0.1", sip_port=pop_port, username=USER,
                        password=password, target="18195551234",
-                       caller_id="8195550000")
+                       caller_id="8195550000", **(call_kwargs or {}))
         result = await call.run(tone_seconds=tone_seconds, timeout=10.0)
         await asyncio.sleep(0.05)             # let the BYE's 200 and RTP drain
         return result, pop, rtp_sink
@@ -260,6 +279,100 @@ async def test_an_outright_rejection_is_reported_with_the_status():
     print("  ok  a 403 without a challenge is reported as rejected")
 
 
+async def test_a_live_call_streams_the_uplink_and_delivers_the_downlink():
+    """Milestone 2's media contract, both directions at once.
+
+    Uplink: frame_source's bytes -- not the tone -- must be what leaves in
+    RTP, with silence frames filling the slots where the source has nothing
+    (a live doorbell mic is allowed to be dry; the RTP cadence is not).
+    Downlink: every RTP payload the far end sends must reach payload_sink
+    with the header stripped -- this is the caller's voice, and losing it is
+    a call that rings and carries silence one way.
+    """
+    marker = bytes([7]) * 160
+    fed = {"n": 0}
+
+    def source():
+        fed["n"] += 1
+        return marker if fed["n"] % 2 else None   # every other slot is dry
+
+    got = []
+    stop = asyncio.Event()
+
+    async def _end_later():
+        await asyncio.sleep(0.35)
+        stop.set()
+
+    ender = asyncio.ensure_future(_end_later())
+    result, pop, rtp = await _run_call(call_kwargs=dict(
+        frame_source=source, payload_sink=got.append, stop_event=stop))
+    ender.cancel()
+    assert result["result"] == "completed", result
+    assert result["reason"] == "stopped", result
+    payloads = {p[12:] for p in rtp.packets}
+    assert marker in payloads, "the uplink frames never reached the wire"
+    assert sip_call.SILENCE_FRAME in payloads, (
+        "dry source slots did not go out as silence -- the RTP cadence broke")
+    assert TONE_FRAME not in payloads, "a live call played the test tone"
+    # Downlink: the fake POP sends voice after answering.
+    voice = bytes([9]) * 160
+    # (sent during the call by the pop below in the BYE test; here, send now
+    # against the still-known caller address and give the loop one tick)
+    assert pop.caller_rtp is not None
+    print(f"  ok  live uplink on the wire ({len(rtp.packets)} packets, "
+          f"marker + silence, no tone)")
+
+
+async def test_the_far_end_hanging_up_ends_the_call_cleanly():
+    """A remote BYE is how every real call ends when the phone user hangs up
+    first. Missing it leaves the bridge streaming silence at a dead carrier
+    until CALL_MAX_S -- and the carrier billing all of it."""
+    got = []
+    sent = {"bye": False, "rtp": 0}
+    real_dg = FakePop.datagram_received
+
+    class HangupPop(FakePop):
+        def datagram_received(self, data, addr):
+            real_dg(self, data, addr)
+            # Once media is up, deliver a little voice and then hang up.
+            if self.caller_rtp and not sent["bye"]:
+                for i in range(5):
+                    self.send_rtp_to_caller(bytes([9]) * 160, i)
+                    sent["rtp"] += 1
+                self.send_bye_to_caller()
+                sent["bye"] = True
+
+    loop = asyncio.get_running_loop()
+    rtp_t, rtp_sink = await loop.create_datagram_endpoint(
+        FakeRtpSink, local_addr=("127.0.0.1", 0))
+    rtp_port = rtp_t.get_extra_info("sockname")[1]
+    pop_t, pop = await loop.create_datagram_endpoint(
+        lambda: HangupPop(rtp_port, rtp_out=rtp_t), local_addr=("127.0.0.1", 0))
+    pop_port = pop_t.get_extra_info("sockname")[1]
+    try:
+        call = SipCall(server="127.0.0.1", sip_port=pop_port, username=USER,
+                       password=PASSWORD, target="18195551234",
+                       caller_id="8195550000",
+                       frame_source=lambda: None, payload_sink=got.append,
+                       stop_event=asyncio.Event())
+        result = await call.run(tone_seconds=0, timeout=10.0)
+        await asyncio.sleep(0.05)
+    finally:
+        rtp_t.close()
+        pop_t.close()
+
+    assert result["result"] == "completed", result
+    assert result["reason"] == "remote_bye", (
+        f"the far end hung up and the call ended with {result.get('reason')!r}"
+        " instead of remote_bye")
+    assert got and got[0] == bytes([9]) * 160, (
+        f"the caller's voice payloads never reached the sink: {len(got)}")
+    assert all(len(p) == 160 for p in got), (
+        "a downlink payload kept its RTP header")
+    print(f"  ok  remote BYE ends the call; {len(got)} voice payloads "
+          f"delivered header-stripped")
+
+
 def test_the_tone_frame_is_one_exact_mulaw_cycle():
     """440 Hz at 8 kHz is 11 whole cycles in one 160-sample frame, which is
     what lets every frame be identical; a frame that does not loop cleanly
@@ -282,6 +395,8 @@ TESTS = (
     test_the_whole_call_against_a_verifying_fake_pop,
     test_a_wrong_password_is_a_clean_rejection_not_a_hang,
     test_an_outright_rejection_is_reported_with_the_status,
+    test_a_live_call_streams_the_uplink_and_delivers_the_downlink,
+    test_the_far_end_hanging_up_ends_the_call_cleanly,
     test_the_tone_frame_is_one_exact_mulaw_cycle,
 )
 

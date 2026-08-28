@@ -342,8 +342,70 @@ class _StreamingSource(_ChunkSource):
             pass
 
 
-async def _open_source(audio_source: str, spec: dict, audio_filter: str,
+class LiveMulawSource(_ChunkSource):
+    """A live call's downlink audio as a talkdown source (backlog E99).
+
+    Fed mu-law bytes by the caller (the SIP leg's received RTP payloads) and
+    drained by stream_talkdown at its own 40 ms pace. Three rules keep a LIVE
+    feed compatible with a transport built for clips:
+
+    * **Silence fill, never starvation.** next_chunk pads a short read with
+      mu-law silence (0xFF) up to the requested size: the transport's pacing
+      schedule assumes a full chunk per slot, and the far end going quiet
+      (or a lost RTP packet) must read as silence, not as EOF.
+    * **Bounded buffer, freshest audio wins.** The buffer holds
+      ~MAX_BUFFER_MS of audio; past that the OLDEST bytes are dropped. A live
+      conversation cannot pay latency back, so a stall in the PUT path must
+      shed audio rather than drift the conversation out of sync.
+    * **`produced` advances with the fill.** The transport's safety deadline
+      derives from produced audio; a live source that stopped advancing it
+      during silence would trip that deadline mid-conversation.
+
+    close() ends the talk: the next next_chunk returns b"" (EOF) once the
+    buffer is drained, and the transport finishes its normal teardown.
+    """
+
+    MAX_BUFFER_MS = 400
+
+    def __init__(self):
+        self._buf = bytearray()
+        self._closed = False
+        self._max = SAMPLE_RATE * self.MAX_BUFFER_MS // 1000
+        self.complete = False
+        self.produced = 0
+        self.dropped_bytes = 0
+
+    def feed(self, data: bytes) -> None:
+        if self._closed or not data:
+            return
+        self._buf.extend(data)
+        if len(self._buf) > self._max:
+            drop = len(self._buf) - self._max
+            del self._buf[:drop]
+            self.dropped_bytes += drop
+
+    def close(self) -> None:
+        self._closed = True
+        self.complete = True
+
+    async def next_chunk(self, n: int) -> bytes:
+        if self._closed and not self._buf:
+            return b""
+        out = bytes(self._buf[:n])
+        del self._buf[:len(out)]
+        if len(out) < n and not self._closed:
+            out += b"\xff" * (n - len(out))
+        self.produced += len(out)
+        return out
+
+
+async def _open_source(audio_source, spec: dict, audio_filter: str,
                        chunk_bytes: int) -> _ChunkSource:
+    if isinstance(audio_source, _ChunkSource):
+        # A live source (the call bridge's downlink). Already mu-law at the
+        # wire rate: no ffmpeg, and the conditioning chain -- tuned for
+        # pre-recorded clips -- does not apply.
+        return audio_source
     args = _ffmpeg_args(audio_source, spec["ffmpeg_fmt"], audio_filter)
     if not c.TALK_STREAMING_ENCODE:
         return _BufferedSource(await _encode(audio_source, spec["ffmpeg_fmt"], audio_filter))

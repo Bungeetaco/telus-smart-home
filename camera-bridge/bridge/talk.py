@@ -199,6 +199,41 @@ class TalkManager:
             finally:
                 self._stop_events.pop(camera_id, None)
 
+    async def speak_live(self, camera_id: str, source) -> dict:
+        """Stream a LIVE mu-law source (talk_fullduplex.LiveMulawSource)
+        through the camera's speaker -- the call bridge's downlink. Same lock,
+        metrics and teardown as speak(); no clip resolution and no
+        conditioning (the source is already wire-format). Ends when the
+        source closes, stop() is called, or the transport fails."""
+        cam_lock = self._lock_for(camera_id)
+        if cam_lock.locked():
+            metrics.talk.rejected_in_progress(camera_id)
+            raise TalkInProgress(camera_id)
+        async with cam_lock:
+            stop_event = asyncio.Event()
+            self._stop_events[camera_id] = stop_event
+            metrics.talk.attempt()
+            started = time.monotonic()
+            try:
+                doorbell = await self._resolve_doorbell(camera_id)
+                if doorbell is None:
+                    raise NoUpstreamAudio(
+                        f"{camera_id} does not expose the full-duplex PUT path")
+                result = await self._run_full_duplex(
+                    camera_id, doorbell, b"", codec="mulaw", audio_filter="",
+                    stop_event=stop_event, source_obj=source)
+            except BaseException as err:
+                self._doorbell_cache.pop(camera_id, None)
+                metrics.talk.failure(camera_id, _failure_reason(err),
+                                     wall_s=time.monotonic() - started)
+                raise
+            else:
+                metrics.talk.success(camera_id, wall_s=time.monotonic() - started,
+                                     result=result if isinstance(result, dict) else None)
+                return result
+            finally:
+                self._stop_events.pop(camera_id, None)
+
     def stop(self, camera_id: str) -> bool:
         """Ask the talk in flight on this camera to stop.
 
@@ -521,7 +556,8 @@ class TalkManager:
     async def _run_full_duplex(self, camera_id: str, doorbell: dict,
                                audio_bytes: bytes, *, codec: str | None = None,
                                audio_filter: str | None = None,
-                               stop_event: "asyncio.Event | None" = None) -> dict:
+                               stop_event: "asyncio.Event | None" = None,
+                               source_obj=None) -> dict:
         """StartFullDuplex -> chunked Digest mu-law PUT -> EndLiveStream.
 
         Modular: audio_bytes is any transcodable clip (TTS, music, ...);
@@ -634,6 +670,32 @@ class TalkManager:
                     "cert_pin": talk_fullduplex.make_cert_pin(new_kind)}
 
         session_deadline = self._session_deadline(doorbell.get("expires"))
+        if source_obj is not None:
+            # A live source is handed straight to the transport; there is no
+            # clip to spool and no codec fallback to try (the source IS
+            # wire-format mu-law -- re-encoding a live stream as anything
+            # else has nothing to fall back from).
+            try:
+                return await talk_fullduplex.stream_talkdown(
+                    put_url, password, source_obj, username=username,
+                    codec="mulaw", audio_filter="", renegotiate=_renegotiate,
+                    session_deadline=session_deadline, stop_event=stop_event,
+                    cert_pin=talk_fullduplex.make_cert_pin(kind))
+            finally:
+                try:
+                    await asyncio.wait_for(
+                        end_live_stream(
+                            self._telus.session, self._mobile.session_token,
+                            state["did"],
+                            customer_id=self._mobile.customer_id,
+                            mobile_device_uid=self._mobile.device_uid,
+                            seamless_login_token=self._mobile.seamless_login_token,
+                        ),
+                        timeout=c.TALK_STREAM_LOOKUP_TIMEOUT_S,
+                    )
+                except Exception:
+                    log.warning("talkdown: live-session EndLiveStream teardown "
+                                "failed (non-fatal)", exc_info=True)
         tmp_path = await self._spool_temp(audio_bytes)
         try:
             last_err: Exception | None = None

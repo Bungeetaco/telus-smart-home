@@ -41,7 +41,10 @@ from pyalarmdotcomajax.exceptions import (
     UnexpectedResponse as libUnexpectedResponse,
 )
 
+from homeassistant.util import dt as dt_util
+
 from .const import (
+    CAMERA_BRIDGE_CONTROL_BASE,
     CAMERA_BRIDGE_CONTROL_URL,
     CAMERA_BRIDGE_SHARE_DIR,
     CONF_2FA_COOKIE,
@@ -52,6 +55,12 @@ from .const import (
     CONF_ARM_NIGHT,
     CONF_DEFAULT_UPDATE_INTERVAL_SECONDS,
     CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT,
+    CONF_CALL_DID,
+    CONF_CALL_ENABLED,
+    CONF_CALL_SIP_ACCOUNT,
+    CONF_CALL_SIP_PASSWORD,
+    CONF_CALL_SIP_SERVER,
+    CONF_CALL_TARGET,
     CONF_OPTIONS_DEFAULT,
     CONF_OTP,
     CONF_OTP_METHOD,
@@ -64,6 +73,36 @@ from .controller import AlarmIntegrationController
 
 LOGGER = logging.getLogger(__name__)
 LegacyArmingOptions = Literal["home", "away", "true", "false"]
+
+
+def _sync_write_call_settings(payload: dict) -> str | None:
+    """Write the camera-bridge call-settings fallback file (call_settings.json).
+
+    The credential writer's twin: atomic tmp+replace, 0o600 before content (it
+    carries the SIP password), chowned to the share dir's owner so the bridge's
+    non-root user can read it, and best-effort throughout -- the bridge being
+    absent must never fail the options flow. Runs in an executor thread."""
+    share_dir = Path(CAMERA_BRIDGE_SHARE_DIR)
+    try:
+        share_dir.mkdir(parents=True, exist_ok=True)
+        tmp = share_dir / "call_settings.json.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(payload).encode())
+            try:
+                st = os.stat(share_dir)
+                os.fchown(fd, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+        os.replace(tmp, share_dir / "call_settings.json")
+    except OSError:
+        LOGGER.warning("Could not write camera-bridge call settings file at %s.", share_dir)
+    try:
+        return (share_dir / "control_secret").read_text().strip()
+    except OSError:
+        return None
 
 
 def _sync_write_fallback_and_read_secret(payload: dict) -> str | None:
@@ -617,7 +656,7 @@ class ADCOptionsFlowHandler(config_entries.OptionsFlow):  # type: ignore
 
         if user_input is not None:
             self.options.update(user_input)
-            return self.async_create_entry(title="", data=self.options)
+            return await self.async_step_call()
 
         schema = vol.Schema(
             {
@@ -638,6 +677,77 @@ class ADCOptionsFlowHandler(config_entries.OptionsFlow):  # type: ignore
 
         return self.async_show_form(
             step_id="modes",
+            data_schema=schema,
+            errors=errors,
+            last_step=False,
+        )
+
+    async def async_step_call(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Doorbell call feature: the VoIP.ms sub-account, the target number
+        and the enable gate, managed here so the bridge never needs hand-edited
+        env for it. On save the settings are written to the bridge's shared dir
+        (the restart-surviving fallback) and live-pushed to
+        /control/call/settings -- the same two-channel pattern as the TELUS
+        credentials, and both halves are best-effort: a bridge that is down
+        picks the file up when it returns."""
+        errors: dict = {}
+
+        if user_input is not None:
+            self.options.update(user_input)
+            payload = {
+                "enabled": bool(user_input.get(CONF_CALL_ENABLED)),
+                "sip_server": (user_input.get(CONF_CALL_SIP_SERVER) or "").strip(),
+                "sip_account": (user_input.get(CONF_CALL_SIP_ACCOUNT) or "").strip(),
+                "sip_password": (user_input.get(CONF_CALL_SIP_PASSWORD) or "").strip(),
+                "did": (user_input.get(CONF_CALL_DID) or "").strip(),
+                "call_target": (user_input.get(CONF_CALL_TARGET) or "").strip(),
+                "updated_at": dt_util.utcnow().isoformat(),
+            }
+            # Write the fallback and read the secret in one executor hop, the
+            # same shape as the credential push above.
+            secret = await self.hass.async_add_executor_job(
+                _sync_write_call_settings, payload)
+            if secret:
+                session = async_get_clientsession(self.hass)
+                try:
+                    async with async_timeout.timeout(5):
+                        async with session.post(
+                            f"{CAMERA_BRIDGE_CONTROL_BASE}/control/call/settings",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {secret}"},
+                        ) as resp:
+                            if resp.status != 200:
+                                LOGGER.warning(
+                                    "Camera bridge rejected call-settings push "
+                                    "(HTTP %s); fallback file will self-heal.",
+                                    resp.status)
+                except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
+                    LOGGER.warning(
+                        "Camera bridge unreachable; call settings written to the "
+                        "fallback file, applied on its next poll or restart.")
+            return self.async_create_entry(title="", data=self.options)
+
+        def _opt(key):
+            return self.options.get(key, CONF_OPTIONS_DEFAULT[key])
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_CALL_ENABLED, default=_opt(CONF_CALL_ENABLED)):
+                    selector.selector({"boolean": {}}),
+                vol.Optional(CONF_CALL_SIP_SERVER, default=_opt(CONF_CALL_SIP_SERVER)):
+                    selector.selector({"text": {}}),
+                vol.Optional(CONF_CALL_SIP_ACCOUNT, default=_opt(CONF_CALL_SIP_ACCOUNT)):
+                    selector.selector({"text": {}}),
+                vol.Optional(CONF_CALL_SIP_PASSWORD, default=_opt(CONF_CALL_SIP_PASSWORD)):
+                    selector.selector({"text": {"type": "password"}}),
+                vol.Optional(CONF_CALL_DID, default=_opt(CONF_CALL_DID)):
+                    selector.selector({"text": {}}),
+                vol.Optional(CONF_CALL_TARGET, default=_opt(CONF_CALL_TARGET)):
+                    selector.selector({"text": {}}),
+            }
+        )
+        return self.async_show_form(
+            step_id="call",
             data_schema=schema,
             errors=errors,
             last_step=True,

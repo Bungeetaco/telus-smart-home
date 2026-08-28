@@ -234,6 +234,11 @@ to a camera from there. The per-camera answer is each camera's `audio_codec`.
 | `sniff_packets` | int | How many packets each session samples before committing (a constant, echoed here so the response is self-describing) |
 | `opus_confidence` | float | What fraction of that sample libopus must accept for the session to commit to Opus (a constant, echoed for the same reason) |
 
+The `call` section reports the live call: `enabled` (feature armed and a
+sub-account present), `active`, the `camera_id` and `since` of a call in
+flight, and `last_result` (how the previous call ended, persisted so it
+survives the call).
+
 `state: "restart_deferred"` is the most informative value: the camera hit the
 `SESSION_WEDGE_TIMEOUT_S` escape hatch, but it has fired too often
 lately to be a local wedge, so `restart_guard.py` is holding the process before
@@ -1224,6 +1229,44 @@ Responses:
 
 The route holds the request open for the life of the call (ring time plus the
 tone), so give the HTTP client a generous timeout.
+
+## `POST /control/call/doorbell`
+
+Starts a LIVE bridged call: the bridge dials the configured number and, on
+answer, connects the doorbell's microphone to the caller and the caller's
+voice to the doorbell speaker. Returns immediately; the call runs in the
+background and its progress is the `call` section of `/control/status`.
+
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+Body: `{"camera_id": "<id>", "target": "<number>"}`. `target` is optional and
+defaults to the configured `DOORBELL_CALL_TARGET`.
+
+Responses: `200 {"status": "started", "camera_id": ...}`;
+`403 {"error": "call_disabled"}` (feature off or no sub-account);
+`404 {"error": "unknown_camera"}`; `400 {"error": "no_target"}`;
+`409 {"error": "call_in_progress"}`.
+
+## `POST /control/call/stop`
+
+Ends the live call in progress (the doorbell hangs up at its next frame slot
+and the talkdown stops). `200 {"stopped": true|false}` -- false when there was
+no call to stop.
+
+## `POST /control/call/settings`
+
+Live-applies the Home-Assistant-managed call settings, mirroring
+`/control/credentials`: HA writes `call_settings.json` to the shared dir first
+(the restart-surviving copy), then pushes the same payload here (the no-restart
+apply). A missing key leaves the current value alone; a present key applies
+verbatim, including an empty string to clear it.
+
+    Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>
+
+Body (all keys optional): `enabled` (bool), `sip_server`, `sip_account`,
+`sip_password`, `did`, `call_target` (strings). Returns
+`200 {"status": "applied", "fields": [names applied]}` -- names only, never
+values, since one is a password.
 
 ## `POST /control/cameras/{camera_id}/settings/volume`
 

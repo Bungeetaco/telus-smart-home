@@ -624,6 +624,22 @@ VOIPMS_SIP_PASSWORD = os.environ.get("VOIPMS_SIP_PASSWORD", "")
 VOIPMS_DID = os.environ.get("VOIPMS_DID", "")
 DOORBELL_CALL_TARGET = os.environ.get("DOORBELL_CALL_TARGET", "")
 SIP_PORT = int(os.environ.get("SIP_PORT", "5060"))
+# Whether the call feature is armed at all. Managed from Home Assistant's
+# options flow (like the TELUS credentials, the env value is only the
+# bootstrap; call_settings.json in the shared dir overrides it live), so an
+# operator can turn the whole thing off without touching the container.
+CALL_ENABLED = os.environ.get("CALL_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes", "on")
+# HA-managed call settings ride the same shared-directory channel as the
+# TELUS credentials: HA writes this file atomically and then live-pushes the
+# same payload to /control/call/settings; the file is the restart-surviving
+# fallback, the push is the no-restart apply. See main.py's credentials
+# fallback for the pattern this copies.
+CALL_SETTINGS_PATH = f"{SHARED_DIR}/call_settings.json"
+# Hard ceiling on one bridged call. A forgotten call otherwise holds the
+# doorbell's talk session and pays VoIP.ms by the minute until someone
+# notices; ten minutes is far past any door conversation.
+CALL_MAX_S = float(os.environ.get("CALL_MAX_S", "600"))
 # Long enough to hear it clearly, short enough that a pocket-answered call
 # costs cents, not minutes.
 CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))
