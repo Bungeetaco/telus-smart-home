@@ -1,0 +1,359 @@
+"""Tests for the integration's entry lifecycle (`__init__.py`, backlog E66):
+setup, the config-entry migrations, and unload.
+
+Run from the repository root:
+
+    python3 tests/test_init_lifecycle.py
+
+No Home Assistant, no network, no account: `tests/ha_stubs.py` supplies the
+`homeassistant.*` and `pyalarmdotcomajax` names (including empty stand-ins for
+the three import-time patch modules, whose real application CI's
+check_patch.py job proves), `tests/fakes.py` the hass/registry fakes, and the
+REAL `__init__.py` runs with a scripted controller and an absent bridge.
+
+The module is imported as `custom_components.telus_smarthome.__init__`
+explicitly, because the harness deliberately seeds the package without
+executing its __init__ (see ha_stubs); importing it by name runs the real
+file with its relative imports intact.
+
+Why this file exists: setup's device-pruning pass has already shipped three
+distinct silent failures (this fork's own bridge/service devices deleted and
+recreated on EVERY restart, discarding renames and area assignments; removal
+decided on whichever identifier an unordered set yielded first; a KeyError on
+the second removal aborting setup entirely), and nothing pinned the fixed
+behaviour. The clip-link secret's generate-once rule and the bridge-down-at-
+startup tolerance are the same shape: regressions produce a working-looking
+HA whose damage (dead clip links, lost customisations, no camera entities
+ever) surfaces days later.
+
+Pinned here: the auth/transport exception mapping at setup, the clip secret's
+generate-once-never-rotate rule, the view's once-per-HA-run registration, the
+bridge-down-at-startup tolerance (setup completes, coordinators empty), the
+whole device-pruning matrix, Skybell virtual-device creation, platform
+forwarding, service registration, the v1-to-v4 options migrations, and
+unload's pop/stop/unregister ordering including the services-outlive-the-
+first-entry rule and the clip_view sentinel exclusion.
+
+Deliberately NOT covered: the websocket monitor's runtime behaviour (the
+task is handed to HA and pinned only as "created and tied to the entry");
+actually running it needs the real pyalarmdotcomajax stack.
+"""
+import asyncio
+import importlib
+import pathlib
+import sys
+import types
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import ha_stubs  # noqa: E402
+
+ha_stubs.install()
+
+import aiohttp  # noqa: E402
+
+import fakes  # noqa: E402
+from fakes import (  # noqa: E402
+    FakeConfigEntries,
+    FakeConfigEntry,
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
+    FakeHass,
+)
+
+from homeassistant.exceptions import (  # noqa: E402
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+)
+
+from custom_components.telus_smarthome import camera as camera_module  # noqa: E402
+from custom_components.telus_smarthome import event as event_module  # noqa: E402
+from custom_components.telus_smarthome.const import (  # noqa: E402
+    CONF_CLIP_LINK_SECRET,
+    DATA_CONTROLLER,
+    DOMAIN,
+    PLATFORMS,
+    SERVICE_BYPASS_SENSORS,
+    SERVICE_SPEAK,
+    SERVICE_STOP_SPEAKING,
+    SERVICE_UNPAIR_ARMING_DEVICE,
+)
+
+init_module = importlib.import_module("custom_components.telus_smarthome.__init__")
+
+
+async def _absent_bridge(hass, url, params=None, timeout=None):
+    return None  # no control secret yet: the bridge is down at HA startup
+
+
+def scripted_controller(initialize_outcome=None, devices=(), cameras=()):
+    class _Controller:
+        instances = []
+
+        def __init__(self, hass, config_entry):
+            self.hass = hass
+            self.config_entry = config_entry
+            self.stopped = 0
+            self.api = types.SimpleNamespace(devices=types.SimpleNamespace(
+                all={d.id_: d for d in devices},
+                cameras={c.id_: c for c in cameras},
+            ))
+            _Controller.instances.append(self)
+
+        async def initialize(self):
+            if isinstance(initialize_outcome, BaseException):
+                raise initialize_outcome
+
+        async def async_start_websocket_monitor(self):
+            return None
+
+        async def stop(self):
+            self.stopped += 1
+
+    return _Controller
+
+
+def adc_device(device_id, subtype=None, has_state=True, name="Zone"):
+    return types.SimpleNamespace(id_=device_id, device_subtype=subtype,
+                                 has_state=has_state, name=name,
+                                 mac_address="aa:bb:cc:dd:ee:ff")
+
+
+def make_hass(entry, devices=(), deleted=()):
+    hass = FakeHass()
+    hass.config_entries = FakeConfigEntries([entry])
+    hass.data["device_registry"] = FakeDeviceRegistry(list(devices), list(deleted))
+    return hass
+
+
+async def run_setup(hass, entry, controller_cls):
+    saved_init = fakes.patch(init_module, AlarmIntegrationController=controller_cls)
+    saved_camera = fakes.patch(camera_module, bridge_get=_absent_bridge)
+    saved_event = fakes.patch(event_module, bridge_get=_absent_bridge)
+    try:
+        return await init_module.async_setup_entry(hass, entry)
+    finally:
+        fakes.restore(init_module, saved_init)
+        fakes.restore(camera_module, saved_camera)
+        fakes.restore(event_module, saved_event)
+
+
+async def test_setup_maps_auth_and_transport_failures():
+    auth_cases = [
+        ha_stubs.OtpRequired([]),
+        ha_stubs.AuthenticationFailed("bad password"),
+        ha_stubs.ConfigureTwoFactorAuthentication(),
+    ]
+    for outcome in auth_cases:
+        entry = FakeConfigEntry()
+        hass = make_hass(entry)
+        try:
+            await run_setup(hass, entry, scripted_controller(outcome))
+        except ConfigEntryAuthFailed:
+            pass
+        else:
+            raise AssertionError(
+                f"{type(outcome).__name__} must raise ConfigEntryAuthFailed so "
+                "HA starts a reauth flow instead of retrying forever")
+
+    transport_cases = [TimeoutError(), aiohttp.ClientError("down"),
+                       ha_stubs.AlarmdotcomException("hiccup")]
+    for outcome in transport_cases:
+        entry = FakeConfigEntry()
+        hass = make_hass(entry)
+        try:
+            await run_setup(hass, entry, scripted_controller(outcome))
+        except ConfigEntryNotReady:
+            pass
+        else:
+            raise AssertionError(
+                f"{type(outcome).__name__} must raise ConfigEntryNotReady so "
+                "HA retries with backoff instead of accusing the credentials")
+
+
+async def test_setup_succeeds_with_the_bridge_down_and_wires_everything():
+    entry = FakeConfigEntry()
+    hass = make_hass(entry)
+    result = await run_setup(hass, entry, scripted_controller())
+    assert result is True, (
+        "an unreachable camera bridge at HA startup must never fail the "
+        "entire entry -- the alarm panel and locks have nothing to do with it")
+
+    secret = entry.data.get(CONF_CLIP_LINK_SECRET)
+    assert secret and len(secret) == 64, (
+        f"clip link secret {secret!r}: a fresh entry must be given a 32-byte "
+        "hex signing secret before any coordinator can mint links")
+
+    assert len(hass.http.views) == 1, "the clip redirect view must be registered"
+    store = hass.data[DOMAIN][entry.entry_id]
+    assert store[DATA_CONTROLLER] is not None
+
+    forwarded = hass.config_entries.forwarded
+    assert forwarded and forwarded[0][1] == list(PLATFORMS), (
+        f"forwarded {forwarded!r}: every platform must be handed to HA")
+
+    for service in (SERVICE_SPEAK, SERVICE_STOP_SPEAKING, SERVICE_BYPASS_SENSORS,
+                    SERVICE_UNPAIR_ARMING_DEVICE):
+        assert hass.services.has_service(DOMAIN, service), f"{service} not registered"
+
+    names = [name for _coro, name in entry.background_tasks]
+    assert f"{DOMAIN}_websocket_monitor" in names, (
+        "the websocket monitor must be a config-entry background task -- a "
+        "bare create_task survived unload and leaked one permanently "
+        "reconnecting monitor per reload")
+
+    # Second setup in the same HA run (a reload): the secret must NOT rotate
+    # (delivered clip links die with it), and the view must not re-register
+    # (aiohttp raises on duplicate routes).
+    result = await run_setup(hass, entry, scripted_controller())
+    assert result is True
+    assert entry.data[CONF_CLIP_LINK_SECRET] == secret, (
+        "a reload rotated the clip link secret -- every link already inside a "
+        "delivered phone notification now 401s forever")
+    assert len(hass.http.views) == 1, "the clip view was registered twice"
+
+
+async def test_setup_prunes_only_absent_alarm_devices():
+    devices = [
+        adc_device("123-456"),  # still on Alarm.com
+    ]
+    cameras = [adc_device("77-88", name="Skybell")]
+    registry_devices = [
+        FakeDeviceEntry("keep-present", {(DOMAIN, "123-456")}, {"entryX"}),
+        FakeDeviceEntry("keep-attr", {(DOMAIN, "123-456_low_battery")}, {"entryX"}),
+        FakeDeviceEntry("remove-gone", {(DOMAIN, "123-999")}, {"entryX"}),
+        # This fork's own devices carry non-Alarm.com ids (TELUS camera UUIDs,
+        # the Integration service device). Deleting them on every setup
+        # silently discarded renames and area assignments -- a shipped bug.
+        FakeDeviceEntry("keep-bridge-cam", {(DOMAIN, "cam-uuid-abc")}, {"entryX"}),
+        FakeDeviceEntry("keep-service", {(DOMAIN, "entryX_integration")}, {"entryX"}),
+        FakeDeviceEntry("keep-foreign", {("hue", "123-999")}, {"entryX"}),
+    ]
+    deleted = [FakeDeviceEntry("stale-deleted", {(DOMAIN, "123-000")}, {"entryX"})]
+    entry = FakeConfigEntry(entry_id="entryX")
+    hass = make_hass(entry, registry_devices, deleted)
+    controller_cls = scripted_controller(devices=devices, cameras=cameras)
+    assert await run_setup(hass, entry, controller_cls)
+
+    registry = hass.data["device_registry"]
+    assert registry.removed == ["remove-gone"], (
+        f"removed {registry.removed!r}: exactly the device Alarm.com no longer "
+        "has -- never this fork's own devices, never attribute-suffixed ids of "
+        "present devices, never another integration's, and never twice")
+    assert registry.deleted_devices == {}, (
+        "orphaned deleted-device records must be purged")
+    created = registry.created
+    assert len(created) == 1 and created[0]["identifiers"] == {(DOMAIN, "77-88")}, (
+        f"created {created!r}: the Skybell camera absent from the registry "
+        "gets its virtual device, and nothing else is re-created")
+
+
+async def test_migrations_v1_to_v4():
+    entry = FakeConfigEntry(version=1, options={
+        "arm_code": 1234,
+        "force_bypass": "Stay Only",
+        "silent_arming": "Always",
+        "no_entry_delay": "Away Only",
+    })
+    hass = make_hass(entry)
+    assert await init_module.async_migrate_entry(hass, entry)
+    assert entry.version == 4, f"stopped at version {entry.version}"
+    options = entry.options
+    assert options["arm_code"] == "1234", (
+        "a numeric arm code from v1 must survive as the string the panel is "
+        "sent, not be dropped")
+    # NOTE on the delay flags: the v2-to-v3 step appends "delay" to a mode
+    # when the LEGACY no_entry_delay setting did NOT cover it (i.e. the mode
+    # kept its entry delay), and v3-to-v4 renames "delay" to "no_entry_delay",
+    # which alarm_control_panel.py then treats as "arm with NO entry delay".
+    # That inversion is inherited migration behaviour, pinned here as it IS;
+    # see the E66 close-out in docs/backlog.md for the finding.
+    assert options["arm_home_options"] == [
+        "force_bypass", "silent_arming", "no_entry_delay"], (
+        f"arm_home {options['arm_home_options']!r}")
+    assert options["arm_away_options"] == ["silent_arming"], (
+        f"arm_away {options['arm_away_options']!r}")
+    assert options["arm_night_options"] == ["silent_arming", "no_entry_delay"], (
+        f"arm_night {options['arm_night_options']!r}")
+    for legacy in ("use_arm_code", "force_bypass", "silent_arming", "no_entry_delay"):
+        assert legacy not in options, f"legacy option {legacy} survived to v4"
+
+    # An empty v1 entry: no code, no legacy flags; every mode keeps its delay.
+    entry = FakeConfigEntry(version=1, options={})
+    hass = make_hass(entry)
+    assert await init_module.async_migrate_entry(hass, entry)
+    assert entry.version == 4
+    assert entry.options["arm_code"] is None
+    assert entry.options["arm_home_options"] == ["no_entry_delay"]
+    assert entry.options["arm_away_options"] == ["no_entry_delay"]
+    assert entry.options["arm_night_options"] == ["no_entry_delay"]
+
+
+async def test_unload_stops_the_controller_and_keeps_shared_services_until_last():
+    def build_loaded_entry(entry_id):
+        entry = FakeConfigEntry(entry_id=entry_id)
+        controller = types.SimpleNamespace(stopped=0)
+
+        async def stop():
+            controller.stopped += 1
+
+        controller.stop = stop
+        return entry, controller
+
+    entry1, controller1 = build_loaded_entry("e1")
+    entry2, controller2 = build_loaded_entry("e2")
+    hass = FakeHass()
+    hass.config_entries = FakeConfigEntries([entry1, entry2])
+    hass.data[DOMAIN] = {
+        "clip_view_registered": True,
+        "e1": {DATA_CONTROLLER: controller1},
+        "e2": {DATA_CONTROLLER: controller2},
+    }
+    for service in (SERVICE_SPEAK, SERVICE_STOP_SPEAKING, SERVICE_BYPASS_SENSORS,
+                    SERVICE_UNPAIR_ARMING_DEVICE):
+        hass.services.async_register(DOMAIN, service, lambda call: None)
+
+    assert await init_module.async_unload_entry(hass, entry1)
+    assert controller1.stopped == 1, (
+        "unload must call controller.stop() -- stopping only the websocket "
+        "leaked one aiohttp session per reload, and every options save is a reload")
+    assert "e1" not in hass.data[DOMAIN]
+    assert hass.config_entries.unloaded[-1][1] == list(PLATFORMS)
+    assert hass.services.has_service(DOMAIN, SERVICE_SPEAK), (
+        "the shared services must survive while another entry is loaded")
+
+    assert await init_module.async_unload_entry(hass, entry2)
+    for service in (SERVICE_SPEAK, SERVICE_STOP_SPEAKING, SERVICE_BYPASS_SENSORS,
+                    SERVICE_UNPAIR_ARMING_DEVICE):
+        assert not hass.services.has_service(DOMAIN, service), (
+            f"{service} survived the LAST entry's unload -- the "
+            "clip_view_registered sentinel must not count as an entry")
+
+
+TESTS = (
+    test_setup_maps_auth_and_transport_failures,
+    test_setup_succeeds_with_the_bridge_down_and_wires_everything,
+    test_setup_prunes_only_absent_alarm_devices,
+    test_migrations_v1_to_v4,
+    test_unload_stops_the_controller_and_keeps_shared_services_until_last,
+)
+
+
+async def main():
+    failures = 0
+    for test in TESTS:
+        try:
+            await test()
+            print(f"  ok   {test.__name__}")
+        except AssertionError as exc:
+            print(f"  FAIL {test.__name__}: {exc}")
+            failures += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ERROR {test.__name__}: {exc!r}")
+            failures += 1
+    print("\nRESULT:", "PASS" if not failures else f"FAIL ({failures})")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

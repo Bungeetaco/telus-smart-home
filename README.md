@@ -84,6 +84,13 @@ one visitor is worse than a first notification without a thumbnail. If you want
 the clip in the notification, trigger on the account-wide `Activity` event
 entity, which does re-fire exactly once when a clip arrives.
 
+A complete worked example lives in [`ha-config/`](ha-config): an installable
+package that turns the press event, Frigate person detection and the
+`telus_smarthome.speak` service into an actionable-notification intercom
+(snapshot notifications with tap-to-speak quick replies), plus a matching
+doorbell dashboard view. It is written against one specific deployment's
+entity ids; its README says what to re-check before using it on another.
+
 ## Two-way audio (talkdown)
 
 Home Assistant can play audio out the doorbell speaker: a spoken warning, a greeting, whatever you like. Call the `telus_smarthome.speak` service with either a `message` (rendered by HA's text-to-speech) or a `media_content_id` (a media-source URI or a direct URL to an audio file):

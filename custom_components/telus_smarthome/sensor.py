@@ -862,6 +862,13 @@ class CameraAudioStateSensor(_StreamHealthEntity):
             # what it OBSERVED, never the format the publisher was launched
             # with, so a value here is proof audio decoded at least once.
             "audio_format": status.get("audio_format"),
+            # Which decoder those frames came from ("pcmu"/"opus"), derived by
+            # the bridge from the observed frame shape -- the offer advertises
+            # Opus while this account's cameras send G.711 mu-law, and this is
+            # where that verdict surfaces. Null until a frame has decoded, and
+            # None (absent, not fabricated) on a bridge too old to report it,
+            # the same rule as audio_dropped below.
+            "audio_codec": status.get("audio_codec"),
             "dropped_audio_frames": status.get("dropped_audio_frames"),
             # When the counter was last seen moving, as observed by this poller
             # (so it starts empty after a Home Assistant restart, not at the
