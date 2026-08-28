@@ -3109,9 +3109,32 @@ entries are the mechanism that keeps it under review
   while a late one leaves a single camera down longer, and the one confirmed
   wedge never self-cleared at all so any finite threshold catches it.
 
+  Then a THIRD run, 1080 seconds on the same camera, landed inside the new 1800s
+  window and recovered unaided as well. Three raises would have been two too
+  many, because time was never the thing separating the two cases.
+
+  **A HEALTHY PEER NOW VETOES THE RESTART, and that is the real discriminator.**
+  The hatch exists for a leaked or wedged resource that only a fresh process can
+  release. Every such resource is a property of the PROCESS, so it takes every
+  camera down with it, and the one confirmed incident behaved exactly that way:
+  2026-07-20 was 26+ failures ACROSS BOTH CAMERAS that never self-cleared. Every
+  run measured on 2026-08-28 was the opposite shape: 103s, 550s and 1080s, all
+  on the doorbell, all with the living room streaming throughout, all recovering
+  by themselves. A process that is decoding, encoding and publishing for another
+  camera right now is not wedged, and restarting it cannot reach the far end of
+  the one path that is failing.
+
+  So `config.SESSION_WEDGE_PEER_FRESH_S = 120`: another camera having produced a
+  frame that recently vetoes the exit and logs why, once per run. It cannot
+  become a permanent exemption, because the reading is the wall-clock time of a
+  real frame, so a peer that stops delivering stops vetoing on its own. On a
+  single-camera deployment there is no peer and the hatch behaves as before.
+  The duration stays as the backstop for the both-cameras case.
+
   The lesson generalises past this constant: a threshold justified by "N times
   the worst case so far" is only as good as how thoroughly the worst case has
-  been sampled, and one hour of new data moved this one by 5x.
+  been sampled. This one was raised twice and was still being chased by the data,
+  which was the signal that the measure itself was wrong rather than its value.
 
   **The `TypeError` was a second, separate bug, and it is now fixed too.** This
   entry previously said it had not recurred in 12 hours and was not driving the

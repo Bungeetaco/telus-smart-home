@@ -2017,6 +2017,89 @@ async def test_the_escape_hatch_ends_the_process():
     assert guard_calls == 1, "the restart guard was not consulted before exiting"
 
 
+async def test_a_healthy_peer_camera_vetoes_the_container_restart():
+    """One camera down while another streams is not a wedged process.
+
+    The escape hatch exists for a leaked or wedged resource that only a fresh
+    process can release. Every one of those is a property of the PROCESS, and
+    the one confirmed incident behaved that way: 2026-07-20 took BOTH cameras
+    down and never self-cleared. But every failure run measured on 2026-08-28
+    was the opposite shape -- 103s, 550s and 1080s, all on the doorbell, all
+    with the living room streaming throughout, and all recovering unaided. A
+    process that is decoding, encoding and publishing for another camera right
+    now is not wedged, and restarting it cannot reach the far end of the path
+    that is actually failing.
+
+    So a peer's recent frame vetoes the exit. This is what the duration
+    threshold could only approximate: raising it twice (600s, then 1800s) kept
+    losing to a longer transient, because time was never the thing that
+    separated the two cases.
+    """
+    peer = "111937238-9999"
+    bad = Plan(connect_error=RuntimeError("no frames received before timeout"))
+    with scenario([bad] * 40, SESSION_WEDGE_TIMEOUT_S=1.0,
+                  SESSION_WEDGE_PEER_FRESH_S=999) as ctx:
+        # A second camera in the same process, delivering.
+        ctx.status[peer] = {"state": "streaming", "last_frame_at": time.time()}
+        start(ctx)
+        # Long enough that the hatch has had several chances to fire: waiting on a
+        # FAILURE COUNT is not enough, because under the fast test timings six
+        # failures elapse in well under the wedge window and the hatch is never
+        # reached at all. That version of this test passed with the veto deleted.
+        began = time.monotonic()
+        await run_until(
+            ctx,
+            lambda x: (x.os.exits                       # stop early if it restarts
+                       or (time.monotonic() - began >= 5.0
+                           and x.state.get("consecutive_failures", 0) >= 6)),
+            timeout=30.0, why="a failure run well past the wedge timeout")
+        exits = list(ctx.os.exits)
+        elapsed = time.monotonic() - began
+        guard_calls = len(ctx.guard.calls)
+        failures = ctx.state.get("consecutive_failures")
+        await stop(ctx)
+
+    assert exits == [], (
+        f"the container was restarted ({exits}) after {elapsed:.1f}s and "
+        f"{failures} failures on one camera, while another was delivering frames "
+        "through the same process. That process is demonstrably not wedged -- it "
+        "is decoding, encoding and publishing for the peer right now -- and the "
+        "restart kicks every RTSP reader on the healthy camera too.")
+    assert guard_calls == 0, "the exit path was entered at all"
+    assert elapsed >= 5 * 1.0, (
+        f"only {elapsed:.1f}s elapsed against a 1.0s wedge window, so the hatch "
+        "was never actually reached and this test proves nothing")
+    print(f"  ok  {failures} failures with a healthy peer, no restart")
+
+
+async def test_a_stale_peer_does_not_veto_the_container_restart():
+    """The veto has to be evidence, not a permanent exemption.
+
+    A peer that has itself stopped delivering proves nothing about the process,
+    and 2026-07-20 -- the incident the hatch exists for -- is exactly that case:
+    both cameras failing at once. So a peer whose last frame is older than
+    SESSION_WEDGE_PEER_FRESH_S must not hold the exit off, or the hatch would be
+    dead code on every multi-camera deployment.
+    """
+    peer = "111937238-9999"
+    bad = Plan(connect_error=RuntimeError("no frames received before timeout"))
+    with scenario([bad] * 40, SESSION_WEDGE_TIMEOUT_S=1.0,
+                  SESSION_WEDGE_PEER_FRESH_S=0.5) as ctx:
+        # Present, but last delivered a frame well outside the freshness window.
+        ctx.status[peer] = {"state": "reconnecting", "last_frame_at": time.time() - 600}
+        start(ctx)
+        await run_until(ctx, lambda x: x.task.done(), timeout=25.0,
+                        why="the escape hatch with no healthy peer")
+        exits = list(ctx.os.exits)
+        await stop(ctx)
+
+    assert exits == [1], (
+        f"the process was not ended: exits={exits}. A peer that stopped "
+        "delivering 600s ago is not evidence the process is healthy, and both "
+        "cameras failing together is the one shape a real wedge takes.")
+    print("  ok  a stale peer does not veto the restart")
+
+
 async def test_a_failure_run_that_recovers_does_not_restart_the_container():
     """The 2026-08-28 fault, and the reason the trigger is a duration.
 
@@ -5489,6 +5572,8 @@ TESTS = [
     test_a_frame_size_change_replaces_the_publisher,
     test_the_rate_is_measured_from_what_the_camera_sent_not_what_survived,
     test_the_escape_hatch_ends_the_process,
+    test_a_healthy_peer_camera_vetoes_the_container_restart,
+    test_a_stale_peer_does_not_veto_the_container_restart,
     test_a_failure_run_that_recovers_does_not_restart_the_container,
     test_a_successful_batch_restarts_the_wedge_clock,
     test_the_restart_guard_holds_the_process_before_exiting,

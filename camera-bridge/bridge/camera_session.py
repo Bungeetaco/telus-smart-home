@@ -475,6 +475,28 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     def _update_status(**fields):
         status[camera_id].update(fields)
 
+    def _peer_still_delivering() -> bool:
+        """Is ANOTHER camera in this process producing frames right now?
+
+        If one is, this process is not wedged, and that is not an inference: the
+        peer's frames prove it can still open Janus sessions, decode, encode and
+        publish. Whatever is stopping THIS camera is at the far end of its own
+        path, where killing and restarting this process cannot reach it. See
+        config.SESSION_WEDGE_PEER_FRESH_S for the evidence on both sides.
+
+        Read off `last_frame_at`, which is wall-clock and is written only where a
+        real frame arrives, so a camera that stops delivering stops vetoing on
+        its own without anything having to clear it.
+        """
+        now_wall = time.time()
+        for other_id, other in status.items():
+            if other_id == camera_id:
+                continue
+            seen = other.get("last_frame_at")
+            if seen is not None and now_wall - seen <= c.SESSION_WEDGE_PEER_FRESH_S:
+                return True
+        return False
+
     # Lifetime total of frames dropped because the consumer fell behind (see
     # janus_client._pump_track). Kept here because each session's own counter
     # dies with it at every ~165s rotation, so before this the throttled log
@@ -555,6 +577,9 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
     # allowed to try again on the same evidence. Written only where the shape is
     # actually observed (_note_audio_shape), never where it is merely wanted.
     audio_fmt_changed_at: float | None = None
+    # Whether this failure run has already said that a healthy peer is vetoing
+    # the escape hatch. Cleared with the run, so each new one says it once.
+    peer_veto_logged = False
     last_frame = None
     last_live = 0.0  # monotonic time a real (non-repeated) frame last arrived
     hold_task: asyncio.Task | None = None
@@ -1435,6 +1460,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 backoff = c.RECONNECT_BACKOFF_INITIAL_S  # reset after any successful frame batch
                 consecutive_failures = 0
                 failing_since = None
+                peer_veto_logged = False
                 # sink.fps (not the local fps var) so this always reflects what's
                 # actually driving the encoder's -r/-g, not a pre-clamp/burst-noisy
                 # measurement -- see FfmpegSink.start()'s own comment.
@@ -1573,6 +1599,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # _login_with_retry). Don't let it count toward that threshold.
                     consecutive_failures += 1
                     if failing_since is None:
+                        peer_veto_logged = False
                         # The START of the run, not this attempt: the hatch below
                         # asks how long this camera has been unable to deliver a
                         # frame, and that clock starts at the first failure after
@@ -1588,9 +1615,27 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # for one event. Message text only; the handling is unchanged.
                 log.exception("%s: camera session failed%s", camera["id"],
                               "" if rate_limited else f", reconnecting in {backoff}s")
-                if (failing_since is not None
-                        and time.monotonic() - failing_since
-                        >= c.SESSION_WEDGE_TIMEOUT_S):
+                wedged_for = (None if failing_since is None
+                              else time.monotonic() - failing_since)
+                if (wedged_for is not None
+                        and wedged_for >= c.SESSION_WEDGE_TIMEOUT_S
+                        and _peer_still_delivering()):
+                    # Long enough to look like a wedge, but another camera is
+                    # delivering frames through this same process, so it is not
+                    # one. Said once per run rather than per failure: the run can
+                    # be tens of failures long and this is one fact about it.
+                    if not peer_veto_logged:
+                        peer_veto_logged = True
+                        log.warning(
+                            "%s: no successful frame for %.0fs, which would force "
+                            "a container restart -- NOT restarting, because "
+                            "another camera in this process is still delivering "
+                            "frames, so nothing here is wedged and a restart "
+                            "cannot reach what is failing. Retrying this camera "
+                            "for as long as it takes.",
+                            camera["id"], wedged_for)
+                elif (wedged_for is not None
+                        and wedged_for >= c.SESSION_WEDGE_TIMEOUT_S):
                     # MEASURED IN TIME, NOT IN ATTEMPTS, and it used to be the
                     # other way round. The threshold was five consecutive
                     # failures, and on 2026-08-28 that fired 21 times in a day on

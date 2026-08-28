@@ -190,6 +190,35 @@ def rate_limit_sleep_s(retry_after_s: float) -> float:
 # FRAME_SILENCE_TIMEOUT_S, so a run cannot reach this duration without many
 # attempts inside it; there is no need to also require a count.
 SESSION_WEDGE_TIMEOUT_S = 1800
+# How recently another camera in this process must have produced a frame for it
+# to count as proof that this process is not wedged.
+#
+# THIS IS THE DISCRIMINATOR THE DURATION ABOVE ONLY APPROXIMATES. The escape
+# hatch exists for a leaked or wedged resource that only a fresh process can
+# release -- fds, sockets, an aiortc pc.close() that hung. Every one of those is
+# a property of the PROCESS, so it takes every camera down with it, and the one
+# confirmed incident behaved exactly that way: 2026-07-20 was 26+ consecutive
+# "no frames received" failures ACROSS BOTH CAMERAS that never self-cleared.
+#
+# A single camera failing while its sibling streams is the opposite finding. The
+# process is demonstrably able to open Janus sessions, decode, encode and
+# publish, because it is doing all of that for the other camera right now; what
+# is failing is the far end of one camera's path, and killing this process
+# cannot reach it. Every failure run measured on 2026-08-28 was that shape --
+# 103s, 550s and 1080s, all on the doorbell, all with the living room streaming
+# throughout, and all of which recovered unaided. The restart that DID fire that
+# morning was followed by five more failures on the same camera, which is the
+# same conclusion from the other direction.
+#
+# So a peer's recent frame vetoes the restart. It cannot be gamed by a stale
+# reading: this is the wall-clock time of the last real frame, so a camera that
+# stops delivering stops vetoing within this window. 120s spans a rotation
+# (SESSION_MAX_LIFETIME_S plus reconnect) so an ordinary handover on the peer
+# does not briefly hand this camera permission to restart the container.
+#
+# On a single-camera deployment there is no peer, nothing can veto, and the
+# hatch behaves exactly as it did before.
+SESSION_WEDGE_PEER_FRESH_S = 120
 
 # --- Restart-frequency guard for that escape hatch (see restart_guard.py) ---
 # The hatch is right for a one-off local wedge and wrong for a sustained
