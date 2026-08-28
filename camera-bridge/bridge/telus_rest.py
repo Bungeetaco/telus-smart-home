@@ -46,8 +46,49 @@ async def get_video_source(telus, camera_id: str) -> dict:
         "proxy_url": attrs["proxyUrl"],
         "janus_gateway_url": attrs["janusGatewayUrl"],
         "janus_token": attrs["janusToken"],
-        "ice_servers": json.loads(attrs["iceServers"]),
+        "ice_servers": _parse_ice_servers(camera_id, attrs.get("iceServers")),
     }
+
+
+def _parse_ice_servers(camera_id: str, raw) -> list:
+    """The videoSource's iceServers field, which is NOT always a JSON string.
+
+    It is normally a JSON-encoded list. Live on this account it also comes back
+    as null, with the KEY still present in the response -- so `attrs["iceServers"]`
+    succeeds and `json.loads(None)` then raises
+    `TypeError: the JSON object must be str, bytes or bytearray, not NoneType`,
+    which failed the whole session. That is backlog E89's TypeError, and it took
+    until 2026-08-28 to see a traceback for it because the failure surfaced only
+    as a `last_error` string on the camera's status.
+
+    An empty list is the right answer rather than a failure. aiortc treats it as
+    "no TURN/STUN configured" and still gathers host and server-reflexive
+    candidates, and this account's own ICE logs show DIRECT candidate pairs
+    reaching SUCCEEDED against the camera's public address, so a session with no
+    ICE servers has a real chance of connecting. If it does not, it fails on the
+    existing webrtcup/first-frame timeouts with their own clear errors, which is
+    no worse than the instant crash it replaces and is strictly better whenever
+    the direct path works.
+
+    Logged at WARNING because it is a server-side oddity worth seeing, not a
+    routine branch.
+    """
+    if raw is None or raw == "":
+        log.warning("%s: the videoSource carried no iceServers (field present but "
+                    "empty); continuing with none, so ICE has only host and "
+                    "server-reflexive candidates for this session", camera_id)
+        return []
+    if isinstance(raw, (list, tuple)):
+        # Already decoded by the JSON layer above. Nothing to parse, and calling
+        # json.loads on it would raise the same TypeError this exists to stop.
+        return list(raw)
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        log.warning("%s: the videoSource's iceServers could not be parsed (%s); "
+                    "continuing with none for this session", camera_id, type(raw).__name__)
+        return []
+    return list(parsed) if isinstance(parsed, (list, tuple)) else []
 
 
 async def get_snapshot_url(telus, camera_id: str) -> str:

@@ -27,6 +27,7 @@ os.environ.setdefault("TELUS_PASSWORD", "unused")
 
 from bridge import config as c            # noqa: E402
 from bridge import mws_client             # noqa: E402
+from bridge import telus_rest            # noqa: E402
 from bridge.talk import TalkManager       # noqa: E402
 
 # A GetDoorbellCameraList response, trimmed to the elements the parser reads.
@@ -361,6 +362,44 @@ def test_session_deadline():
     print("  ok  session deadline: implausible cstet ignored, future expiry accepted")
 
 
+def test_ice_servers_survive_a_null_field():
+    """Backlog E89's TypeError, which cost whole sessions for weeks.
+
+    The videoSource's `iceServers` is normally a JSON-encoded list, but this
+    account's server also returns it as null with the KEY STILL PRESENT. So
+    `attrs["iceServers"]` succeeds, `json.loads(None)` raises
+    `TypeError: the JSON object must be str, bytes or bytearray, not NoneType`,
+    and the session dies before it ever reaches Janus. It surfaced only as a
+    `last_error` string on the camera's status, which is why it went so long
+    without a traceback.
+
+    Nothing here should be able to raise. An empty list is the right answer: the
+    caller gathers host and server-reflexive candidates anyway, and this
+    account's ICE logs show direct pairs reaching SUCCEEDED, so a session with
+    no ICE servers can still connect. A parse failure must degrade the same way
+    rather than take the session with it.
+    """
+    real = '[{"urls": "turn:turn.example.invalid:443", "username": "u", "credential": "p"}]'
+    cases = {
+        "a real JSON list": (real, 1),
+        "null": (None, 0),
+        "an empty string": ("", 0),
+        "an already-decoded list": ([{"urls": "stun:stun.example.invalid"}], 1),
+        "malformed JSON": ("{not json", 0),
+        "a JSON object rather than a list": ('{"urls": "x"}', 0),
+        "an unexpected type": (12345, 0),
+    }
+    for name, (raw, expected) in cases.items():
+        got = telus_rest._parse_ice_servers("cam-test", raw)
+        assert isinstance(got, list), f"{name}: returned {type(got).__name__}, not a list"
+        assert len(got) == expected, (
+            f"{name}: got {len(got)} ice server(s), expected {expected}")
+    assert telus_rest._parse_ice_servers("cam-test", real)[0]["username"] == "u", (
+        "a real iceServers list was not passed through intact")
+    print("  ok  iceServers survives null, empty, malformed and pre-decoded input "
+          "without raising (E89)")
+
+
 def main():
     failures = 0
     for test in (test_doorbell_parser, test_doorbell_parser_edge_cases,
@@ -368,7 +407,8 @@ def main():
                  test_decode_srtp_key,
                  test_action_acks, test_defusedxml_is_a_hard_import,
                  test_sdp_media_summary,
-                 test_retry_after, test_session_deadline):
+                 test_retry_after, test_session_deadline,
+                 test_ice_servers_survive_a_null_field):
         try:
             test()
         except AssertionError as exc:

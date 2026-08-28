@@ -239,6 +239,15 @@ class JanusCameraSession:
         self._track_queue: asyncio.Queue = asyncio.Queue(
             maxsize=video_queue_maxsize(fps))
         self._dropped_frames = 0
+        # Arrival times of frames this session has decoded, WHETHER OR NOT they
+        # survived the queue below. camera_session's RateWatcher measures the
+        # camera's frame rate from these rather than from the frames it manages
+        # to consume, because those are not the same number the moment anything
+        # is dropped -- and a rate measured after the drop is a measurement of
+        # this bridge's own throughput, not of the camera (backlog E95). Bounded:
+        # the consumer drains it every frame, and the cap only decides how much
+        # history a stalled consumer keeps, never how much memory this can take.
+        self._arrival_times = collections.deque(maxlen=512)
         # WHEN each dropped frame was dropped, kept only while
         # config.HANDOVER_TRACE is on -- read live off the module attribute, like
         # every other knob here, so it is the setting in force when the session
@@ -595,6 +604,10 @@ class JanusCameraSession:
             except Exception as e:
                 self._mark_dead(f"track ended: {e!r}")
                 return
+            # BEFORE the queue, so a dropped frame is still a frame the camera
+            # sent. This is the only place every decoded video frame passes
+            # through, which is what makes it the honest place to measure from.
+            self._arrival_times.append(time.monotonic())
             try:
                 self._track_queue.put_nowait(frame)
             except asyncio.QueueFull:
@@ -616,6 +629,18 @@ class JanusCameraSession:
                 with contextlib.suppress(asyncio.QueueEmpty):
                     self._track_queue.get_nowait()
                 self._track_queue.put_nowait(frame)
+
+    def take_arrival_times(self) -> list:
+        """Every video-frame arrival time since the last call, oldest first.
+
+        Drained rather than read so each arrival is measured exactly once. The
+        caller is camera_session's rate measurement, which needs the frames the
+        CAMERA sent; what this session managed to hand it is a different and,
+        while anything is dropping, systematically lower number.
+        """
+        out = list(self._arrival_times)
+        self._arrival_times.clear()
+        return out
 
     async def _pump_audio_track(self, track):
         """Decode the offered audio track into the bounded queue audio_frames()

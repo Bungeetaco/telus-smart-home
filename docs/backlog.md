@@ -46,8 +46,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   audio advancing ~992 ms per ~1,040 ms of wall clock (about 99% coverage), so
   the timeline is not drifting either. What is actually observed is BIMODAL: a
   session either drops ~21 per rotation or sheds ~150 every 22 seconds (38%
-  sustained), with no audio signal separating the two. See E95, which fits all
-  of it and is now the lead. Measure it, do not reason about it.
+  sustained), with no audio signal separating the two. E95 is the cause and is
+  fixed; this entry stays open only until a soak confirms the drops fall with it.
 - **E90** (open, minor, one point answered) - three follow-ons from E88. Point
   (b), "the pump only tops up on its timeout branch", was measured on 2026-08-28
   and is NOT causing drift: audio frames arrive every ~66 ms while the timeout
@@ -61,8 +61,11 @@ and evidence. Grouped by whether anything can actually be done about them.
   observed failure run recovering after one to four failures against a threshold
   of five, and the restarts demonstrably not helping. The trigger is now a
   duration with no successful frame (`SESSION_WEDGE_TIMEOUT_S = 600`) rather
-  than a count of failures. The `TypeError` this entry also named has not
-  recurred and was not what drove the restarts.
+  than a count of failures. CONFIRMED LIVE the same evening: the doorbell reached
+  `consecutive_failures=15` and recovered on its own with zero restarts, where
+  the old threshold of five would have killed the process three times. The
+  `TypeError` this entry also named turned out to be a separate bug in
+  `iceServers` parsing, now fixed.
 
 - **E77** (open, minor) - four recorded limits of E76's handover
   instrumentation: it traces proactive rotations only, a record open at camera
@@ -103,7 +106,7 @@ and evidence. Grouped by whether anything can actually be done about them.
   a recovery whose shape matches what the publisher was LAUNCHED with still
   rebuilds, because `_drop_audio` is latched one-way.
 
-- **E95** (open, and the strongest lead for E92) - the video drops track the gap
+- **E95** (FIXED 2026-08-28, the root cause behind E92) - the video drops track the gap
   between the DECLARED frame rate and the delivered one, not audio. Observed
   live 2026-08-28 19:26: the living room was publishing `960x540@1fps` while
   shedding 1,216 frames, with `queue maxsize=4`; the doorbell was declared 15fps
@@ -126,13 +129,36 @@ and evidence. Grouped by whether anything can actually be done about them.
   but is publishing nowhere; rebuilding the encoder`, twice on the living room.
   At `-framerate 1` a slow read is what the command line asked for.
 
-  NOT YET A DIAGNOSIS. What is confirmed is the correlation and the queue
-  arithmetic, both read directly from the code and the live status. What is not
-  established is WHY the declared rate collapses to 1fps, whether the camera
-  really delivers that at times, and whether `measured_fps` of 58 is a genuine
-  burst or the rotation contamination RateWatcher already documents. Measure
-  that before changing anything, and do not repeat E92's mistake of writing the
-  mechanism down as settled.
+  **DIAGNOSED AND FIXED, 2026-08-28.** The measurement was taken at the WRONG
+  END OF THE QUEUE, and that closed the loop. `rate.note_frame` was called once
+  per frame the streaming loop CONSUMED, while frames are dropped at the
+  producer (`janus_client._pump_track`). Those two counts are equal only while
+  nothing is dropping, so the rate was read from survivors exactly when it
+  mattered, and the result feeds straight back: the declared rate sizes the
+  queue and is handed to ffmpeg as `-framerate`, so a low reading makes ffmpeg
+  read slowly, which fills the queue, which drops frames, which keeps the
+  reading low. The bridge was measuring its own throttle and calling it the
+  camera's frame rate.
+
+  The live arithmetic that settled it: the living room was declared 1fps and
+  publishing at that rate while dropping +455 and +952 frames per five-minute
+  watcher sample, so roughly 3 frames a second were being discarded against
+  about 1 delivered. The camera was sending about 4fps and the bridge reported
+  1, with `measured_fps` stuck at `None`, and the camera's own alarm.com quality
+  setting read "Highest (optimize for clarity)" throughout, so this was not a
+  device setting.
+
+  `janus_client` now records an arrival for every decoded frame BEFORE the queue
+  can drop it, and the streaming loop drains those into the RateWatcher. Draining
+  rather than taking one per consumed frame is what makes it correct: while
+  dropping there are more arrivals than consumptions. Regression test drives a
+  session that hands over 5fps while the camera sends 20 and requires the
+  measurement to report 20; it reports 5 without the fix.
+
+  Still open here: whether `measured_fps` of 58 on the doorbell is a genuine
+  burst or the rotation contamination RateWatcher already documents, and whether
+  `VIDEO_QUEUE_MIN_FRAMES = 4` is a sensible floor for a camera that swings
+  between 1 and 30fps. Neither is addressed by this fix.
 
 **Recently shipped, listed only because the trap is expensive**
 
@@ -3071,10 +3097,20 @@ entries are the mechanism that keeps it under review
   self-cleared and needed a manual restart), so that incident would still be
   caught. `MAX_CONSECUTIVE_SESSION_FAILURES` is retired.
 
-  The `TypeError('the JSON object must be str, bytes or bytearray, not
-  NoneType')` this entry also named has NOT recurred in the 12 hours before the
-  fix and is not what was driving the restarts; if it returns it needs its own
-  entry, since nothing still records where it is raised.
+  **The `TypeError` was a second, separate bug, and it is now fixed too.** This
+  entry previously said it had not recurred in 12 hours and was not driving the
+  restarts. The first half of that was WRONG: it recurred at 19:25 on 2026-08-28,
+  minutes after the escape-hatch fix deployed, and this time it carried a
+  traceback. `telus_rest.get_video_source` called
+  `json.loads(attrs["iceServers"])` unguarded, and this account's server
+  sometimes returns `iceServers` as null with the KEY STILL PRESENT, so the
+  subscript succeeded and `json.loads(None)` raised. It failed the whole session
+  every time it happened, and it had gone unexplained for weeks because it
+  surfaced only as a `last_error` string. `_parse_ice_servers` now degrades to
+  an empty list for null, empty, malformed and already-decoded input. Empty is
+  the right answer rather than a failure: aiortc still gathers host and
+  server-reflexive candidates, and this account's own ICE logs show DIRECT pairs
+  reaching SUCCEEDED, so such a session can still connect.
 
   **Not yet confirmed live.** The claim to check is a fall in restart count with
   no rise in time-without-frames, and it needs hours rather than minutes.

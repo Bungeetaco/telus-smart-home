@@ -1505,13 +1505,37 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         measured_fps=rate.last_measured,
                         duplicated_frame_warnings=(
                             dup_warnings_folded + sink.duplicated_frame_warnings))
-                    # The rate under review, measured from live frames only. A
-                    # confirmed change updates this camera's remembered rate
-                    # immediately -- so the NEXT session's decoded-frame queue is
-                    # sized from it (janus_client.video_queue_maxsize) and a sink
-                    # rebuilt for any other reason already uses it -- and asks for
-                    # the publisher to be rebuilt at the next rotation.
-                    confirmed = rate.note_frame(last_live, sink.fps)
+                    # The rate under review, measured from every frame the CAMERA
+                    # SENT -- including the ones the session's queue dropped before
+                    # this loop could see them. A confirmed change updates this
+                    # camera's remembered rate immediately -- so the NEXT session's
+                    # decoded-frame queue is sized from it
+                    # (janus_client.video_queue_maxsize) and a sink rebuilt for any
+                    # other reason already uses it -- and asks for the publisher to
+                    # be rebuilt at the next rotation.
+                    #
+                    # MEASURED AT THE PRODUCER, and it used to be measured here, one
+                    # note per frame this loop consumed. Those are the same number
+                    # only while nothing is dropping, and they diverge exactly when
+                    # the measurement matters most. The failure is self-reinforcing
+                    # and was live on the living room camera on 2026-08-28: the
+                    # publisher was declared at 1fps, so ffmpeg was launched with
+                    # `-framerate 1` and read at that rate, and the queue was sized
+                    # from 1fps to its 4-frame floor. The camera was really sending
+                    # about 4fps, so roughly three frames a second were dropped --
+                    # and the rate measurement, taken after the drop, saw 1fps and
+                    # confirmed 1fps. The bridge was measuring its own throttle and
+                    # calling it the camera's frame rate, with no way out for the
+                    # life of the process (backlog E95).
+                    #
+                    # Draining is what makes this correct rather than merely better:
+                    # there are more arrivals than consumptions while dropping, so
+                    # taking one timestamp per consumed frame would still undercount.
+                    confirmed = None
+                    for arrived_at in session.take_arrival_times():
+                        confirmed = rate.note_frame(arrived_at, sink.fps)
+                        if confirmed is not None:
+                            break
                     if confirmed is not None:
                         known_fps = confirmed
                         rate_rebuild_needed = True

@@ -485,6 +485,12 @@ class Plan:
             sparse camera is in on every session (the decoder's codec sniff needs
             20 packets and a quiet room does not send them inside the sizing
             window), and the publisher is then built VIDEO-ONLY.
+    arrivals_per_frame: how many frames the CAMERA sent for each one this session
+            hands to the consumer. 1 (the default) is a session dropping nothing.
+            Higher models a full video queue, where janus_client._pump_track
+            decodes every frame but only one in N survives -- the state the rate
+            measurement has to see through, because a rate read from the
+            survivors is a reading of the bridge's own throughput (E95).
     """
 
     _UNSET = object()
@@ -493,7 +499,9 @@ class Plan:
                  connect_delay=0.0, close_error=None, close_hang=False,
                  on_frame=None, dropped_frames=0, webrtcup_seen=True,
                  audio_interval=None, audio_fmt=("s16", 48000, 2),
-                 audio_peek=_UNSET, audio_samples=960, dropped_audio_frames=0):
+                 audio_peek=_UNSET, audio_samples=960, dropped_audio_frames=0,
+                 arrivals_per_frame=1):
+        self.arrivals_per_frame = arrivals_per_frame
         self.audio_interval = audio_interval
         self.audio_fmt = audio_fmt
         self.audio_samples = audio_samples
@@ -534,6 +542,7 @@ class FakeSession:
         # test_dropped_frames_are_timestamped_only_when_tracing.
         self.video_queue_depth = 0
         self.video_queue_limit = jc.video_queue_maxsize(fps)
+        self._arrivals = []
         self.drop_times = ()
         self.plan = CTX.next_plan()
         self.created_at = time.monotonic()
@@ -600,7 +609,27 @@ class FakeSession:
             self.frame_index += 1
             if self.plan.on_frame is not None:
                 self.plan.on_frame(idx)
+            # The real session records an arrival for every frame the camera
+            # sent, before its queue can drop any (janus_client._pump_track), and
+            # the rate is measured from those rather than from what the consumer
+            # got. This fake has no queue and so drops nothing, which makes
+            # arrivals and yields the same sequence here -- the point of matching
+            # the seam is that the loop under test drains it exactly as it does
+            # in production.
+            # Every frame the camera sent, not just the one handed over: N-1 of
+            # these are what a full queue would have dropped, spread across the
+            # interval they really arrived in.
+            n = max(1, int(getattr(self.plan, "arrivals_per_frame", 1) or 1))
+            now = time.monotonic()
+            span = delay or 0.0
+            for k in range(n):
+                self._arrivals.append(now - span + span * (k + 1) / n)
             yield frame
+
+    def take_arrival_times(self):
+        out = list(self._arrivals)
+        self._arrivals.clear()
+        return out
 
     async def close(self):
         self.close_calls += 1
@@ -1913,6 +1942,50 @@ async def test_a_frame_size_change_replaces_the_publisher():
 # --------------------------------------------------------------------------
 # 5. The consecutive-failure escape hatch
 # --------------------------------------------------------------------------
+
+async def test_the_rate_is_measured_from_what_the_camera_sent_not_what_survived():
+    """E95: a rate read after the queue is a reading of the bridge, not the camera.
+
+    The measurement used to be taken once per frame the streaming loop consumed,
+    which equals the number the camera sent only while nothing is dropping. It
+    diverges exactly when the reading matters, and the divergence is
+    self-reinforcing: the declared rate sizes the video queue AND is handed to
+    ffmpeg as `-framerate`, so a rate that reads low makes ffmpeg read slowly,
+    which fills the queue, which drops frames, which makes the rate read low.
+
+    Live on 2026-08-28 the living room camera sat at a declared 1fps while
+    shedding about three frames a second, so it was really sending around 4fps
+    and publishing a quarter of them, with no way out for the life of the
+    process.
+
+    Here the session hands over 5fps while the camera sends 20. The measurement
+    must report the camera's rate. Reading the survivors would report 5.
+    """
+    per_frame, delivered_fps = 4, 5
+    plan = Plan(frames=steady(400, 1 / delivered_fps),
+                tail=("repeat", 1 / delivered_fps, 1280, 720),
+                arrivals_per_frame=per_frame)
+    with scenario([plan], SESSION_MAX_LIFETIME_S=60.0,
+                  SESSION_WEDGE_TIMEOUT_S=999,
+                  RATE_RESAMPLE_SETTLE_S=0.2,
+                  RATE_RESAMPLE_FRAMES=60) as ctx:
+        start(ctx)
+        await run_until(ctx, lambda x: x.state.get("measured_fps") is not None,
+                        timeout=30.0, why="a settled rate measurement")
+        measured = ctx.state.get("measured_fps")
+        await stop(ctx)
+
+    sent_fps = delivered_fps * per_frame
+    assert measured is not None, "no rate was measured at all"
+    assert abs(measured - sent_fps) <= 4, (
+        f"measured {measured}fps. The camera sent {sent_fps}fps and this session "
+        f"handed over {delivered_fps}fps, so a reading near {delivered_fps} means "
+        "the rate is still being taken from the frames that survived the queue "
+        "rather than the frames the camera sent, which is the loop that pinned "
+        "the living room camera at 1fps.")
+    print(f"  ok  camera sent {sent_fps}fps, {delivered_fps}fps survived, "
+          f"measured {measured}fps")
+
 
 async def test_the_escape_hatch_ends_the_process():
     """A camera unable to produce a frame for SESSION_WEDGE_TIMEOUT_S means
@@ -5414,6 +5487,7 @@ TESTS = [
     test_a_sink_whose_start_raised_is_never_adopted,
     test_a_dead_publisher_is_replaced_at_the_next_rotation,
     test_a_frame_size_change_replaces_the_publisher,
+    test_the_rate_is_measured_from_what_the_camera_sent_not_what_survived,
     test_the_escape_hatch_ends_the_process,
     test_a_failure_run_that_recovers_does_not_restart_the_container,
     test_a_successful_batch_restarts_the_wedge_clock,
