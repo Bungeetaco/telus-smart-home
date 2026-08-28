@@ -159,19 +159,37 @@ def rate_limit_sleep_s(retry_after_s: float) -> float:
 # the same camera failed five more times before streaming. Each restart kicks
 # every RTSP reader and discards both cameras' learned audio shape (E82).
 #
-# 600s is chosen from both ends of the real evidence rather than from the
+# 1800s is chosen from both ends of the real evidence rather than from the
 # backoff arithmetic:
 #
-#   * the longest transient run actually observed was about 103 seconds (four
-#     failures), so this is roughly six times that;
+#   * the longest transient run actually observed is 550 seconds -- 13
+#     consecutive failures on the doorbell, 2026-08-28 19:48:08 to 19:57:18,
+#     with no successful frame in between, which then recovered on its own and
+#     went straight back to 1440x1440@15fps with no drops;
 #   * the one confirmed wedge, 2026-07-20, was 26+ consecutive failures that
-#     never self-cleared and needed a manual `docker restart` -- far longer than
-#     this, so that incident would still be caught.
+#     never self-cleared at all and needed a manual `docker restart`, so it was
+#     unbounded and is caught by any finite threshold.
+#
+# THE FIRST VALUE HERE WAS 600s AND IT WAS MISCALIBRATED, which is worth keeping
+# because the mistake is easy to repeat. It was set from the longest run known
+# at the time (about 103 seconds) and justified as "roughly six times that". The
+# very next transient run was 550 seconds and cleared the threshold by 50, a
+# margin of 1.09x rather than 6x. One more slow retry would have restarted the
+# container for a camera that was about to recover by itself, which is the exact
+# fault this constant was introduced to remove.
+#
+# So the number is now set against the worst transient actually measured, not
+# the worst one seen so far when the constant was written: 1800s is 3.3x the
+# 550s run. The asymmetry justifies the generous side. A spurious restart kicks
+# every RTSP reader on BOTH cameras and discards their learned audio shape to
+# fix nothing; a late one leaves a single camera down longer, and a genuine
+# wedge has needed human intervention anyway. Restart frequency is separately
+# floored by restart_guard.py.
 #
 # A session attempt is bounded by WEBRTCUP_TIMEOUT_S, FIRST_FRAME_TIMEOUT_S and
 # FRAME_SILENCE_TIMEOUT_S, so a run cannot reach this duration without many
 # attempts inside it; there is no need to also require a count.
-SESSION_WEDGE_TIMEOUT_S = 600
+SESSION_WEDGE_TIMEOUT_S = 1800
 
 # --- Restart-frequency guard for that escape hatch (see restart_guard.py) ---
 # The hatch is right for a one-off local wedge and wrong for a sustained

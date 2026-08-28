@@ -60,7 +60,7 @@ and evidence. Grouped by whether anything can actually be done about them.
   firing on transients that heal themselves: 21 restarts in a day, every
   observed failure run recovering after one to four failures against a threshold
   of five, and the restarts demonstrably not helping. The trigger is now a
-  duration with no successful frame (`SESSION_WEDGE_TIMEOUT_S = 600`) rather
+  duration with no successful frame (`SESSION_WEDGE_TIMEOUT_S = 1800`) rather
   than a count of failures. CONFIRMED LIVE the same evening: the doorbell reached
   `consecutive_failures=15` and recovered on its own with zero restarts, where
   the old threshold of five would have killed the process three times. The
@@ -3091,11 +3091,27 @@ entries are the mechanism that keeps it under review
   A count cannot separate a wedged local resource from a flaky cloud, because
   both produce failures; only whether the camera comes back separates them. So
   the trigger is now a DURATION with no successful frame,
-  `config.SESSION_WEDGE_TIMEOUT_S = 600`, chosen from both ends of the evidence:
-  about six times the longest transient run observed (~103s), and far below the
-  one confirmed wedge (2026-07-20, 26+ consecutive failures that never
-  self-cleared and needed a manual restart), so that incident would still be
-  caught. `MAX_CONSECUTIVE_SESSION_FAILURES` is retired.
+  `config.SESSION_WEDGE_TIMEOUT_S = 1800`. `MAX_CONSECUTIVE_SESSION_FAILURES` is
+  retired.
+
+  **The threshold was set twice, and the first value was wrong.** It went in at
+  600s, justified as "about six times the longest transient run observed"
+  (~103s). Within the hour the doorbell produced a 550-second run: 13
+  consecutive failures from 19:48:08 to 19:57:18 with no successful frame, which
+  then recovered unaided and returned to 1440x1440@15fps with no drops. That
+  cleared 600s by 50 seconds, a margin of 1.09x rather than 6x, and one slower
+  retry would have restarted the container for a camera that was about to fix
+  itself. Raised to 1800s, which is 3.3x the worst transient MEASURED rather
+  than the worst one known when the constant was written.
+
+  The asymmetry justifies the generous side: a spurious restart kicks every RTSP
+  reader on both cameras and discards their learned audio shape to fix nothing,
+  while a late one leaves a single camera down longer, and the one confirmed
+  wedge never self-cleared at all so any finite threshold catches it.
+
+  The lesson generalises past this constant: a threshold justified by "N times
+  the worst case so far" is only as good as how thoroughly the worst case has
+  been sampled, and one hour of new data moved this one by 5x.
 
   **The `TypeError` was a second, separate bug, and it is now fixed too.** This
   entry previously said it had not recurred in 12 hours and was not driving the
