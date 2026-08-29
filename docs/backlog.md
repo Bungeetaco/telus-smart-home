@@ -292,13 +292,27 @@ and evidence. Grouped by whether anything can actually be done about them.
       the same Janus path as the video, with the same inherent multi-second
       latency. There is no lower-latency path (E55: the doorbell runs no direct
       media server).
-  Tuned what is tunable (operator's call, "cut the lag I can, accept the
-  rest"): `CALL_LIVE_PREBUFFER_MS = 150` holds a small fixed downlink lead and
-  skips the adaptive growth (which had reached 2000 ms of pure latency on the
-  live call), and `CALL_UPLINK_TAP_FRAMES = 5` shrinks the uplink tap to
-  ~100 ms. This cuts avoidable bridge-added latency; it does NOT fix the PUT
-  throughput ceiling or the cloud-relay uplink delay, which are device/cloud
-  limits. A usable real-time call on this doorbell may not be achievable.
+  **THE "PUT THROUGHPUT CEILING" WAS WRONG, corrected 2026-08-29.** The
+  operator played a full music clip through the doorbell speaker with no lag or
+  dropping days earlier, and a healthy-doorbell call dropped only 3% -- both
+  prove the PUT path sustains smooth real-time audio. The 42% loss happened
+  only on a call placed right after an E96 reconnect, when the doorbell's PUT
+  acks slowed and the live drain fell 10 s behind real-time (visible in the
+  progress log: "15s elapsed of 11s decoded"). The clip path never drops
+  because it reads ahead from a 30 s lookahead and leads the doorbell's jitter
+  buffer; the live path had only a 400 ms buffer and shed the overflow.
+
+  The fix is an ELASTIC downlink buffer, not a transport change (pipelining is
+  impossible: the PUT is per-chunk with no sequence numbers, so concurrent
+  sends would reorder and corrupt). `CALL_DOWNLINK_BUFFER_MS = 4000` absorbs a
+  slow-ack stretch instead of dropping it, at NO latency cost when the doorbell
+  is healthy (the buffer drains as fast as it fills; depth bites only during a
+  stall). `CALL_LIVE_PREBUFFER_MS = 300` covers ordinary ack jitter so playout
+  does not gap; `CALL_UPLINK_TAP_FRAMES = 15` (~300 ms) smooths the cloud-relay
+  mic so the caller stops hearing it cut out. Result: a smooth low-latency call
+  when the doorbell is healthy (the music-clip experience), degrading to
+  briefly-delayed-but-complete during an E96 stretch rather than fragmenting.
+  The remaining variable is the doorbell's own health (E96), not the transport.
 
   **Milestone 3, open:** trigger from the ring automation (ring, no
   notification action within the loiter window, then call), plus the

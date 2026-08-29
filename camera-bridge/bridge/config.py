@@ -648,12 +648,34 @@ CALL_MAX_S = float(os.environ.get("CALL_MAX_S", "600"))
 # It does NOT address the doorbell PUT endpoint's throughput ceiling -- a
 # separate device-side limit that sheds audio on a real-time feed -- it only
 # stops the bridge adding avoidable latency on top of it.
-CALL_LIVE_PREBUFFER_MS = float(os.environ.get("CALL_LIVE_PREBUFFER_MS", "150"))
-# Decoded-audio tap depth for the call uplink, in 20 ms frames (~100 ms). The
-# doorbell mic already arrives cloud-relayed with seconds of inherent latency
-# (the same path the video takes); a deep tap would only add more. This caps
-# the bridge-side backlog and sheds older frames past it.
-CALL_UPLINK_TAP_FRAMES = int(os.environ.get("CALL_UPLINK_TAP_FRAMES", "5"))
+# Doorbell-playout jitter buffer (the muxer lead) for a live call. A live source
+# cannot be buffered ahead, so this stays small -- but it must cover the
+# doorbell's normal per-chunk ack jitter or playout underruns into gaps. 300 ms
+# is a balance: low enough to feel responsive, high enough that ordinary ack
+# variance does not gap the audio. The clip lead (TALK_PREBUFFER_MS) and its
+# adaptive growth stay off for live (they are latency the caller hears).
+CALL_LIVE_PREBUFFER_MS = float(os.environ.get("CALL_LIVE_PREBUFFER_MS", "300"))
+# Elastic depth of the live DOWNLINK buffer (talk_fullduplex.LiveMulawSource),
+# the caller's voice waiting to be PUT to the doorbell speaker.
+#
+# THIS COSTS NO LATENCY WHEN THE DOORBELL IS HEALTHY, and that is the whole
+# point. The buffer sits between the phone feed (real-time) and the PUT drain;
+# when the doorbell acks chunks quickly the drain keeps pace, the buffer stays
+# near empty, and latency is just the lead above. The cap only bites during a
+# SLOW-ACK STRETCH (the doorbell in an E96-unhealthy period): a deeper cap
+# absorbs that stretch instead of dropping the oldest audio, at the cost of
+# latency only for the stretch's duration and only then. The old 400 ms cap
+# turned a ~1.5 s ack stall into ~1 s of dropped voice (measured: a 42% loss on
+# an unhealthy-doorbell call, versus 3% when healthy); 4 s absorbs the stalls
+# actually observed. Past the cap it still drops OLDEST, keeping the audio
+# current rather than replaying stale speech.
+CALL_DOWNLINK_BUFFER_MS = int(os.environ.get("CALL_DOWNLINK_BUFFER_MS", "4000"))
+# Decoded-audio tap depth for the call uplink, in 20 ms frames (~300 ms). The
+# doorbell mic arrives cloud-relayed (the same path the video takes) and can
+# jitter; too shallow a tap sheds frames and the caller hears the mic cut out.
+# This is a jitter buffer for that relay -- deep enough to smooth it, shallow
+# enough not to pile latency onto an already-relayed path.
+CALL_UPLINK_TAP_FRAMES = int(os.environ.get("CALL_UPLINK_TAP_FRAMES", "15"))
 # Long enough to hear it clearly, short enough that a pocket-answered call
 # costs cents, not minutes.
 CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))

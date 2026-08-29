@@ -353,10 +353,13 @@ class LiveMulawSource(_ChunkSource):
       mu-law silence (0xFF) up to the requested size: the transport's pacing
       schedule assumes a full chunk per slot, and the far end going quiet
       (or a lost RTP packet) must read as silence, not as EOF.
-    * **Bounded buffer, freshest audio wins.** The buffer holds
-      ~MAX_BUFFER_MS of audio; past that the OLDEST bytes are dropped. A live
-      conversation cannot pay latency back, so a stall in the PUT path must
-      shed audio rather than drift the conversation out of sync.
+    * **Elastic buffer, freshest audio wins.** The buffer holds
+      ~config.CALL_DOWNLINK_BUFFER_MS of audio; past that the OLDEST bytes are
+      dropped. The depth absorbs a slow-ack stretch WITHOUT dropping (adding
+      latency only while the doorbell is actually slow, and none when it is
+      healthy -- the buffer drains as fast as it fills); only a stall deeper
+      than the whole cap sheds audio, and then the oldest, keeping playback
+      current rather than replaying stale speech.
     * **`produced` advances with the fill.** The transport's safety deadline
       derives from produced audio; a live source that stopped advancing it
       during silence would trip that deadline mid-conversation.
@@ -365,12 +368,14 @@ class LiveMulawSource(_ChunkSource):
     buffer is drained, and the transport finishes its normal teardown.
     """
 
-    MAX_BUFFER_MS = 400
-
     def __init__(self):
         self._buf = bytearray()
         self._closed = False
-        self._max = SAMPLE_RATE * self.MAX_BUFFER_MS // 1000
+        # Elastic: deep enough to absorb a slow-ack stretch without dropping,
+        # costing latency only while the doorbell is actually slow. See
+        # config.CALL_DOWNLINK_BUFFER_MS for why this adds no latency when the
+        # doorbell is healthy.
+        self._max = SAMPLE_RATE * c.CALL_DOWNLINK_BUFFER_MS // 1000
         self.complete = False
         self.produced = 0
         self.dropped_bytes = 0

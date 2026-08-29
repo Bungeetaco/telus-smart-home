@@ -97,6 +97,36 @@ async def test_live_source_sheds_oldest_audio_not_latency():
     print("  ok  overflow drops oldest audio and counts it")
 
 
+async def test_live_source_absorbs_a_slow_ack_stretch_without_dropping():
+    """The 2026-08-28 fix: a slow-doorbell stretch must not shed the caller.
+
+    When the doorbell acks PUTs slowly the drain falls behind the phone feed,
+    and audio piles up. The old 400 ms cap turned that into ~50% dropped voice.
+    The elastic cap (config.CALL_DOWNLINK_BUFFER_MS, seconds) absorbs it: a
+    stretch shorter than the cap drops NOTHING, at the cost of latency only for
+    the stretch. This feeds two seconds of audio before any drain -- well past
+    the retired 400 ms cap -- and requires zero loss."""
+    SR = 8000                                 # mu-law 8 kHz mono
+    src = LiveMulawSource()
+    two_seconds = SR * 2          # 2 s of mu-law bytes
+    assert two_seconds > SR * 400 // 1000, (
+        "the test must feed past the retired 400 ms cap to be meaningful")
+    assert two_seconds <= src._max, (
+        "the elastic cap must hold at least the 2 s this test feeds")
+    src.feed(b"\x07" * two_seconds)
+    assert src.dropped_bytes == 0, (
+        f"a 2 s backlog dropped {src.dropped_bytes} bytes -- the buffer is not "
+        "absorbing a slow-ack stretch, which is the 42%-loss failure")
+    # And it all drains back out in order (freshest last), complete.
+    out = bytearray()
+    while len(out) < two_seconds:
+        out.extend(await src.next_chunk(SR))
+    assert bytes(out[:two_seconds]) == b"\x07" * two_seconds, (
+        "the absorbed audio did not drain back intact")
+    print(f"  ok  absorbed {two_seconds // SR}s backlog with no "
+          f"drop (cap {src._max // SR}s)")
+
+
 # --------------------------------------------------------------------------
 # The uplink frame assembly + tap lifecycle (through a real tap registry)
 # --------------------------------------------------------------------------
@@ -273,6 +303,7 @@ TESTS = (
     test_the_lin2ulaw_table_agrees_with_the_reference_encoder,
     test_live_source_fills_with_silence_and_ends_on_close,
     test_live_source_sheds_oldest_audio_not_latency,
+    test_live_source_absorbs_a_slow_ack_stretch_without_dropping,
     test_the_tap_registry_is_bounded_and_cleans_up,
     test_a_bridged_call_wires_both_directions_and_cleans_up,
     test_a_talkdown_failure_hangs_the_call_up,
