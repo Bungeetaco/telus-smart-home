@@ -260,6 +260,16 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E100** (open, small, robustness) - when Alarm.com serves a gutted
+  videoSource (observed live: `janusGatewayUrl: None` with `iceServers`
+  present but empty, on one camera while its sibling streamed normally), the
+  janus client passes the None straight into `websockets.connect` and fails
+  with an `InvalidURI` traceback every 30 s retry. The retry/backoff loop
+  handles it correctly -- the camera recovers when the cloud serves a real
+  session again -- but the log should say "upstream served no gateway URL"
+  once, not stack-trace on every attempt: check `janus_gateway_url` before
+  connecting and raise the session-failed path with a plain message.
+
 - **E99** (milestone 1 shipped; milestones 2-3 open) - the ring-to-phone call
   feature. The end state: doorbell ring with no notification response calls the
   operator's phone via VoIP.ms and bridges the call to the doorbell's two audio
