@@ -105,6 +105,33 @@ def pcm_s16le_to_mulaw(pcm: bytes) -> bytes:
                  for i in range(0, len(pcm) - 1, 2))
 
 
+# mu-law -> 16-bit linear, the decode direction (downlink shaping decodes the
+# caller's mu-law to PCM, shapes it for the speaker, and re-encodes). Built once.
+def _ulaw_decode_table():
+    out = []
+    for b in range(256):
+        u = ~b & 0xFF
+        sign, exp, mant = u & 0x80, (u >> 4) & 0x07, u & 0x0F
+        sample = ((mant << 3) + 0x84) << exp
+        sample -= 0x84
+        out.append(-sample if sign else sample)
+    return out
+
+
+ULAW2LIN = _ulaw_decode_table()
+
+
+def mulaw_to_pcm_s16le(mulaw: bytes) -> bytes:
+    """Decode mu-law to little-endian s16 mono PCM using the table."""
+    t = ULAW2LIN
+    out = bytearray(len(mulaw) * 2)
+    for i, b in enumerate(mulaw):
+        v = t[b]
+        out[2 * i] = v & 0xFF
+        out[2 * i + 1] = (v >> 8) & 0xFF
+    return bytes(out)
+
+
 TONE_FRAME = bytes(
     _mulaw_encode(int(12000 * math.sin(2 * math.pi * _TONE_HZ * i / 8000)))
     for i in range(_FRAME_SAMPLES)

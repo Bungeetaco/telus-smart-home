@@ -160,7 +160,9 @@ and evidence. Grouped by whether anything can actually be done about them.
   `VIDEO_QUEUE_MIN_FRAMES = 4` is a sensible floor for a camera that swings
   between 1 and 30fps. Neither is addressed by this fix.
 
-- **E96** (open, upstream, NOT a regression from the 2026-08-28 work) - the
+- **E96** (open; the CALL no longer depends on it as of 2026-08-29 -- the call
+  uplink moved to the device-direct RTSP path, E55/E99. The live VIDEO view
+  still uses Janus and still churns; that remains the open item.) - the
   doorbell degrades badly in the evening and the living room does not. Measured
   from four days of watcher history:
 
@@ -267,7 +269,30 @@ and evidence. Grouped by whether anything can actually be done about them.
   caught the tone frequency: 440 Hz is 8.8 cycles per 20 ms frame, so the
   repeated frame clicked 50 times a second; 450 Hz is exactly 9.
 
-  **Milestone 2, shipped:** `bridge/call_bridge.py` splices an answered call
+  **Milestone 2 REBUILT on the direct-LAN path (2026-08-29), not yet
+  live-validated.** The first M2 spliced the call's uplink from the cloud-Janus
+  tap and the downlink through the talkdown PUT on the main event loop. Live it
+  was laggy and dropped: the uplink gapped when the Janus video session churned
+  (E96) and the downlink fragmented when that churn starved the PUT loop on the
+  shared event loop. Root cause (operator's insight + the app's behaviour): the
+  churn is the bridge relaying a same-LAN doorbell through alarm.com's cloud;
+  the app never churns because it uses the device DIRECTLY on the LAN. So the
+  call was rebuilt to the app's architecture: the uplink is now
+  `rtsp_listen.RtspTunnelListen` (device-direct RTSP-in-HTTPS, E55), the codec
+  read from the SDP; each direction is shaped for clarity by `call_shape`
+  (low-latency in-process DSP); the call is offered per ADVERTISED capability
+  (supports_upstream_audio && supports_downstream_audio), listen endpoint chosen
+  by reachability order -- generic, no model/id/IP. The Janus decoded-audio tap
+  added for the first M2 is removed. Built + unit-tested (test_rtsp_listen,
+  test_call_bridge, both fail-first proven) + deployed; STILL NEEDS a live call
+  with the operator present to confirm both directions are clear.
+
+  STILL OPEN from this rebuild: (a) the downlink PUT still shares the main event
+  loop, so heavy Janus video churn can still slow it; the fix is a dedicated
+  thread for the call, deferred because it needs a talk.py cross-thread refactor
+  and live validation. (b) audio-shaping defaults are unheard; tune live.
+
+  **Superseded M2 note (kept for the record):** `bridge/call_bridge.py` splices an answered call
   to the doorbell -- uplink from a decoded-audio tap on camera_session
   (re-encoded to mu-law), downlink from the SIP leg's RTP into a
   talk_fullduplex.LiveMulawSource that the existing chunked-PUT transport
@@ -2025,9 +2050,17 @@ when it ships.
   **Fixed in the bridge.** What live validation must show is listed at the end
   of E62, alongside the other three changes that shipped with this one.
 
-- **E55 (CLOSED: not worth pursuing) Device-direct listen audio.** Superseded:
-  downstream audio comes over the website/Janus path (E53/E54), so a second
-  source buys nothing operational.
+- **E55 (REOPENED + IMPLEMENTED 2026-08-29) Device-direct listen audio.** It IS
+  worth pursuing after all, for the CALL: the cloud Janus path churns for the
+  doorbell (E96), so a live call's uplink now comes from the device-direct
+  stream instead. `GET /api/GetStream?streamID=0` on the device's LAN port is
+  RTSP-tunnelled-over-HTTPS (`application/x-rtsp-tunnelled`): a long-lived GET
+  data channel + a paired POST command channel (Apple scheme), HTTP Digest on
+  the tunnel and RTSP Digest inside it (both the per-session vieweruser/pw from
+  the camera list), media interleaved on the GET channel. `bridge/rtsp_listen.py`
+  implements it and reads the codec from the DESCRIBE SDP. The video pipeline
+  still uses Janus; only the call's uplink moved. (Original note kept: the
+  downstream half was uncharacterised; it is now.)
 
   One correction worth keeping, because the opposite is the natural assumption.
   The doorbell **does** expose a device-direct HTTP API on the LAN, and talkdown

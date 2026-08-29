@@ -676,6 +676,33 @@ CALL_DOWNLINK_BUFFER_MS = int(os.environ.get("CALL_DOWNLINK_BUFFER_MS", "4000"))
 # This is a jitter buffer for that relay -- deep enough to smooth it, shallow
 # enough not to pile latency onto an already-relayed path.
 CALL_UPLINK_TAP_FRAMES = int(os.environ.get("CALL_UPLINK_TAP_FRAMES", "15"))
+# --- Direct-LAN call audio path (backlog E96/E99) ---------------------------
+# The call's uplink (doorbell mic -> caller) comes from the device's OWN stream
+# over the direct-LAN RTSP-in-HTTPS tunnel (rtsp_listen), bypassing the cloud
+# Janus relay whose churn fragments the call. Endpoint chosen by this order,
+# first reachable wins -- direct/LAN preferred, WAN/cloud as fallback for a
+# bridge not on the device's LAN. Same order and reasoning as the talkdown PUT.
+CALL_LISTEN_ENDPOINT_ORDER = ("direct", "local", "public", "cloud")
+# No RTP on the listen tunnel for this long => the stream is dead; end the leg.
+RTSP_LISTEN_READ_TIMEOUT_S = float(os.environ.get("RTSP_LISTEN_READ_TIMEOUT_S", "10"))
+# Per-direction call audio shaping, for clarity on both ends. Done as
+# LOW-LATENCY in-process DSP (a one-pole high-pass to cut rumble/DC, then a
+# soft AGC that levels quiet speech and limits peaks) rather than a persistent
+# ffmpeg filtergraph: an 8 kHz mono live stream does not warrant a subprocess,
+# and per-sample DSP has no lookahead latency and no pipe-deadlock risk (the
+# latency the direct-LAN path exists to remove must not come back as shaping).
+# TUNABLE and GENERIC: every value is a knob, and highpass=0 + gain range
+# [1,1] is passthrough. See call_shape.Shaper.
+#   Downlink (caller -> doorbell speaker): band-limit low end the small speaker
+#   cannot reproduce and keep the voice present without clipping it.
+CALL_DOWNLINK_HIGHPASS_HZ = float(os.environ.get("CALL_DOWNLINK_HIGHPASS_HZ", "250"))
+CALL_DOWNLINK_AGC_TARGET = float(os.environ.get("CALL_DOWNLINK_AGC_TARGET", "0.5"))
+CALL_DOWNLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_DOWNLINK_AGC_MAX_GAIN", "6"))
+#   Uplink (doorbell mic -> caller's phone): cut outdoor rumble and level a
+#   soft visitor for phone intelligibility.
+CALL_UPLINK_HIGHPASS_HZ = float(os.environ.get("CALL_UPLINK_HIGHPASS_HZ", "150"))
+CALL_UPLINK_AGC_TARGET = float(os.environ.get("CALL_UPLINK_AGC_TARGET", "0.5"))
+CALL_UPLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MAX_GAIN", "8"))
 # Long enough to hear it clearly, short enough that a pocket-answered call
 # costs cents, not minutes.
 CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))

@@ -379,47 +379,6 @@ class RateWatcher:
         return wanted
 
 
-# ---------------------------------------------------------------------------
-# Decoded-audio taps (backlog E99: the call bridge's uplink)
-#
-# A subscriber gets every decoded audio frame's PCM bytes for one camera,
-# through a BOUNDED queue that drops the OLDEST entry when full: a live call
-# cannot pay latency back, so a slow consumer sheds audio instead of stretching
-# the conversation. Registered here rather than in the pump because the pump is
-# per-session and dies at every rotation; a tap subscribes to the CAMERA.
-# The pump's only added cost when nothing is subscribed is one falsy dict get
-# per frame.
-# ---------------------------------------------------------------------------
-_audio_taps: dict = {}
-
-
-def subscribe_decoded_audio(camera_id: str, maxsize: int = 25) -> asyncio.Queue:
-    q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
-    _audio_taps.setdefault(camera_id, set()).add(q)
-    return q
-
-
-def unsubscribe_decoded_audio(camera_id: str, q: asyncio.Queue) -> None:
-    taps = _audio_taps.get(camera_id)
-    if taps is not None:
-        taps.discard(q)
-        if not taps:
-            _audio_taps.pop(camera_id, None)
-
-
-def _offer_to_taps(camera_id: str, pcm: bytes) -> None:
-    for q in _audio_taps.get(camera_id, ()):
-        if q.full():
-            try:
-                q.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        try:
-            q.put_nowait(pcm)
-        except asyncio.QueueFull:
-            pass
-
-
 async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
     consecutive_failures = 0  # reset on any successful frame batch. Reported in
@@ -770,12 +729,6 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 # corrupting a running pipe stays in sink.write_audio.
                 _note_audio_shape(observed)
                 _update_status(decoded_audio_frames=decoded_audio_frames_total)
-                if _audio_taps.get(camera["id"]):
-                    # The call bridge's uplink. PCM extraction reuses the same
-                    # helper the publisher writes through, so a tapped frame
-                    # and a published frame can never disagree about layout.
-                    _offer_to_taps(camera["id"],
-                                   ffmpeg_sink._audio_pcm_bytes(frame))
                 if not writable:
                     # A video-only publisher: nothing had been decoded for this
                     # camera when it was built, or its audio input has been

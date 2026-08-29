@@ -685,7 +685,15 @@ through a VoIP.ms POP: INVITE with MD5 digest auth (with and without
 `qop=auth`), SDP offer/answer pinned to G.711 mu-law (PCMU), symmetric RTP,
 BYE. Exposed as `POST /control/call/test`, which rings the configured target
 and plays a tone on answer; inert unless the deployment provides a sub-account
-(see `docs/configuration.md`). `bridge/call_bridge.py` builds on it for the full bridged call: the doorbell
+(see `docs/configuration.md`). `bridge/rtsp_listen.py` is the call's UPLINK: it pulls the doorbell's own audio
+directly on the LAN over the device's RTSP-in-HTTPS tunnel (the app's path),
+bypassing the cloud Janus relay whose churn otherwise fragments a call. It reads
+the codec from the stream's SDP (never assumed), demuxes interleaved RTP from
+RTSP replies, and decodes to PCM. `bridge/call_shape.py` conditions each
+direction for clarity with low-latency in-process DSP (high-pass + soft AGC),
+tunable and defaulting to sensible values.
+
+`bridge/call_bridge.py` builds on it for the full bridged call: the doorbell
 mic reaches the caller through a decoded-audio tap on `camera_session` (the
 same frames the RTSP publisher gets), re-encoded to mu-law and pulled by the
 SIP leg's uplink; the caller's voice reaches the doorbell speaker as the SIP

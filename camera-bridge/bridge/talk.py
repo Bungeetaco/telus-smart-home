@@ -401,6 +401,13 @@ class TalkManager:
         )
 
     # ---- full-duplex talkdown (ADC doorbell) --------------------------------
+    async def resolve_doorbell(self, camera_id: str) -> dict | None:
+        """Public accessor: the parsed doorbell <cli> (endpoints, per-session
+        creds, capability flags) for camera_id, or None if it advertises no
+        upstream audio. call_bridge uses it to pick the direct-LAN RTSP listen
+        URL and to gate the call on advertised capabilities."""
+        return await self._resolve_doorbell(camera_id)
+
     async def _resolve_doorbell(self, camera_id: str) -> dict | None:
         """Return the parsed doorbell <cli> for camera_id if it supports
         upstream audio (the full-duplex talk path), else None so the caller

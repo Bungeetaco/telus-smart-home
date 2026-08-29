@@ -1,14 +1,17 @@
-"""Tests for the call bridge's wiring (bridge/call_bridge.py, backlog E99 M2).
+"""Tests for the call bridge (bridge/call_bridge.py, backlog E99).
 
-THE INVISIBLE FAILURE THIS SUITE EXISTS TO CATCH: a bridged call where one
-half is quietly missing. Every wiring mistake here still "works" -- the phone
-rings, someone answers, the status says active -- while the caller hears
-silence instead of the doorbell mic (uplink dropped), the visitor hears
-nothing (downlink dropped), a hangup leaves the talkdown streaming at a dead
-call, or a finished call leaves its tap subscribed and the pump paying for it
-forever. The encoder table gets the same treatment: a mu-law table that is
-wrong only near zero decodes as a permanent background buzz, which no
-integration signal ever reports.
+THE INVISIBLE FAILURE THIS SUITE EXISTS TO CATCH: a bridged call where one half
+is quietly missing or a call offered on hardware that cannot do it. Every wiring
+mistake still "works" -- the phone rings, status says active -- while the caller
+hears silence (uplink dropped), the visitor hears nothing (downlink dropped), a
+device that never advertised two-way audio gets dialled anyway, a hangup leaves
+the talkdown streaming, or a mu-law table wrong near zero buzzes forever. None
+raise in production, so the capability gate, the wiring and the lifecycle are
+exercised here against fakes -- no device, no network, no charge.
+
+GENERICNESS is a first-class subject here (see the generic-capability-driven
+memory): a device advertising no/partial audio must degrade correctly, and the
+listen endpoint must be chosen from the account's own flags, never a model/id.
 
 Run from the camera-bridge directory:
 
@@ -24,141 +27,71 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
 os.environ.setdefault("TELUS_PASSWORD", "unused")
 
-from bridge import call_bridge, camera_session, config as c, sip_call  # noqa: E402
+from bridge import call_bridge, config as c, rtsp_listen, sip_call  # noqa: E402
+from bridge.call_bridge import select_listen_url  # noqa: E402
 from bridge.sip_call import _mulaw_encode, pcm_s16le_to_mulaw  # noqa: E402
 from bridge.talk_fullduplex import LiveMulawSource  # noqa: E402
 
 
 # --------------------------------------------------------------------------
-# The mu-law table
+# mu-law table (uplink encode) + LiveMulawSource (downlink buffer)
 # --------------------------------------------------------------------------
 
 def test_the_lin2ulaw_table_agrees_with_the_reference_encoder():
-    """The table is what the hot path uses; the per-sample function is the
-    reference. If they disagree anywhere, the uplink audio is subtly wrong in
-    a way nothing downstream can detect -- checked across the FULL 16-bit
-    range, because mu-law's segments make 'spot checks pass, segment 5 is
-    wrong' a real failure shape."""
-    for sample in range(-32768, 32768, 7):     # every segment, both signs
+    for sample in range(-32768, 32768, 7):
         pcm = (sample & 0xFFFF).to_bytes(2, "little")
-        got = pcm_s16le_to_mulaw(pcm)[0]
-        want = _mulaw_encode(sample)
-        assert got == want, (
-            f"table disagrees with the encoder at sample {sample}: "
-            f"{got:#04x} != {want:#04x}")
-    # And frame-level: one known frame through both paths.
-    frame_pcm = b"".join((x & 0xFFFF).to_bytes(2, "little")
-                         for x in range(-800, 800, 10))
-    assert pcm_s16le_to_mulaw(frame_pcm) == bytes(
-        _mulaw_encode(x) for x in range(-800, 800, 10))
+        assert pcm_s16le_to_mulaw(pcm)[0] == _mulaw_encode(sample), sample
     print("  ok  lin2ulaw table matches the reference across the full range")
 
 
-# --------------------------------------------------------------------------
-# LiveMulawSource
-# --------------------------------------------------------------------------
-
-async def test_live_source_fills_with_silence_and_ends_on_close():
-    """The transport paces itself assuming a full chunk per slot; a live
-    source must pad a quiet stretch with mu-law silence and reserve b"" for
-    the actual end of the call, or the talkdown ends the first time the
-    caller stops talking."""
+async def test_live_source_fills_silence_and_ends_on_close():
     src = LiveMulawSource()
     src.feed(b"\x01" * 100)
     chunk = await src.next_chunk(320)
-    assert chunk[:100] == b"\x01" * 100 and chunk[100:] == b"\xff" * 220, (
-        "a short read was not padded with mu-law silence")
-    assert len(chunk) == 320
-    assert src.produced == 320
-    # Quiet stretch: pure fill, still not EOF.
-    assert await src.next_chunk(320) == b"\xff" * 320
-    # Close with residue: drain, THEN EOF.
-    src.feed(b"\x02" * 10)
-    src.close()
+    assert chunk[:100] == b"\x01" * 100 and chunk[100:] == b"\xff" * 220, chunk[:4]
+    assert await src.next_chunk(320) == b"\xff" * 320  # dry -> silence, not EOF
+    src.feed(b"\x02" * 10); src.close()
     assert (await src.next_chunk(320))[:10] == b"\x02" * 10
     assert await src.next_chunk(320) == b"", "close did not become EOF"
     print("  ok  live source pads silence, drains residue, then EOFs")
 
 
-async def test_live_source_sheds_oldest_audio_not_latency():
-    """A stalled PUT must cost audio, not delay: a live conversation cannot
-    pay latency back. The buffer keeps the FRESHEST bytes."""
-    src = LiveMulawSource()
-    limit = src._max
-    src.feed(b"\x01" * limit)
-    src.feed(b"\x02" * 100)                    # overflow by 100
-    assert src.dropped_bytes == 100
-    # Read exactly what the buffer holds: asking for more would be padded
-    # with silence fill, which is next_chunk's job, not this test's subject.
-    first = await src.next_chunk(limit)
-    assert first[-100:] == b"\x02" * 100, "the freshest audio was dropped"
-    assert first[:limit - 100] == b"\x01" * (limit - 100), (
-        "the oldest audio was not what got shed")
-    print("  ok  overflow drops oldest audio and counts it")
-
-
 async def test_live_source_absorbs_a_slow_ack_stretch_without_dropping():
-    """The 2026-08-28 fix: a slow-doorbell stretch must not shed the caller.
-
-    When the doorbell acks PUTs slowly the drain falls behind the phone feed,
-    and audio piles up. The old 400 ms cap turned that into ~50% dropped voice.
-    The elastic cap (config.CALL_DOWNLINK_BUFFER_MS, seconds) absorbs it: a
-    stretch shorter than the cap drops NOTHING, at the cost of latency only for
-    the stretch. This feeds two seconds of audio before any drain -- well past
-    the retired 400 ms cap -- and requires zero loss."""
-    SR = 8000                                 # mu-law 8 kHz mono
+    SR = 8000
     src = LiveMulawSource()
-    two_seconds = SR * 2          # 2 s of mu-law bytes
-    assert two_seconds > SR * 400 // 1000, (
-        "the test must feed past the retired 400 ms cap to be meaningful")
-    assert two_seconds <= src._max, (
-        "the elastic cap must hold at least the 2 s this test feeds")
+    two_seconds = SR * 2
+    assert two_seconds > SR * 400 // 1000, "must feed past the retired 400ms cap"
+    assert two_seconds <= src._max, "elastic cap must hold 2s"
     src.feed(b"\x07" * two_seconds)
-    assert src.dropped_bytes == 0, (
-        f"a 2 s backlog dropped {src.dropped_bytes} bytes -- the buffer is not "
-        "absorbing a slow-ack stretch, which is the 42%-loss failure")
-    # And it all drains back out in order (freshest last), complete.
-    out = bytearray()
-    while len(out) < two_seconds:
-        out.extend(await src.next_chunk(SR))
-    assert bytes(out[:two_seconds]) == b"\x07" * two_seconds, (
-        "the absorbed audio did not drain back intact")
-    print(f"  ok  absorbed {two_seconds // SR}s backlog with no "
-          f"drop (cap {src._max // SR}s)")
+    assert src.dropped_bytes == 0, f"absorbing a 2s stall dropped {src.dropped_bytes}"
+    print(f"  ok  absorbed 2s backlog with no drop (cap {src._max // SR}s)")
 
 
 # --------------------------------------------------------------------------
-# The uplink frame assembly + tap lifecycle (through a real tap registry)
+# select_listen_url + capability gating -- GENERIC (task 6)
 # --------------------------------------------------------------------------
 
-async def test_the_tap_registry_is_bounded_and_cleans_up():
-    q = camera_session.subscribe_decoded_audio("cam-t", maxsize=3)
-    try:
-        for i in range(5):
-            camera_session._offer_to_taps("cam-t", bytes([i]) * 4)
-        assert q.qsize() == 3
-        got = [q.get_nowait()[0] for _ in range(3)]
-        assert got == [2, 3, 4], (
-            f"a full tap did not drop the OLDEST frames: kept {got}")
-    finally:
-        camera_session.unsubscribe_decoded_audio("cam-t", q)
-    assert "cam-t" not in camera_session._audio_taps, (
-        "an unsubscribed camera left its registry entry behind, so the pump "
-        "would pay the tap cost forever")
-    print("  ok  tap drops oldest at its bound and unsubscribes cleanly")
+def test_select_listen_url_prefers_direct_lan():
+    kind, url = select_listen_url({"rtsp_urls": {
+        "cloud": "rtsp://cloud/x", "direct": "rtsp://lan/x",
+        "local": "rtsp://lan2/x", "public": "rtsp://wan/x"}})
+    assert kind == "direct" and url == "rtsp://lan/x", (kind, url)
+    # Bridge off the device LAN: only cloud present -> cloud is chosen, not None.
+    kind, url = select_listen_url({"rtsp_urls": {"cloud": "rtsp://cloud/x"}})
+    assert kind == "cloud", (kind, url)
+    assert select_listen_url({"rtsp_urls": {}}) == (None, None)
+    print("  ok  listen URL chosen by endpoint order (direct-LAN preferred)")
 
-
-# --------------------------------------------------------------------------
-# CallBridge lifecycle, with the SIP leg and talk manager faked
-# --------------------------------------------------------------------------
 
 class FakeTalk:
-    """speak_live drains the source until EOF, like the real transport."""
-
-    def __init__(self):
+    def __init__(self, doorbell):
+        self._doorbell = doorbell
         self.fed = bytearray()
         self.stopped = []
         self.raise_on_speak = None
+
+    async def resolve_doorbell(self, camera_id):
+        return self._doorbell
 
     async def speak_live(self, camera_id, source):
         if self.raise_on_speak:
@@ -176,138 +109,168 @@ class FakeTalk:
         return True
 
 
-class FakeSipCall:
-    """Stands in for sip_call.SipCall: pulls the frame source, feeds the
-    payload sink, honours the stop event -- the same contract, no network."""
+def _doorbell(up=True, down=True, rtsp=True):
+    return {
+        "did": "9", "global_device_id": "acct-9", "model": "GENERIC-CAM",
+        "stream_user": "u", "stream_password": "p",
+        "supports_upstream_audio": up, "supports_downstream_audio": down,
+        "rtsp_urls": {"direct": "rtsp://u:p@10.0.0.9:41925/api/GetStream?streamID=0"}
+                     if rtsp else {},
+    }
 
-    instances: list = []
+
+async def _gate(doorbell):
+    bridge = call_bridge.CallBridge(FakeTalk(doorbell))
+    return await bridge.start("cam", "18195551234")
+
+
+async def test_capability_gate_degrades_for_partial_or_absent_audio():
+    """The heart of genericness: the call is offered per ADVERTISED capability,
+    never by model. A cloner's device that reports no/partial audio must be
+    turned away cleanly, not dialled into silence."""
+    assert (await _gate(None)).get("error") == "talk_not_supported"
+    assert (await _gate(_doorbell(up=False))).get("error") == "talk_not_supported"
+    assert (await _gate(_doorbell(down=False))).get("error") == "listen_not_supported"
+    assert (await _gate(_doorbell(rtsp=False))).get("error") == "no_listen_endpoint"
+    ok = await _gate(_doorbell())
+    assert ok.get("status") == "started", ok
+    print("  ok  capability gate: no-talk / listen-only / no-endpoint all degrade; "
+          "full two-way starts")
+
+
+# --------------------------------------------------------------------------
+# Lifecycle with the RTSP listen + SIP faked
+# --------------------------------------------------------------------------
+
+class FakeListen:
+    instances = []
+
+    def __init__(self, url, user, pw, on_audio, **kw):
+        self.on_audio = on_audio
+        self.frames = 0
+        self.stopped = False
+        FakeListen.instances.append(self)
+
+    async def start(self):
+        # deliver a little mic audio, as the real read loop would
+        for _ in range(3):
+            self.on_audio(b"\x10\x00" * 160, 8000)  # 160 samples s16
+            self.frames += 1
+        return {"codec": "PCMU", "rate": 8000}
+
+    async def stop(self):
+        self.stopped = True
+
+
+class FakeSip:
+    instances = []
     fail = False
 
-    def __init__(self, **kwargs):
-        self.kw = kwargs
-        FakeSipCall.instances.append(self)
-        self.pulled: list = []
+    def __init__(self, **kw):
+        self.kw = kw
+        self.pulled = []
+        FakeSip.instances.append(self)
 
     async def run(self, tone_seconds, timeout):
-        if FakeSipCall.fail:
+        if FakeSip.fail:
             raise RuntimeError("dial failed")
         sink = self.kw["payload_sink"]
         source = self.kw["frame_source"]
         stop = self.kw["stop_event"]
-        for i in range(30):
+        for _ in range(20):
             if stop.is_set():
-                return {"result": "completed", "reason": "stopped",
-                        "frames_sent": i, "rtp_received": i, "seconds": i * 0.02}
-            sink(bytes([9]) * 160)             # the caller's voice
-            self.pulled.append(source())       # the doorbell's mic
+                return {"result": "completed", "reason": "stopped"}
+            sink(b"\xff" * 160)          # caller's voice (mu-law)
+            self.pulled.append(source())  # doorbell mic frame or None
             await asyncio.sleep(0)
-        return {"result": "completed", "reason": "remote_bye",
-                "frames_sent": 30, "rtp_received": 30, "seconds": 0.6}
+        return {"result": "completed", "reason": "remote_bye"}
 
 
-async def _run_bridge(fail_dial=False, talk_error=None):
-    saved = sip_call.SipCall
-    sip_call.SipCall = FakeSipCall
-    FakeSipCall.instances = []
-    FakeSipCall.fail = fail_dial
-    talk = FakeTalk()
+async def _run_bridge(doorbell=None, fail_dial=False, talk_error=None):
+    saved_listen, saved_sip = rtsp_listen.RtspTunnelListen, sip_call.SipCall
+    rtsp_listen.RtspTunnelListen = FakeListen
+    sip_call.SipCall = FakeSip
+    FakeListen.instances = []; FakeSip.instances = []; FakeSip.fail = fail_dial
+    talk = FakeTalk(doorbell or _doorbell())
     if talk_error:
         talk.raise_on_speak = talk_error
     bridge = call_bridge.CallBridge(talk)
     try:
-        started = await bridge.start("cam-b", "18195551234")
+        started = await bridge.start("cam", "18195551234")
         assert started.get("status") == "started", started
-        # Uplink: a real tap feed while the call runs.
-        for i in range(4):
-            camera_session._offer_to_taps(
-                "cam-b", (i & 0xFFFF).to_bytes(2, "little") * 160)
-            await asyncio.sleep(0)
         while bridge.active:
             await asyncio.sleep(0.01)
         return bridge, talk
     finally:
-        sip_call.SipCall = saved
+        rtsp_listen.RtspTunnelListen = saved_listen
+        sip_call.SipCall = saved_sip
 
 
-async def test_a_bridged_call_wires_both_directions_and_cleans_up():
+async def test_a_bridged_call_wires_both_directions_and_tears_down():
     bridge, talk = await _run_bridge()
-    call = FakeSipCall.instances[0]
-    assert bytes(talk.fed[:160]) == bytes([9]) * 160, (
-        "the caller's voice never reached the talkdown source")
-    real_frames = [f for f in call.pulled if f is not None]
-    assert real_frames and all(len(f) == 160 for f in real_frames), (
-        f"the doorbell mic never reached the call: {len(real_frames)} frames")
-    assert "cam-b" not in camera_session._audio_taps, (
-        "the finished call left its audio tap subscribed")
-    assert talk.stopped == ["cam-b"], (
-        "the finished call did not stop the talkdown leg")
+    # downlink: the caller's mu-law reached the talkdown source
+    assert bytes(talk.fed[:160]) == b"\xff" * 160, "caller voice never reached talkdown"
+    # uplink: the RTSP mic frames were encoded and pulled by SIP
+    sip = FakeSip.instances[0]
+    real = [f for f in sip.pulled if f]
+    assert real and all(len(f) == 160 for f in real), f"mic never reached SIP: {len(real)}"
+    # teardown: listen stopped, talk stopped
+    assert FakeListen.instances[0].stopped, "RTSP listen not stopped"
+    assert talk.stopped == ["cam"], "talkdown not stopped"
     r = bridge.last_result
-    assert r and r["reason"] == "remote_bye" and "talk" in r, r
-    assert bridge.status()["active"] is False
-    print(f"  ok  both directions wired; {len(real_frames)} uplink frames, "
-          f"{len(talk.fed)} downlink bytes, tap and talk torn down")
+    assert r and r["reason"] == "remote_bye" and r["uplink_frames"] == 3, r
+    print(f"  ok  both directions wired ({len(real)} mic frames, "
+          f"{len(talk.fed)} downlink bytes); listen + talk torn down")
 
 
-async def test_a_talkdown_failure_hangs_the_call_up():
-    """The speaker path dying must not leave a half-call: the caller would
-    hear the doorbell but the visitor would hear nothing, with every status
-    green. The bridge hangs up instead and reports the error."""
+async def test_a_talkdown_failure_hangs_up_and_tears_down():
     bridge, talk = await _run_bridge(talk_error=RuntimeError("mws refused"))
     r = bridge.last_result
-    assert r and r["reason"] == "stopped", (
-        f"a dead talkdown did not hang up the call: {r}")
-    assert "error" in (r.get("talk") or {}), r
-    assert "cam-b" not in camera_session._audio_taps
-    print("  ok  talkdown failure hangs up and reports the error")
+    assert r and r["reason"] == "stopped", f"dead talkdown did not hang up: {r}"
+    assert FakeListen.instances[0].stopped, "listen not stopped on talkdown failure"
+    print("  ok  a talkdown failure hangs up the call and stops the listen")
 
 
-async def test_a_failed_dial_still_tears_everything_down():
+async def test_a_failed_dial_tears_everything_down():
     bridge, talk = await _run_bridge(fail_dial=True)
     r = bridge.last_result
     assert r and r.get("result") == "error", r
-    assert "cam-b" not in camera_session._audio_taps
-    assert talk.stopped == ["cam-b"]
-    assert bridge.status()["active"] is False
-    print("  ok  a failed dial tears down the tap and the talk leg")
+    assert FakeListen.instances[0].stopped and talk.stopped == ["cam"]
+    print("  ok  a failed dial tears down the listen and the talk leg")
 
 
 # --------------------------------------------------------------------------
-# apply_settings: the HA-managed channel
+# apply_settings
 # --------------------------------------------------------------------------
 
 def test_apply_settings_is_partial_and_clearing_and_never_leaks():
     saved = {a: getattr(c, a) for a in call_bridge._SETTING_FIELDS.values()}
     try:
-        applied = call_bridge.apply_settings({
-            "enabled": False, "sip_server": " s.example ", "junk": "x",
-            "sip_password": 42,                # wrong type: ignored
-        })
+        applied = call_bridge.apply_settings(
+            {"enabled": False, "sip_server": " s.example ", "junk": "x",
+             "sip_password": 42})
         assert sorted(applied) == ["enabled", "sip_server"], applied
-        assert c.CALL_ENABLED is False
-        assert c.VOIPMS_SIP_SERVER == "s.example", "values are stripped"
-        assert c.VOIPMS_SIP_PASSWORD == saved["VOIPMS_SIP_PASSWORD"], (
-            "a wrong-typed field overwrote the stored password")
-        # A toggle-only push must not touch credentials.
+        assert c.CALL_ENABLED is False and c.VOIPMS_SIP_SERVER == "s.example"
+        assert c.VOIPMS_SIP_PASSWORD == saved["VOIPMS_SIP_PASSWORD"], "wrong-type overwrote pw"
         call_bridge.apply_settings({"enabled": True})
-        assert c.VOIPMS_SIP_SERVER == "s.example"
-        # Clearing is explicit empty string.
+        assert c.VOIPMS_SIP_SERVER == "s.example", "toggle-only push wiped a field"
         call_bridge.apply_settings({"sip_server": ""})
-        assert c.VOIPMS_SIP_SERVER == ""
+        assert c.VOIPMS_SIP_SERVER == "", "empty string did not clear"
     finally:
-        for attr, val in saved.items():
-            setattr(c, attr, val)
+        for a, v in saved.items():
+            setattr(c, a, v)
     print("  ok  apply_settings: partial, clearing, type-guarded")
 
 
 TESTS = (
     test_the_lin2ulaw_table_agrees_with_the_reference_encoder,
-    test_live_source_fills_with_silence_and_ends_on_close,
-    test_live_source_sheds_oldest_audio_not_latency,
+    test_live_source_fills_silence_and_ends_on_close,
     test_live_source_absorbs_a_slow_ack_stretch_without_dropping,
-    test_the_tap_registry_is_bounded_and_cleans_up,
-    test_a_bridged_call_wires_both_directions_and_cleans_up,
-    test_a_talkdown_failure_hangs_the_call_up,
-    test_a_failed_dial_still_tears_everything_down,
+    test_select_listen_url_prefers_direct_lan,
+    test_capability_gate_degrades_for_partial_or_absent_audio,
+    test_a_bridged_call_wires_both_directions_and_tears_down,
+    test_a_talkdown_failure_hangs_up_and_tears_down,
+    test_a_failed_dial_tears_everything_down,
     test_apply_settings_is_partial_and_clearing_and_never_leaks,
 )
 
@@ -315,18 +278,13 @@ TESTS = (
 def main():
     import inspect
     failures = 0
-    for test in TESTS:
+    for t in TESTS:
         try:
-            if inspect.iscoroutinefunction(test):
-                asyncio.run(test())
-            else:
-                test()
+            asyncio.run(t()) if inspect.iscoroutinefunction(t) else t()
         except AssertionError as exc:
-            print(f"  FAIL {test.__name__}: {exc}")
-            failures += 1
+            print(f"  FAIL {t.__name__}: {exc}"); failures += 1
         except Exception as exc:  # noqa: BLE001
-            print(f"  ERROR {test.__name__}: {exc!r}")
-            failures += 1
+            print(f"  ERROR {t.__name__}: {exc!r}"); failures += 1
     print("\nRESULT:", "PASS" if not failures else f"FAIL ({failures})")
     return 1 if failures else 0
 

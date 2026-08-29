@@ -1,50 +1,46 @@
-"""Bridge an answered phone call to the doorbell's two audio paths (E99, M2).
+"""Bridge an answered phone call to the doorbell's two audio paths (E99).
 
-One live call is a triangle of three existing pieces, and this module is only
-the wiring between them:
+THE ARCHITECTURE (why the uplink is NOT the Janus tap). The bridge's cloud
+Janus/WebRTC video path routes even a same-LAN doorbell's media up to
+alarm.com and back through a TURN relay, and for a high-bitrate device that
+relay churns (webrtcup, no RTP, 20 s timeout, reconnect, on a loop). Feeding a
+live call's uplink from that path made the caller's audio drop out whenever the
+relay hiccuped. So the call takes the device's OWN stream directly on the LAN,
+exactly as the official app does, and never touches Janus:
 
-  * **Uplink (doorbell mic -> caller's ear):** camera_session already decodes
-    the doorbell's mic continuously for the RTSP publisher; a tap
-    (camera_session.subscribe_decoded_audio) hands this module the same PCM
-    frames, which are re-encoded to mu-law (sip_call.pcm_s16le_to_mulaw, a
-    table) and pulled by the SIP leg's frame_source at its own 20 ms cadence.
-  * **Downlink (caller's voice -> doorbell speaker):** the SIP leg's received
-    RTP payloads are already wire-format mu-law; they are fed verbatim into a
-    talk_fullduplex.LiveMulawSource, which talkdown's existing transport
-    drains through the doorbell's chunked Digest PUT.
-  * **The call itself:** sip_call.SipCall in live mode, which runs until the
-    operator stops it, the far end hangs up, or config.CALL_MAX_S.
+  * **Uplink (doorbell mic -> caller):** rtsp_listen.RtspTunnelListen pulls the
+    device's audio over its direct RTSP-in-HTTPS tunnel, decoded to PCM, shaped
+    for phone clarity (call_shape), re-encoded to mu-law, and drained by the
+    SIP leg at its 20 ms cadence. No cloud, no relay, no churn.
+  * **Downlink (caller -> doorbell speaker):** the SIP leg's received mu-law is
+    shaped for the small speaker (call_shape) and fed to a
+    talk_fullduplex.LiveMulawSource, which talkdown's chunked Digest PUT drains
+    straight to the device on the LAN.
+  * **The call itself:** sip_call.SipCall in live mode.
 
-No transcoding anywhere: every leg is G.711 mu-law at 8 kHz, which is why the
-whole bridge is queues and byte-slicing.
+GENERIC BY CONSTRUCTION (see the generic-capability-driven memory / AGENTS):
+the call is offered per device from the ADVERTISED capability flags, never a
+model or id. Two-way needs both upstream and downstream audio; the RTSP listen
+URL and codec are read from the account's camera list and the stream's own SDP.
+A device that advertises no upstream audio is not offered talk; a device with a
+different codec or endpoint just works.
 
-LIFECYCLE, the only part with judgment in it. The talk session (StartFullDuplex
-through the MWS API) is armed CONCURRENTLY with dialing: arming takes seconds
-and doing it during ring time means the doorbell speaker is live the moment the
-call is answered. Either half ending ends the other -- a hangup closes the
-talkdown source (EOF -> normal teardown), a talkdown failure hangs up the call
--- and both teardowns already exist in their own modules; this module only
-pulls the triggers. One call at a time across ALL cameras: the SIP sub-account
-is one line, and the operator is one person.
-
-Settings come from config (VOIPMS_*, DOORBELL_CALL_TARGET, CALL_ENABLED),
-which Home Assistant manages live through /control/call/settings and the
-call_settings.json fallback -- the same two-channel pattern as the TELUS
+Settings are HA-managed live (apply_settings) through /control/call/settings and
+the call_settings.json fallback, the same two-channel pattern as the TELUS
 credentials. Nothing here reads the environment directly.
 """
 
 import asyncio
 import logging
+import re
 import time
 
-from . import camera_session, config as c, sip_call, talk_fullduplex
+from . import config as c, rtsp_listen, sip_call, talk_fullduplex
+from .call_shape import downlink_shaper, uplink_shaper
 
 log = logging.getLogger(__name__)
 
 
-# The HA-managed fields, in one place: the control route's live push, the
-# shared-file fallback loader in main.py and the watcher all apply the SAME
-# list, so a field cannot be settable on one channel and not another.
 _SETTING_FIELDS = {
     "enabled": "CALL_ENABLED",
     "sip_server": "VOIPMS_SIP_SERVER",
@@ -59,9 +55,9 @@ def apply_settings(data: dict) -> list:
     """Apply an HA-managed settings payload to the live config.
 
     A missing key leaves the current value alone (a toggle-only push cannot
-    wipe the credentials); a present key is applied verbatim, including an
-    empty string, which is how a field is cleared. Returns the names applied
-    -- names only, never values, because one of them is a password."""
+    wipe the credentials); a present key is applied verbatim, including an empty
+    string, which is how a field is cleared. Returns the names applied -- names
+    only, never values, because one of them is a password."""
     applied = []
     for key, attr in _SETTING_FIELDS.items():
         if key not in data:
@@ -76,6 +72,18 @@ def apply_settings(data: dict) -> list:
         setattr(c, attr, value)
         applied.append(key)
     return applied
+
+
+def select_listen_url(doorbell: dict) -> tuple[str | None, str | None]:
+    """Pick the direct-LAN RTSP listen URL by CALL_LISTEN_ENDPOINT_ORDER, first
+    present wins. Returns (kind, url). Direct/LAN is preferred; a bridge not on
+    the device's LAN falls through to WAN/cloud. Generic -- keyed on the account's
+    own endpoint set, not on any address."""
+    urls = doorbell.get("rtsp_urls") or {}
+    for kind in c.CALL_LISTEN_ENDPOINT_ORDER:
+        if urls.get(kind):
+            return kind, urls[kind]
+    return None, None
 
 
 class CallBridge:
@@ -94,11 +102,6 @@ class CallBridge:
         return self._task is not None and not self._task.done()
 
     def status(self) -> dict:
-        """The /control/status "call" section: current state, always honest.
-
-        `last_result` persists across calls so "why did the last call end"
-        survives the call itself -- the same reasoning as the talk metrics.
-        """
         return {
             "enabled": bool(c.CALL_ENABLED and c.VOIPMS_SIP_SERVER
                             and c.VOIPMS_SIP_ACCOUNT and c.VOIPMS_SIP_PASSWORD),
@@ -113,17 +116,30 @@ class CallBridge:
             return {"error": "talkdown_disabled"}
         if self.active:
             return {"error": "call_in_progress"}
+        # Gate on ADVERTISED capabilities before opening anything: a device that
+        # cannot do two-way audio must not be dialled. Generic -- reads the flags,
+        # never the model.
+        try:
+            doorbell = await self._talk.resolve_doorbell(camera_id)
+        except Exception as err:  # noqa: BLE001
+            log.warning("call bridge: doorbell resolve failed for %s: %s", camera_id, err)
+            return {"error": "resolve_failed"}
+        if doorbell is None or not doorbell.get("supports_upstream_audio"):
+            return {"error": "talk_not_supported"}
+        if not doorbell.get("supports_downstream_audio"):
+            # Talk-only device: a phone call with no return audio is not a call.
+            return {"error": "listen_not_supported"}
+        kind, listen_url = select_listen_url(doorbell)
+        if not listen_url or not doorbell.get("stream_password"):
+            return {"error": "no_listen_endpoint"}
         self._camera_id = camera_id
         self._started_at = time.time()
         self._stop_event = asyncio.Event()
-        self._task = asyncio.ensure_future(self._run(camera_id, target,
-                                                     self._stop_event))
+        self._task = asyncio.ensure_future(
+            self._run(camera_id, target, doorbell, kind, listen_url, self._stop_event))
         return {"status": "started", "camera_id": camera_id}
 
     def stop(self) -> bool:
-        """Ask the live call to end. Both halves observe it: the SIP leg
-        hangs up at its next frame slot, and the talkdown stops through the
-        talk manager's own stop path."""
         if not self.active:
             return False
         self._stop_event.set()
@@ -131,67 +147,82 @@ class CallBridge:
             self._talk.stop(self._camera_id)
         return True
 
-    async def _run(self, camera_id: str, target: str,
-                   stop_event: asyncio.Event) -> None:
-        tap = camera_session.subscribe_decoded_audio(
-            camera_id, maxsize=c.CALL_UPLINK_TAP_FRAMES)
+    async def _run(self, camera_id, target, doorbell, listen_kind, listen_url,
+                   stop_event) -> None:
+        up_shaper = uplink_shaper(c)
+        down_shaper = downlink_shaper(c)
         live_source = talk_fullduplex.LiveMulawSource()
         ulaw_buf = bytearray()
 
+        # --- uplink: direct-LAN RTSP mic -> shape -> mu-law -> SIP ------------
+        def on_mic_audio(pcm: bytes, rate: int) -> None:
+            shaped = up_shaper.process(pcm)
+            ulaw_buf.extend(sip_call.pcm_s16le_to_mulaw(shaped))
+
+        listen = rtsp_listen.RtspTunnelListen(
+            listen_url, doorbell["stream_user"], doorbell["stream_password"],
+            on_mic_audio)
+
         def frame_source() -> bytes | None:
-            # Pull whatever decoded mic audio has arrived, encode, and hand
-            # out exactly one 20 ms frame. Returning None sends silence, which
-            # is correct both while the buffer is short and while the camera's
-            # own audio is sparse (E97): the tap simply has nothing yet.
-            while len(ulaw_buf) < 160:
-                try:
-                    pcm = tap.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                ulaw_buf.extend(sip_call.pcm_s16le_to_mulaw(pcm))
+            # One 20 ms mu-law frame, or None (silence) when the mic buffer is
+            # short -- correct while audio is sparse or the listen is warming up.
             if len(ulaw_buf) >= 160:
                 out = bytes(ulaw_buf[:160])
                 del ulaw_buf[:160]
                 return out
             return None
 
+        # --- downlink: SIP mu-law -> shape for the speaker -> talkdown PUT -----
+        def on_caller_audio(mulaw: bytes) -> None:
+            if down_shaper.passthrough:
+                live_source.feed(mulaw)
+            else:
+                pcm = sip_call.mulaw_to_pcm_s16le(mulaw)
+                live_source.feed(sip_call.pcm_s16le_to_mulaw(down_shaper.process(pcm)))
+
         call = sip_call.SipCall(
             server=c.VOIPMS_SIP_SERVER, username=c.VOIPMS_SIP_ACCOUNT,
             password=c.VOIPMS_SIP_PASSWORD, target=target,
             caller_id=c.VOIPMS_DID or "doorbell", sip_port=c.SIP_PORT,
-            frame_source=frame_source, payload_sink=live_source.feed,
+            frame_source=frame_source, payload_sink=on_caller_audio,
             stop_event=stop_event)
 
         async def _talk_leg() -> dict:
             try:
                 return await self._talk.speak_live(camera_id, live_source)
             except Exception as err:  # noqa: BLE001
-                # The speaker path died (auth, session, transport). The call
-                # keeps no value without it: hang up. The error is the result.
-                log.warning("call bridge: talkdown leg failed (%s); hanging up",
-                            err)
+                log.warning("call bridge: talkdown leg failed (%s); hanging up", err)
                 stop_event.set()
                 return {"error": repr(err)}
 
+        listen_started = False
         talk_task = asyncio.ensure_future(_talk_leg())
         try:
+            audio = await listen.start()
+            listen_started = True
+            log.info("call bridge: uplink via %s RTSP (%s); dialing %s",
+                     listen_kind, audio.get("codec"), re.sub(r"\d", "x", target))
             result = await call.run(tone_seconds=0,
                                     timeout=c.CALL_TIMEOUT_S + c.CALL_MAX_S)
         except Exception as err:  # noqa: BLE001
-            log.exception("call bridge: SIP leg failed")
+            log.exception("call bridge: call failed")
             result = {"result": "error", "error": repr(err)}
         finally:
-            # Whatever ended the call ends the talkdown: EOF the live source
-            # (normal drain-out) and signal the manager's stop path too, so a
-            # talkdown mid-renegotiation does not linger on a dead call.
+            stop_event.set()
+            if listen_started:
+                try:
+                    await listen.stop()
+                except Exception:
+                    log.debug("call bridge: listen stop failed", exc_info=True)
             live_source.close()
             self._talk.stop(camera_id)
-            camera_session.unsubscribe_decoded_audio(camera_id, tap)
         talk = await talk_task
         result["talk"] = {k: talk.get(k) for k in
-                         ("chunks", "seconds", "renegotiations", "error")
-                         if isinstance(talk, dict) and k in talk}
+                          ("chunks", "seconds", "renegotiations", "error")
+                          if isinstance(talk, dict) and k in talk}
+        result["uplink_frames"] = listen.frames
         result["downlink_dropped_bytes"] = live_source.dropped_bytes
         self.last_result = result
         log.info("call bridge: call ended: %s",
-                 {k: result.get(k) for k in ("result", "reason", "seconds")})
+                 {k: result.get(k) for k in ("result", "reason", "seconds",
+                                             "uplink_frames")})
