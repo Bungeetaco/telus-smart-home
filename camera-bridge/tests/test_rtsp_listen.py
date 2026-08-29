@@ -252,6 +252,30 @@ def test_gate_stops_the_agc_amplifying_background_noise():
     print("  ok  gate attenuates sub-threshold noise, passes and lifts speech")
 
 
+
+def test_fixed_gain_profile_has_no_dynamics():
+    # min_gain == max_gain == G is a FIXED gain: after four live rounds the
+    # dynamics chain (hot AGC + gate) was heard doing harm on the real mic, so
+    # the default uplink profile is a plain fixed gain -- and the Shaper must
+    # honour min_gain above 1 for that to exist at all (it used to clamp it).
+    sh = Shaper(highpass_hz=0, agc_target=0.7, agc_max_gain=4.0, agc_min_gain=4.0)
+    # Gain starts at 1 and slews to the fixed value over the release time, so
+    # settle on 2 s of audio and judge the tail.
+    data = _s16([2000, -2000] * 8000)                # ~0.06: ordinary speech
+    out = _unpack(sh.process(data))
+    tail = out[len(out) // 2:]
+    peak = max(abs(x) for x in tail)
+    assert 7900 <= peak <= 8000, (
+        f"fixed gain 4 not applied (settled peak {peak}, expected ~8000) -- "
+        f"dynamics crept back into the fixed profile")
+    # Louder input where an AGC would ride gain DOWN: fixed gain must not.
+    loud = _s16([6000, -6000] * 8000)
+    peak = max(abs(x) for x in _unpack(sh.process(loud))[8000:])
+    assert 23700 <= peak <= 24000, (
+        f"gain moved on loud input ({peak}, expected ~24000) -- that is an AGC")
+    print("  ok  fixed-gain profile applies G verbatim, no dynamics")
+
+
 TESTS = (
     test_sdp_audio_is_read_from_the_stream_not_assumed,
     test_sdp_static_payload_type_without_rtpmap,
@@ -267,6 +291,7 @@ TESTS = (
     test_shaper_highpass_removes_dc,
     test_ulaw_decode_is_correct_and_inverts_the_encoder,
     test_gate_stops_the_agc_amplifying_background_noise,
+    test_fixed_gain_profile_has_no_dynamics,
 )
 
 

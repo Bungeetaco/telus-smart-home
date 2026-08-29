@@ -365,7 +365,20 @@ and evidence. Grouped by whether anything can actually be done about them.
   measured floor (0.006, atten 0.25) and downlink-priority echo ducking added
   (CALL_ECHO_DUCK_*): while the caller speaks, the uplink is attenuated hard
   with a hangover -- the intercom-standard half-duplex bias. uplink_ducked_ms
-  surfaces in the call result. Awaiting the round-4 call.
+  surfaces in the call result. Round 4 was still bad ("as
+  horrible as before" -- operator), despite the mechanics reporting clean:
+  ducker active 10.4 s, drain kept up, played 40/40 s. Two structural moves
+  followed instead of further knob tuning: (a) the called camera's always-on
+  video pipeline is PAUSED for the call's duration
+  (CALL_PAUSE_VIDEO_DURING_CALL, lifecycle.deactivate/reactivate) -- the
+  device acks audio in 7-9 ms idle but 200 ms-3 s mid-call with the cloud
+  session running, and those stalls are what the latency caps shed as chopped
+  speech; the official app does not stream cloud video while it talks either.
+  (b) the uplink DSP is simplified to a FIXED gain (min==max==4, Shaper's
+  min_gain unclamped) with the gate off -- four rounds of AGC+gate tuning on
+  this very quiet mic did net harm. And (c) CALL_DEBUG_CAPTURE_DIR records
+  uplink-raw / uplink-sent / downlink-sent per call, so the next bad call is
+  analyzed from audio, not described from memory. Awaiting the round-5 call.
 
   STILL OPEN from this rebuild:
   (b) the downlink PUT still shares the main event loop, so heavy Janus video

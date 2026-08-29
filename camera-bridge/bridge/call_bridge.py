@@ -167,8 +167,9 @@ def select_listen_url(doorbell: dict) -> tuple[str | None, str | None]:
 class CallBridge:
     """At most one live doorbell call; see the module docstring."""
 
-    def __init__(self, talk_manager):
+    def __init__(self, talk_manager, lifecycle=None):
         self._talk = talk_manager
+        self._lifecycle = lifecycle          # pause/resume video during a call
         self._task: asyncio.Task | None = None
         self._stop_event: asyncio.Event | None = None
         self._camera_id: str | None = None
@@ -235,8 +236,11 @@ class CallBridge:
 
         # --- uplink: direct-LAN RTSP mic -> shape -> duck -> mu-law -> SIP ----
         def on_mic_audio(pcm: bytes, rate: int) -> None:
+            _cap("uplink_raw.s16le", pcm)
             shaped = ducker.apply(up_shaper.process(pcm), time.monotonic())
-            uplink_buf.feed(sip_call.pcm_s16le_to_mulaw(shaped))
+            ulaw = sip_call.pcm_s16le_to_mulaw(shaped)
+            _cap("uplink_sent.ulaw", ulaw)
+            uplink_buf.feed(ulaw)
 
         listen = rtsp_listen.RtspTunnelListen(
             listen_url, doorbell["stream_user"], doorbell["stream_password"],
@@ -252,9 +256,12 @@ class CallBridge:
             pcm = sip_call.mulaw_to_pcm_s16le(mulaw)
             ducker.note_downlink(pcm, time.monotonic())
             if down_shaper.passthrough:
+                _cap("downlink_sent.ulaw", mulaw)
                 live_source.feed(mulaw)
             else:
-                live_source.feed(sip_call.pcm_s16le_to_mulaw(down_shaper.process(pcm)))
+                out = sip_call.pcm_s16le_to_mulaw(down_shaper.process(pcm))
+                _cap("downlink_sent.ulaw", out)
+                live_source.feed(out)
 
         call = sip_call.SipCall(
             server=c.VOIPMS_SIP_SERVER, username=c.VOIPMS_SIP_ACCOUNT,
@@ -270,6 +277,45 @@ class CallBridge:
                 log.warning("call bridge: talkdown leg failed (%s); hanging up", err)
                 stop_event.set()
                 return {"error": repr(err)}
+
+        # Debug capture (config.CALL_DEBUG_CAPTURE_DIR): never allowed to break
+        # the call -- every write is best-effort.
+        caps = {}
+        if c.CALL_DEBUG_CAPTURE_DIR:
+            try:
+                import os as _os
+                _os.makedirs(c.CALL_DEBUG_CAPTURE_DIR, exist_ok=True)
+                stamp = f"{int(time.time())}-{camera_id}"
+                for name in ("uplink_raw.s16le", "uplink_sent.ulaw",
+                             "downlink_sent.ulaw"):
+                    caps[name] = open(
+                        f"{c.CALL_DEBUG_CAPTURE_DIR}/{stamp}-{name}", "wb")
+                log.info("call bridge: debug capture -> %s/%s-*",
+                         c.CALL_DEBUG_CAPTURE_DIR, stamp)
+            except Exception:
+                log.warning("call bridge: debug capture unavailable", exc_info=True)
+                caps = {}
+
+        def _cap(name: str, data: bytes) -> None:
+            f = caps.get(name)
+            if f is not None:
+                try:
+                    f.write(data)
+                except Exception:
+                    caps.pop(name, None)
+
+        # Pause this camera's always-on video for the call (see
+        # config.CALL_PAUSE_VIDEO_DURING_CALL): the device's encoder must serve
+        # the call, not the cloud session. Reactivated in the finally below.
+        paused = False
+        if c.CALL_PAUSE_VIDEO_DURING_CALL and self._lifecycle is not None:
+            try:
+                await self._lifecycle.deactivate(camera_id)
+                paused = True
+                log.info("call bridge: paused %s video for the call", camera_id)
+            except Exception:
+                log.warning("call bridge: could not pause %s video; calling "
+                            "with it running", camera_id, exc_info=True)
 
         listen_started = False
         talk_task = asyncio.ensure_future(_talk_leg())
@@ -292,6 +338,18 @@ class CallBridge:
                     log.debug("call bridge: listen stop failed", exc_info=True)
             live_source.close()
             self._talk.stop(camera_id)
+            for f in caps.values():
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            if paused:
+                try:
+                    await self._lifecycle.reactivate(camera_id)
+                    log.info("call bridge: resumed %s video after the call", camera_id)
+                except Exception:
+                    log.exception("call bridge: FAILED to resume %s video -- "
+                                  "reactivate it via the control API", camera_id)
         talk = await talk_task
         result["talk"] = {k: talk.get(k) for k in
                           ("chunks", "seconds", "played_seconds",

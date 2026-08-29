@@ -219,6 +219,62 @@ async def _run_bridge(doorbell=None, fail_dial=False, talk_error=None):
         sip_call.SipCall = saved_sip
 
 
+class FakeLifecycle:
+    def __init__(self):
+        self.events = []
+
+    async def deactivate(self, camera_id):
+        self.events.append(("deactivate", camera_id))
+
+    async def reactivate(self, camera_id):
+        self.events.append(("reactivate", camera_id))
+        return True
+
+
+async def test_the_call_pauses_this_cameras_video_and_resumes_after():
+    """The device encodes its cloud video on the same silicon that serves the
+    call's audio: measured idle its audio PUTs ack in 7-9 ms, mid-call with
+    the cloud session running p95 was 200-290 ms with multi-second stalls --
+    shed by the latency caps as chopped speech. So the call pauses THIS
+    camera's pipeline and resumes it afterwards, on the success and the
+    failure path alike; with no lifecycle wired (a minimal deployment) the
+    call simply runs with video on."""
+    saved_listen, saved_sip = rtsp_listen.RtspTunnelListen, sip_call.SipCall
+    rtsp_listen.RtspTunnelListen = FakeListen
+    sip_call.SipCall = FakeSip
+    saved_pause = c.CALL_PAUSE_VIDEO_DURING_CALL
+    c.CALL_PAUSE_VIDEO_DURING_CALL = True
+    try:
+        for fail_dial in (False, True):
+            FakeListen.instances = []; FakeSip.instances = []
+            FakeSip.fail = fail_dial
+            lc = FakeLifecycle()
+            bridge = call_bridge.CallBridge(FakeTalk(_doorbell()), lifecycle=lc)
+            started = await bridge.start("cam", "18195551234")
+            assert started.get("status") == "started", started
+            while bridge.active:
+                await asyncio.sleep(0.01)
+            assert lc.events[0] == ("deactivate", "cam"), (
+                f"video not paused before the call (fail_dial={fail_dial}): "
+                f"{lc.events}")
+            assert lc.events[-1] == ("reactivate", "cam"), (
+                f"video not resumed after the call (fail_dial={fail_dial}): "
+                f"{lc.events}")
+        # No lifecycle wired: the call must still run (and pause nothing).
+        FakeListen.instances = []; FakeSip.instances = []; FakeSip.fail = False
+        bridge = call_bridge.CallBridge(FakeTalk(_doorbell()))
+        started = await bridge.start("cam", "18195551234")
+        assert started.get("status") == "started", started
+        while bridge.active:
+            await asyncio.sleep(0.01)
+        assert bridge.last_result.get("reason") == "remote_bye"
+    finally:
+        c.CALL_PAUSE_VIDEO_DURING_CALL = saved_pause
+        rtsp_listen.RtspTunnelListen = saved_listen
+        sip_call.SipCall = saved_sip
+    print("  ok  call pauses this camera's video and resumes it (both paths)")
+
+
 async def test_a_bridged_call_wires_both_directions_and_tears_down():
     bridge, talk = await _run_bridge()
     # downlink: the caller's mu-law reached the talkdown source
@@ -340,6 +396,7 @@ TESTS = (
     test_live_source_cap_is_a_conversational_latency_ceiling,
     test_uplink_buffer_cap_is_a_latency_ceiling,
     test_echo_ducker_suppresses_uplink_while_caller_speaks,
+    test_the_call_pauses_this_cameras_video_and_resumes_after,
     test_select_listen_url_prefers_direct_lan,
     test_capability_gate_degrades_for_partial_or_absent_audio,
     test_a_bridged_call_wires_both_directions_and_tears_down,

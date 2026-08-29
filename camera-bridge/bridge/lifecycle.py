@@ -36,6 +36,11 @@ class CameraLifecycleManager:
         self._start_camera_fn = start_camera_fn
         self._tasks: dict[str, asyncio.Task] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Every camera dict ever activated, by id: what reactivate() restarts
+        # from. Kept by THIS class because it is the only place that knows the
+        # exact dict a pipeline was started with (callers such as the call
+        # bridge only hold a camera_id).
+        self._cameras: dict[str, dict] = {}
 
     def _lock_for(self, camera_id: str) -> asyncio.Lock:
         return self._locks.setdefault(camera_id, asyncio.Lock())
@@ -47,6 +52,7 @@ class CameraLifecycleManager:
             if task is not None and not task.done():
                 return  # already running -- idempotent no-op
             log.info("%s: activating camera pipeline", camera_id)
+            self._cameras[camera_id] = camera
             self._tasks[camera_id] = asyncio.ensure_future(self._start_camera_fn(camera))
 
     async def deactivate(self, camera_id: str) -> None:
@@ -75,3 +81,15 @@ class CameraLifecycleManager:
                 # raises on its own -- this is a backstop, same reasoning as main.py's
                 # top-level gather() comment.
                 log.exception("%s: pipeline raised while shutting down", camera_id)
+
+    async def reactivate(self, camera_id: str) -> bool:
+        """Restart a pipeline deactivate() stopped, from the camera dict it was
+        originally activated with. Returns False (with a log line) for an id
+        this manager never activated -- the caller has nothing better to pass."""
+        camera = self._cameras.get(camera_id)
+        if camera is None:
+            log.warning("%s: reactivate requested but this camera was never "
+                        "activated here", camera_id)
+            return False
+        await self.activate(camera)
+        return True

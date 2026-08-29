@@ -2452,7 +2452,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
     # covers the tone test; the bridge below enforces the same rule for
     # live calls (and the two also exclude each other via _call_busy()).
     call_lock = asyncio.Lock()
-    call_bridge_mgr = call_bridge.CallBridge(talk_manager)
+    call_bridge_mgr = call_bridge.CallBridge(talk_manager, lifecycle=lifecycle)
 
     def _call_ready() -> web.Response | None:
         if not c.CALL_ENABLED:

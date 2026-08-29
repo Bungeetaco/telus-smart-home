@@ -54,8 +54,14 @@ class Shaper:
         self._hp_prev_out = 0.0
         # AGC/limiter, in normalized [-1, 1] amplitude.
         self.target = agc_target
-        self.max_gain = max(1.0, agc_max_gain)
-        self.min_gain = min(1.0, agc_min_gain)
+        self.max_gain = max(0.0, agc_max_gain)
+        # NOT clamped to <=1: min_gain == max_gain == G is a FIXED gain of G --
+        # no dynamics at all -- which is the simplest thing that can possibly
+        # work for a quiet mic, and simplest is where tuning restarts after a
+        # dynamics chain has been heard doing harm. (A fixed gain has no
+        # limiter: the hard clip at full scale is the only ceiling. Size G so
+        # the loudest expected input times G stays under 1.)
+        self.min_gain = max(0.0, min(agc_min_gain, self.max_gain))
         self._gain = 1.0
         # Per-sample smoothing coefficients for gain moves (fast down, slow up).
         self._atk = math.exp(-1.0 / (sample_rate * attack_ms / 1000.0))
@@ -134,5 +140,6 @@ def uplink_shaper(c) -> Shaper:
     return Shaper(highpass_hz=c.CALL_UPLINK_HIGHPASS_HZ,
                   agc_target=c.CALL_UPLINK_AGC_TARGET,
                   agc_max_gain=c.CALL_UPLINK_AGC_MAX_GAIN,
+                  agc_min_gain=c.CALL_UPLINK_AGC_MIN_GAIN,
                   gate_threshold=c.CALL_UPLINK_GATE_THRESHOLD,
                   gate_atten=c.CALL_UPLINK_GATE_ATTEN)

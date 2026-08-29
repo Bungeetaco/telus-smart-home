@@ -1234,7 +1234,9 @@ tone), so give the HTTP client a generous timeout.
 
 Starts a LIVE bridged call: the bridge dials the configured number and, on
 answer, connects the doorbell's microphone to the caller and the caller's
-voice to the doorbell speaker. Returns immediately; the call runs in the
+voice to the doorbell speaker. While the call runs, the called camera's
+always-on video pipeline is paused and its NVR feed gaps (see
+`CALL_PAUSE_VIDEO_DURING_CALL`); it resumes automatically when the call ends. Returns immediately; the call runs in the
 background and its progress is the `call` section of `/control/status`.
 
     Authorization: Bearer <contents of CONTROL_SECRET_PATH, stripped>

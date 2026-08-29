@@ -719,16 +719,27 @@ CALL_DOWNLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_DOWNLINK_AGC_MAX_GAIN", 
 #   GATE_ATTEN while the fast-attack/slow-release envelope sits below
 #   GATE_THRESHOLD (normalized magnitude, ~ -36 dBFS at 0.015), so background
 #   is pushed down instead of ridden up. All by-ear first calibrations.
-CALL_UPLINK_HIGHPASS_HZ = float(os.environ.get("CALL_UPLINK_HIGHPASS_HZ", "250"))
+# After four live rounds the uplink dynamics chain (hot AGC + gate) was heard
+# doing more harm than good on this very quiet mic, so the default profile is
+# now the SIMPLEST thing that can work: a fixed gain (min == max, no dynamics,
+# no pumping, no gate) sized so speech is audible and the measured ambient
+# floor (~0.003 peak) stays a whisper, plus the high-pass. Dynamics remain
+# available as knobs for a deployment that wants them.
+CALL_UPLINK_HIGHPASS_HZ = float(os.environ.get("CALL_UPLINK_HIGHPASS_HZ", "150"))
 CALL_UPLINK_AGC_TARGET = float(os.environ.get("CALL_UPLINK_AGC_TARGET", "0.7"))
-CALL_UPLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MAX_GAIN", "16"))
+CALL_UPLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MAX_GAIN", "4"))
+CALL_UPLINK_AGC_MIN_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MIN_GAIN", "4"))
 # Gate threshold CALIBRATED TO THE MEASURED MIC, not to a nominal level: this
 # doorbell's mic is very quiet (ambient floor measured live 2026-08-29 over
 # 15 s: frame-peak p50 0.0012, p95 0.0027, p99 0.0055, max 0.0089 normalized).
 # The first guess of 0.015 sat ABOVE this mic's conversational speech and
 # gated the visitor out entirely -- only a direct tap on the mic crossed it.
 # 0.006 is ~2x the p95 ambient peak: closed on the floor, open for speech.
-CALL_UPLINK_GATE_THRESHOLD = float(os.environ.get("CALL_UPLINK_GATE_THRESHOLD", "0.006"))
+# Gate OFF by default: with a fixed gain the pauses are no longer amplified
+# (the failure the gate existed for), and on this mic every threshold guess so
+# far has eaten speech. The measured-floor numbers above stay for whoever
+# re-enables it.
+CALL_UPLINK_GATE_THRESHOLD = float(os.environ.get("CALL_UPLINK_GATE_THRESHOLD", "0"))
 CALL_UPLINK_GATE_ATTEN = float(os.environ.get("CALL_UPLINK_GATE_ATTEN", "0.25"))
 # Downlink-priority echo ducking. There is no acoustic echo canceller anywhere
 # in this path (the official app does AEC phone-side), and once the uplink
@@ -740,9 +751,28 @@ CALL_UPLINK_GATE_ATTEN = float(os.environ.get("CALL_UPLINK_GATE_ATTEN", "0.25"))
 # CALL_ECHO_DUCK_ATTEN. The conversation becomes politely half-duplex -- the
 # caller talks over the visitor, not with them -- which is how every doorbell
 # intercom behaves. 1.0 disables ducking.
-CALL_ECHO_DUCK_ATTEN = float(os.environ.get("CALL_ECHO_DUCK_ATTEN", "0.05"))
+CALL_ECHO_DUCK_ATTEN = float(os.environ.get("CALL_ECHO_DUCK_ATTEN", "0.02"))
 CALL_ECHO_DUCK_HANGOVER_MS = float(os.environ.get("CALL_ECHO_DUCK_HANGOVER_MS", "350"))
 CALL_ECHO_DUCK_ACTIVITY = float(os.environ.get("CALL_ECHO_DUCK_ACTIVITY", "0.02"))
+# Pause the called camera's always-on video pipeline for the duration of a
+# call. The device encodes its cloud WebRTC stream on the same silicon that
+# serves the call's audio: measured idle, its audio PUTs ack in 7-9 ms;
+# measured mid-call with the cloud session running, p95 200-290 ms with
+# multi-second stalls -- which the latency caps then shed as chopped speech.
+# The official app does not keep a cloud session running while it talks, and
+# neither should a call. The NVR feed for THIS camera gaps for the call's
+# duration (the pipeline reactivates and re-publishes right after); every
+# other camera is untouched. Generic: applies to whichever camera is called.
+CALL_PAUSE_VIDEO_DURING_CALL = os.environ.get(
+    "CALL_PAUSE_VIDEO_DURING_CALL", "true").strip().lower() in ("1", "true", "yes")
+# Directory for per-call debug audio captures; empty disables (the default).
+# When set, each call writes three raw streams -- <ts>-<camera>-uplink_raw.s16le
+# (the mic as decoded, before shaping), <ts>-<camera>-uplink_sent.ulaw (what
+# went to the phone) and <ts>-<camera>-downlink_sent.ulaw (what went to the
+# speaker) -- so a bad-sounding call can be ANALYZED instead of described.
+# 8 kHz mono. Point it somewhere host-visible (e.g. under /shared) and clear
+# the files after use; they are raw audio of a live conversation.
+CALL_DEBUG_CAPTURE_DIR = os.environ.get("CALL_DEBUG_CAPTURE_DIR", "").strip()
 # Cap on the uplink mu-law buffer between the RTSP listen and the SIP leg --
 # the uplink's mouth-to-ear latency ceiling, the exact mirror of
 # CALL_DOWNLINK_BUFFER_MS below. The listen starts several seconds before the
