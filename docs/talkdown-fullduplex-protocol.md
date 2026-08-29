@@ -174,6 +174,32 @@ issues after a full-duplex talk (an `EndFullDuplex` action also exists but was n
 what the app sent). `mws_client.end_live_stream`; `talk._run_full_duplex` runs
 it best-effort in a `finally` and always removes the spooled temp clip.
 
+## The listen (downstream) leg: RTSP inside an HTTPS tunnel
+
+The `re`/`dre`/`lre`/`pre` URLs above are not plain RTSP. The device's media
+port speaks HTTP(S), and RTSP rides inside it using the Apple
+`x-rtsp-tunnelled` scheme: one `GET <path>` opens the server->client data
+channel and one `POST <path>` (same `x-sessioncookie`) carries base64-encoded
+RTSP requests client->server. Two independent Digest layers guard it: HTTP
+Digest on the tunnel itself, then RTSP Digest (realm `Alarm.com`, GStreamer
+server) inside; a challenge that carries `qop` must be answered WITH
+`qop`/`nc`/`cnonce` echoed in the Authorization header, or the server
+recomputes without qop and rejects. RTP arrives interleaved (`$`-framed) on
+the GET channel; there is no UDP through the tunnel.
+
+**The aggregate control URL is the DESCRIBE reply's `Content-Base`, not the
+request URL.** The device answers DESCRIBE on `.../api/GetStream?streamID=0`
+but hosts its media under `Content-Base: .../api/GetStream/` with track
+controls `stream=0` (video) / `stream=1` (audio); SETUP and PLAY against the
+request URL return 404/454 for the very media just described, and against the
+`Content-Base` they play. Verified live on the ADC-VDB750: SETUP 200, PLAY
+200, gap-free interleaved PCMU. `bridge/rtsp_listen.py` implements the whole
+handshake and reads codec/rate/track from the SDP rather than assuming them;
+the audio observed is G.711 mu-law at 8 kHz, matching the talkdown leg.
+
+This leg is what feeds the two-way call's uplink (doorbell mic -> caller) on
+the LAN, with no cloud relay; see `docs/camera-bridge.md`.
+
 ## Orchestration & safety (`talk.py`)
 
 `TalkManager.speak(camera_id, audio_url=|audio_path=)`:
