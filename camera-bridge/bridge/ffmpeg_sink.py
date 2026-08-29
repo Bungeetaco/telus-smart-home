@@ -117,6 +117,7 @@ import re
 import time
 
 from . import config as c
+from .call_shape import Shaper
 
 log = logging.getLogger(__name__)
 
@@ -324,6 +325,28 @@ def _audio_pcm_bytes(frame) -> bytes:
     return arr.tobytes()
 
 
+
+def build_audio_shaper(audio_format):
+    """The per-publisher loudness shaper (E98), or None.
+
+    In-process, zero-lookahead AGC applied to the decoded PCM in write_audio.
+    An ffmpeg dynamics filter is FORBIDDEN on this two-input mux -- its
+    lookahead window delays the audio leg, the mux holds the video back, and
+    the pipe watchdog kills every session (config.AUDIO_NORMALIZE_TARGET has
+    the live measurements). Only s16 mono is shaped: that is what these
+    cameras decode to, and shaping any other layout blind would corrupt it.
+    A target of 0 disables shaping."""
+    if c.AUDIO_NORMALIZE_TARGET <= 0 or audio_format is None:
+        return None
+    fmt_name, _rate, channels = audio_format
+    if str(fmt_name) not in ("s16", "s16p") or int(channels) != 1:
+        return None
+    return Shaper(highpass_hz=0.0,
+                  agc_target=c.AUDIO_NORMALIZE_TARGET,
+                  agc_max_gain=c.AUDIO_NORMALIZE_MAX_GAIN,
+                  attack_ms=c.AUDIO_NORMALIZE_ATTACK_MS,
+                  release_ms=c.AUDIO_NORMALIZE_RELEASE_MS)
+
 class _AudioPipeProtocol(asyncio.BaseProtocol):
     """Minimal write-pipe protocol: all this sink needs to know is whether the
     far end went away. Deliberately not asyncio.StreamWriter, whose drain()
@@ -361,6 +384,7 @@ class FfmpegSink:
         # sessions is covered by writing silence into this same fd rather than by
         # closing anything.
         self.audio_format: tuple | None = None
+        self._audio_shaper = None   # E98; built per launch in start()
         self._audio_transport = None
         self._audio_protocol: _AudioPipeProtocol | None = None
         self._audio_pipe_file = None
@@ -497,6 +521,14 @@ class FfmpegSink:
                 log.warning("%s: decoded audio is in an unsupported sample format "
                             "%r; publishing video only", self.camera_id, audio_format[0])
                 audio_format = None
+        # E98: per-publisher normalization shaper; None when disabled or when
+        # the decoded shape is not s16 mono. Built fresh per launch so AGC
+        # state never crosses a rebuild.
+        self._audio_shaper = build_audio_shaper(audio_format)
+        if self._audio_shaper is not None:
+            log.info("%s: audio normalization active (in-process AGC "
+                     "target=%.2f max_gain=%.1f)", self.camera_id,
+                     c.AUDIO_NORMALIZE_TARGET, c.AUDIO_NORMALIZE_MAX_GAIN)
         if audio_format is not None:
             _fmt_name, audio_rate, audio_channels = audio_format
             audio_read_fd, audio_write_fd = os.pipe()
@@ -980,6 +1012,10 @@ class FfmpegSink:
                             self.audio_format)
             return await self.write_silence_to()
         self._audio_malformed_run = 0
+        if self._audio_shaper is not None:
+            # E98 normalization -- in process, zero lookahead; see
+            # build_audio_shaper for why this must never be an ffmpeg filter.
+            data = self._audio_shaper.process(data)
         return self._write_audio_bytes(data, int(frame.samples))
 
     async def write_silence_to(self, now: float | None = None) -> bool:

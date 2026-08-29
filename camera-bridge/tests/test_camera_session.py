@@ -4288,12 +4288,14 @@ async def test_the_cameras_real_8khz_mono_audio_flows_through_unchanged():
             audio_in = ["-f", "s16le", "-ar", "8000", "-ac", "1",
                         "-analyzeduration", "0", "-probesize", "32",
                         "-i", f"pipe:{fd}"]
-            # The -af chain is pinned as a literal, aresample FIRST: the
-            # normalizer (E98) must see a repaired timeline, and a config edit
-            # that broke the chain would otherwise ship silently.
+            # The -af chain is pinned as a literal: E98's normalizer is
+            # IN PROCESS (a lookahead filter here stalls the two-input mux and
+            # kills every session -- see build_audio_shaper), so the chain must
+            # stay aresample + identity, and a config edit that put a dynamics
+            # filter back would otherwise ship silently.
             audio_out = ["-map", "0:v:0", "-map", "1:a:0",
                          "-c:a", "aac", "-ac", "1", "-ar", "8000", "-b:a", "64k",
-                         "-af", "aresample=async=1,dynaudnorm=f=500:g=15:p=0.9:m=12"]
+                         "-af", "aresample=async=1,anull"]
             assert _subsequence_at(args, audio_in) > 0, (
                 f"{backend}: the 8 kHz mono raw input is missing or not "
                 f"contiguous: {args}")
@@ -4646,7 +4648,7 @@ async def test_every_encoder_variant_gets_the_audio_input_and_encoder():
                 f"ffmpeg stops reading the audio pipe within seconds: {args}")
             audio_out = ["-map", "0:v:0", "-map", "1:a:0",
                          "-c:a", "aac", "-ac", "1", "-ar", "48000", "-b:a", "64k",
-                         "-af", "aresample=async=1,dynaudnorm=f=500:g=15:p=0.9:m=12"]
+                         "-af", "aresample=async=1,anull"]
             at_in = _subsequence_at(args, audio_in)
             at_out = _subsequence_at(args, audio_out)
             assert at_in > 0, (
@@ -5549,6 +5551,48 @@ async def test_shutdown_stops_the_publisher():
     assert closed >= 1, "the Janus session was leaked on shutdown"
 
 
+async def test_audio_normalization_is_in_process_and_shapes_the_pcm():
+    """E98 normalization lives in write_audio as a zero-lookahead AGC. An ffmpeg
+    dynamics filter is forbidden on the two-input mux: its lookahead delays the
+    audio leg, the mux holds the video back, and the watchdog kills every
+    session (measured live as an all-day publish->stall->rebuild loop on both
+    cameras). The invisible failure pinned here: quiet audio passing through
+    UNSHAPED -- no log line reports it, the stream just stays wrongly quiet."""
+    real = fs.FfmpegSink("cam")
+    real._audio_transport = types.SimpleNamespace()   # non-None gate only
+    real._audio_protocol = types.SimpleNamespace(lost=False)
+    real.audio_format = ("s16", 8000, 1)
+    real._audio_bytes_per_sample = 2
+    real._audio_shaper = fs.build_audio_shaper(real.audio_format)
+    assert real._audio_shaper is not None, (
+        "s16 mono with the default target built no shaper -- normalization is off")
+    written = []
+    real._write_audio_bytes = lambda data, samples: (written.append(data), True)[1]
+    quiet = b"".join(int(v).to_bytes(2, "little", signed=True)
+                     for v in ([1000, -1000] * 400))
+    frame = FakeAudioFrame(("s16", 8000, 1), 800)
+    orig = fs._audio_pcm_bytes
+    fs._audio_pcm_bytes = lambda f: quiet
+    try:
+        # ~4 s of steady quiet tone: the AGC's release is multi-second BY
+        # DESIGN (anti-pumping), so the lift shows at the tail, not instantly.
+        for _ in range(40):
+            assert await real.write_audio(frame) is True
+    finally:
+        fs._audio_pcm_bytes = orig
+    out = written[-1]
+    tail = out[len(out) // 2:]
+    peak = max(abs(int.from_bytes(tail[i:i + 2], "little", signed=True))
+               for i in range(0, len(tail) - 1, 2))
+    assert peak > 3000, (
+        f"quiet audio reached the pipe unshaped (peak {peak}, fed 1000) -- the "
+        f"AGC is not in the write path")
+    assert peak <= 32767, "shaped audio clipped"
+    # Genericness: shapes it cannot reason about are passed through, not guessed.
+    assert fs.build_audio_shaper(("s16", 48000, 2)) is None, "stereo got a mono shaper"
+    assert fs.build_audio_shaper(None) is None
+
+
 TESTS = [
     test_rotation_keeps_one_publisher,
     test_rotation_deadline_survives_total_frame_silence,
@@ -5627,6 +5671,7 @@ TESTS = [
     test_dropped_frames_are_timestamped_only_when_tracing,
     test_backoff_grows_caps_and_closes_the_session_first,
     test_shutdown_stops_the_publisher,
+    test_audio_normalization_is_in_process_and_shapes_the_pcm,
 ]
 
 

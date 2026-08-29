@@ -242,9 +242,18 @@ and evidence. Grouped by whether anything can actually be done about them.
   the level difference is real microphone/gain difference between the devices.
   Neither camera exposes a microphone-gain entity (`*_speaker_volume` is
   talkdown output, unrelated). The bridge now normalizes every published audio
-  stream (`config.AUDIO_NORMALIZE_FILTER`, dynaudnorm appended to the encoder's
-  -af chain), which covers the NVR, live view and HA from one place; the
-  constant's comment carries the parameter reasoning. What remains is LIVE
+  stream with an in-process zero-lookahead AGC applied to the decoded PCM in
+  the sink (`config.AUDIO_NORMALIZE_TARGET` and friends; the constants carry
+  the parameter reasoning). The first implementation appended dynaudnorm to
+  the encoder's -af chain instead, and that took both cameras down around the
+  clock (2026-08-28 ~22:30 UTC to 2026-08-29 ~11:45 UTC): dynaudnorm's gaussian
+  lookahead delays the audio leg of the two-input mux, ffmpeg stops reading the
+  video pipe, and the 5 s watchdog killed every session ~45 s after it
+  published -- plus the session storm drove RSS into the 1 GiB container limit
+  (four memcg OOM kills). Measured: 40+ session failures per 10 min with the
+  filter, zero in 15 min without it. The -af chain must never carry a lookahead
+  filter (`AUDIO_NORMALIZE_FILTER` now defaults to `anull` and is env-only);
+  the AGC has no lookahead and cannot starve the mux. See troubleshooting. What remains is LIVE
   CALIBRATION: measure fresh NVR segments from both cameras after a real
   conversation at each, and move the max-gain cap if the doorbell is still too
   quiet or its porch hiss too loud. The alarm.com portal has not been checked

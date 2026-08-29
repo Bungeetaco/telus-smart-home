@@ -19,6 +19,7 @@ the component READMEs.
 - [Alarm.com rate-limiting (HTTP 429)](#alarmcom-rate-limiting-http-429)
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
+- [Every session publishes, then dies ~5 s later](#every-session-publishes-then-dies-5-s-later)
 - [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
 - [Frames lost at every rotation, in a burst just after the new session starts](#frames-lost-at-every-rotation-in-a-burst-just-after-the-new-session-starts)
 - [Measuring what a session rotation costs the audio timeline](#measuring-what-a-session-rotation-costs-the-audio-timeline)
@@ -367,6 +368,28 @@ question the rest of the response cannot: whether ffmpeg is still taking the
 frames `last_frame_at` says arrived.
 
 ---
+
+## Every session publishes, then dies ~5 s later
+
+Both cameras cycle `streaming` → `reconnecting` around the clock. The log shows
+the publisher start, MediaMTX accept the publish, then exactly the watchdog
+interval later `ffmpeg has not read a frame from the video pipe in 5s -- the
+process is alive but is publishing nowhere`, a failed session, and the same
+again well under a minute later. `consumer falling behind` drops pile up in
+between, and the session storm can push the process into the container memory
+limit (memcg OOM kill, then `restart: unless-stopped` brings it back into the
+same loop).
+
+The cause is an audio filter with LOOKAHEAD in the publisher's `-af` chain
+(`dynaudnorm`, `loudnorm`, anything that buffers a window before emitting its
+first sample). The mux interleaves two piped inputs and ffmpeg only keeps
+reading the video pipe while the audio stream stays ahead of it; a lookahead
+filter delays every audio packet by its window, the mux holds the video back
+waiting, and the pipe watchdog reads that as a dead encoder and rebuilds --
+forever. This is why `AUDIO_NORMALIZE_FILTER` defaults to `anull` and loudness
+normalization is done in process (`AUDIO_NORMALIZE_TARGET`, a zero-lookahead
+AGC in the sink). Keep it that way, and treat any new `-af` entry as the prime
+suspect whenever this signature appears.
 
 ## Frames dropped as `consumer falling behind`, on the camera with audio
 

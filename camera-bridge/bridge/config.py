@@ -710,31 +710,51 @@ CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))
 # ~30s of ring before voicemail; this has to outlive that plus the tone.
 CALL_TIMEOUT_S = float(os.environ.get("CALL_TIMEOUT_S", "75"))
 
-# Loudness normalization applied to every published audio stream, appended to
-# the encoder's -af chain AFTER the aresample fill-and-trim (timestamps are
-# repaired before any gain decision). One filter for every camera on purpose:
-# the two live devices sit at opposite extremes (backlog E98) -- the doorbell's
-# correct quiet-porch decode means -47 to -72 dB, the living room brushes full
-# scale at -0.2 dB peaks -- and a single dynamic normalizer pulls both toward
-# the same level, riding gain UP for the quiet source and DOWN for frames that
-# would clip, with no per-camera knob to drift.
+# Loudness normalization for every published audio stream (backlog E98). The
+# live devices sit at opposite extremes -- a quiet-porch doorbell decodes at
+# -47 to -72 dB while the living room brushes full scale -- so published audio
+# is pulled toward one level: gain rides UP for a quiet source and DOWN for
+# frames that would clip.
 #
-# dynaudnorm rather than loudnorm: it is designed for one-pass live use at this
-# frame size and does not resample internally (loudnorm upsamples to 192 kHz,
-# absurd for an 8 kHz mono stream). The parameters, and why each is load-bearing:
-#   f=500 (frame 500 ms) g=15 (gaussian window, ~7.5 s of smoothing): gain moves
-#     over seconds, so speech does not pump and a door slam does not duck the
-#     next sentence;
-#   p=0.9: target peak below full scale, which is what ATTENUATES the living
-#     room's near-clipping frames;
-#   m=12: max gain ~21.6 dB, the cap that stops a silent porch's noise floor
-#     being amplified into hiss. Raise it and the doorbell gets louder at the
-#     cost of more porch hiss; the value is a first calibration, not measured
-#     truth, and E98 tracks the live verification.
-# The silence the bridge itself writes (rotation fill, sparse-audio top-up) is
-# digital zero, and zero times any gain is zero: normalization cannot turn the
+# It is done IN PROCESS (call_shape.Shaper applied in ffmpeg_sink.write_audio),
+# NOT with an ffmpeg -af dynamics filter, and that placement is load-bearing.
+# The publisher muxes two piped inputs, and ffmpeg only keeps reading the VIDEO
+# pipe while the audio stream stays ahead of it (see ffmpeg_sink). A dynamics
+# filter with lookahead (dynaudnorm's gaussian window, loudnorm's integration)
+# delays every audio packet by its window; the mux holds the video back waiting,
+# the pipe watchdog reads that as a dead encoder, and the sink rebuilds the
+# session -- forever. Measured live: with dynaudnorm=f=500:g=15 in the chain,
+# BOTH cameras cycled publish -> stall -> rebuild roughly every 45 s around the
+# clock, and the session storm drove the process into the container memory
+# limit; with the filter removed, zero failures over the same observation
+# window. The per-sample AGC has no lookahead, so it cannot starve the mux.
+# Its parameters carry over what dynaudnorm was chosen for:
+#   AUDIO_NORMALIZE_TARGET (0..1): per-sample magnitude the gain steers toward.
+#     0 disables shaping entirely. 0.9 keeps peaks below full scale, which is
+#     what attenuates a near-clipping source.
+#   AUDIO_NORMALIZE_MAX_GAIN: the cap (~21.6 dB at 12) that stops a silent
+#     porch's noise floor being amplified into hiss. A first calibration, not
+#     measured truth; E98 tracks the live verification.
+#   AUDIO_NORMALIZE_ATTACK_MS / AUDIO_NORMALIZE_RELEASE_MS: fast attack limits
+#     a door slam without clipping; a multi-second release rides gain up slowly
+#     so speech does not pump -- the role dynaudnorm's gaussian window played.
+# Shaping applies only to decoded s16 MONO frames (what these cameras produce);
+# any other shape passes through unshaped rather than being corrupted blind.
+# The silence the bridge itself writes (rotation fill, sparse-audio top-up)
+# bypasses the shaper and stays digital zero, so normalization cannot turn the
 # E97 cutouts into noise.
-AUDIO_NORMALIZE_FILTER = "dynaudnorm=f=500:g=15:p=0.9:m=12"
+AUDIO_NORMALIZE_TARGET = float(os.environ.get("AUDIO_NORMALIZE_TARGET", "0.9"))
+AUDIO_NORMALIZE_MAX_GAIN = float(os.environ.get("AUDIO_NORMALIZE_MAX_GAIN", "12"))
+AUDIO_NORMALIZE_ATTACK_MS = float(os.environ.get("AUDIO_NORMALIZE_ATTACK_MS", "5"))
+AUDIO_NORMALIZE_RELEASE_MS = float(
+    os.environ.get("AUDIO_NORMALIZE_RELEASE_MS", "4000"))
+# An EXTRA ffmpeg audio filter appended after the aresample fill-and-trim, for
+# a deployment that wants one. Default anull (identity). NEVER put a filter
+# with lookahead here (dynaudnorm, loudnorm, anything that buffers a window):
+# the mux stall described above is exactly what it does. An empty value
+# resolves to anull, never to a malformed trailing comma in the -af chain.
+AUDIO_NORMALIZE_FILTER = (os.environ.get(
+    "AUDIO_NORMALIZE_FILTER", "anull").strip() or "anull")
 # Bound on the per-session decoded-audio queue in janus_client. Audio arrives in
 # 20 ms frames, so this is ~1s of buffer: enough to ride out an encode hiccup,
 # short enough that a stalled consumer drops audio (and says so) instead of
