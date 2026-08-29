@@ -56,15 +56,28 @@ async def test_live_source_fills_silence_and_ends_on_close():
     print("  ok  live source pads silence, drains residue, then EOFs")
 
 
-async def test_live_source_absorbs_a_slow_ack_stretch_without_dropping():
+async def test_live_source_cap_is_a_conversational_latency_ceiling():
+    """The downlink buffer's fill and drain BOTH run at real time, so any
+    backlog persists for the rest of the call as mouth-to-ear delay -- the cap
+    is the only bound on it. Measured live (2026-08-29): a 4 s cap pinned a
+    whole call at ~5 s of one-way delay. So the cap must stay conversational,
+    and past it the OLDEST audio is shed: stale speech is dropped, fresh
+    speech plays now."""
     SR = 8000
     src = LiveMulawSource()
-    two_seconds = SR * 2
-    assert two_seconds > SR * 400 // 1000, "must feed past the retired 400ms cap"
-    assert two_seconds <= src._max, "elastic cap must hold 2s"
-    src.feed(b"\x07" * two_seconds)
-    assert src.dropped_bytes == 0, f"absorbing a 2s stall dropped {src.dropped_bytes}"
-    print(f"  ok  absorbed 2s backlog with no drop (cap {src._max // SR}s)")
+    assert src._max <= SR, (
+        f"downlink cap is {src._max / SR:.1f}s of audio -- every ms of it is "
+        f"steady-state delay the caller hears; keep it under 1 s")
+    # A backlog beyond the cap sheds the OLDEST bytes and keeps the freshest.
+    src.feed(b"\x07" * SR)          # 1 s of stale speech
+    src.feed(b"\x08" * SR)          # 1 s of fresh speech
+    assert src.dropped_bytes == 2 * SR - src._max, (
+        f"expected the backlog beyond the cap to shed, dropped "
+        f"{src.dropped_bytes} of {2 * SR - src._max}")
+    held = bytes(src._buf)
+    assert len(held) == src._max and held == b"\x08" * src._max, (
+        "the shed was not oldest-first: stale audio would replay as delay")
+    print(f"  ok  cap {src._max * 1000 // SR}ms bounds delay; overflow sheds oldest")
 
 
 # --------------------------------------------------------------------------
@@ -265,7 +278,7 @@ def test_apply_settings_is_partial_and_clearing_and_never_leaks():
 TESTS = (
     test_the_lin2ulaw_table_agrees_with_the_reference_encoder,
     test_live_source_fills_silence_and_ends_on_close,
-    test_live_source_absorbs_a_slow_ack_stretch_without_dropping,
+    test_live_source_cap_is_a_conversational_latency_ceiling,
     test_select_listen_url_prefers_direct_lan,
     test_capability_gate_degrades_for_partial_or_absent_audio,
     test_a_bridged_call_wires_both_directions_and_tears_down,

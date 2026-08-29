@@ -655,21 +655,27 @@ CALL_MAX_S = float(os.environ.get("CALL_MAX_S", "600"))
 # variance does not gap the audio. The clip lead (TALK_PREBUFFER_MS) and its
 # adaptive growth stay off for live (they are latency the caller hears).
 CALL_LIVE_PREBUFFER_MS = float(os.environ.get("CALL_LIVE_PREBUFFER_MS", "300"))
-# Elastic depth of the live DOWNLINK buffer (talk_fullduplex.LiveMulawSource),
-# the caller's voice waiting to be PUT to the doorbell speaker.
+# Cap on the live DOWNLINK buffer (talk_fullduplex.LiveMulawSource), the
+# caller's voice waiting to be PUT to the doorbell speaker -- and therefore THE
+# MOUTH-TO-EAR LATENCY CEILING of a call's downlink. The buffer sits between
+# the phone feed and the PUT drain, and BOTH run at real time, so a backlog
+# formed during a slow-ack stretch never drains on its own: equal fill and
+# drain rates preserve whatever depth exists, and the caller then hears that
+# depth as delay for the REST OF THE CALL. The cap is the only bound on that
+# steady state, so it must be conversational. 600 ms: enough to ride the
+# doorbell's ordinary per-chunk ack jitter (the 300 ms lead above plus slack),
+# small enough that speech stays interactive. Past it the OLDEST audio is
+# shed -- in a live conversation, speech that is already >0.6 s stale is better
+# dropped than replayed late.
 #
-# THIS COSTS NO LATENCY WHEN THE DOORBELL IS HEALTHY, and that is the whole
-# point. The buffer sits between the phone feed (real-time) and the PUT drain;
-# when the doorbell acks chunks quickly the drain keeps pace, the buffer stays
-# near empty, and latency is just the lead above. The cap only bites during a
-# SLOW-ACK STRETCH (the doorbell in an E96-unhealthy period): a deeper cap
-# absorbs that stretch instead of dropping the oldest audio, at the cost of
-# latency only for the stretch's duration and only then. The old 400 ms cap
-# turned a ~1.5 s ack stall into ~1 s of dropped voice (measured: a 42% loss on
-# an unhealthy-doorbell call, versus 3% when healthy); 4 s absorbs the stalls
-# actually observed. Past the cap it still drops OLDEST, keeping the audio
-# current rather than replaying stale speech.
-CALL_DOWNLINK_BUFFER_MS = int(os.environ.get("CALL_DOWNLINK_BUFFER_MS", "4000"))
+# History: this was 4000, justified by a 42%-loss measurement on an
+# "unhealthy-doorbell" call -- taken during the session-storm period the
+# dynaudnorm fix removed (see AUDIO_NORMALIZE_TARGET). On the fixed bridge the
+# deep cap did exactly what the arithmetic above predicts: a slow first stretch
+# built ~5 s of backlog, the cap pinned it, and the whole call ran with ~5 s of
+# one-way delay (measured live 2026-08-29). Do not deepen this to absorb
+# stalls; fix the stall.
+CALL_DOWNLINK_BUFFER_MS = int(os.environ.get("CALL_DOWNLINK_BUFFER_MS", "600"))
 # Decoded-audio tap depth for the call uplink, in 20 ms frames (~300 ms). The
 # doorbell mic arrives cloud-relayed (the same path the video takes) and can
 # jitter; too shallow a tap sheds frames and the caller hears the mic cut out.

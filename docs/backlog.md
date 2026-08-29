@@ -312,8 +312,23 @@ and evidence. Grouped by whether anything can actually be done about them.
   directions clear, shaping tuned by ear) -- the standing rule forbids placing a
   live call without them.
 
-  STILL OPEN from this rebuild: (a) a full bridged CALL validated live with the
-  operator present (uplink RTP is proven; end-to-end call is not yet).
+  LIVE-VALIDATED 2026-08-29 with the operator: a full bridged call completed
+  cleanly on the direct-LAN path -- SIP leg gap-free both directions (1753
+  sent / 1750 received over 35 s), uplink continuous for the whole call (626
+  RTSP frames ~= the full window), downlink PUT with zero stalls and zero
+  renegotiations, always-on video streaming throughout, clean remote-BYE
+  teardown. Operator verdict: much better, understandable both ways; audio
+  fidelity is bounded by the path itself (G.711 mu-law at 8 kHz into a small
+  doorbell speaker). The one defect found: ~5 s of one-way downlink delay,
+  root-caused to the 4 s elastic buffer cap -- fill and drain both run at real
+  time, so backlog from the call's slow first stretch persisted, pinned at the
+  cap, for the whole call (the 38 kB of dropped downlink bytes were the same
+  event: overflow shed at the cap). Fixed by making the cap the conversational
+  latency ceiling it really is (CALL_DOWNLINK_BUFFER_MS 4000 -> 600; the 4 s
+  evidence dated from the since-fixed session-storm period). Awaiting a
+  confirming call.
+
+  STILL OPEN from this rebuild:
   (b) the downlink PUT still shares the main event loop, so heavy Janus video
   churn can still slow it; the fix is a dedicated thread for the call, deferred
   because it needs a talk.py cross-thread refactor and live validation.
