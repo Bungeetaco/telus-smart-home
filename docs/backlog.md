@@ -269,8 +269,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   caught the tone frequency: 440 Hz is 8.8 cycles per 20 ms frame, so the
   repeated frame clicked 50 times a second; 450 Hz is exactly 9.
 
-  **Milestone 2 REBUILT on the direct-LAN path (2026-08-29), not yet
-  live-validated.** The first M2 spliced the call's uplink from the cloud-Janus
+  **Milestone 2 REBUILT on the direct-LAN path (2026-08-29); uplink proven
+  live (PLAY+RTP), full call not yet operator-validated.** The first M2 spliced the call's uplink from the cloud-Janus
   tap and the downlink through the talkdown PUT on the main event loop. Live it
   was laggy and dropped: the uplink gapped when the Janus video session churned
   (E96) and the downlink fragmented when that churn starved the PUT loop on the
@@ -288,19 +288,23 @@ and evidence. Grouped by whether anything can actually be done about them.
   with the operator present to confirm both directions are clear.
 
   LISTEN CLIENT STATUS (2026-08-29 passive live validation): the direct-LAN
-  tunnel is proven THROUGH SETUP against the real device -- GET/POST tunnel
+  tunnel is proven END TO END against the real device -- GET/POST tunnel
   channels, HTTP Digest (with qop echoed) AND RTSP Digest, OPTIONS, DESCRIBE
-  (SDP parsed), SETUP (200 + Session). PLAY then returns `454 Session Not
-  Found`, so no RTP flows yet. Suspects, in order: the base64 framing of
-  successive RTSP requests down the POST channel (per-request padding can
-  desync a server that decodes the body as one continuous base64 stream), and
-  the SETUP->PLAY session/track-control handling. THE CALL IS THEREFORE NOT
-  FUNCTIONAL on this build until PLAY is resolved -- it fails at listen start
-  and the call ends cleanly (always-on video + clip talkdown are unaffected).
-  Finish this with the operator present (a real call validates it), then the
-  direct-LAN call is complete.
+  (SDP parsed), SETUP (200 + Session), PLAY (200), and live RTP: 65 frames /
+  ~4 s of gap-free PCMU decoded to PCM in a passive probe. The earlier PLAY
+  `454 Session Not Found` was NOT the base64 framing; it was the aggregate URL.
+  This device answers DESCRIBE on `.../api/GetStream?streamID=0` but its media
+  live under the server's Content-Base `.../api/GetStream/` (audio track control
+  `stream=1`); SETUP and PLAY on the request URL 404/454, on the Content-Base
+  they play. rtsp_listen now reads the Content-Base from DESCRIBE and resolves
+  SETUP/PLAY against it (pure helpers `content_base_uri`/`track_uri`, unit-tested
+  fail-first). The uplink path is therefore functional and cloud-independent.
+  What remains is a full bridged CALL validated with the operator present (both
+  directions clear, shaping tuned by ear) -- the standing rule forbids placing a
+  live call without them.
 
-  STILL OPEN from this rebuild: (a) PLAY 454 above -- the immediate blocker.
+  STILL OPEN from this rebuild: (a) a full bridged CALL validated live with the
+  operator present (uplink RTP is proven; end-to-end call is not yet).
   (b) the downlink PUT still shares the main event loop, so heavy Janus video
   churn can still slow it; the fix is a dedicated thread for the call, deferred
   because it needs a talk.py cross-thread refactor and live validation.

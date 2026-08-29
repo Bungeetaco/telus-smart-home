@@ -25,7 +25,7 @@ os.environ.setdefault("TELUS_PASSWORD", "unused")
 from bridge import rtsp_listen  # noqa: E402
 from bridge.rtsp_listen import (  # noqa: E402
     parse_sdp_audio, iter_interleaved, rtp_payload, RtspListenError,
-    _ULAW_DECODE,
+    content_base_uri, track_uri, _ULAW_DECODE,
 )
 from bridge.call_shape import Shaper  # noqa: E402
 
@@ -115,6 +115,41 @@ def test_rtp_payload_strips_header_and_csrc_and_extension():
 
 
 # --------------------------------------------------------------------------
+# Aggregate control URL -- SETUP and PLAY go to the Content-Base, not the
+# DESCRIBE request URL (the 454/404 that made the live call carry no audio)
+# --------------------------------------------------------------------------
+
+def test_play_targets_content_base_not_the_request_url():
+    # The real VDB750 shape: DESCRIBE is answered on a "?query" URL, but the
+    # media live under a "/path/" Content-Base. PLAY/SETUP on the request URL
+    # 404s the media the server just described; only the base plays.
+    describe = ("RTSP/1.0 200 OK\r\nCSeq: 2\r\n"
+                "Content-Base: rtsp://h:41925/api/GetStream/\r\n"
+                "Content-Type: application/sdp\r\n\r\nv=0\r\n")
+    req = "rtsp://h:41925/api/GetStream?streamID=0"
+    assert content_base_uri(req, describe) == "rtsp://h:41925/api/GetStream/", (
+        "Content-Base was not preferred over the request URL -- PLAY would 404")
+    # Header match is case-insensitive and anchored to a header line.
+    assert content_base_uri(req, "rtsp/1.0 200\r\ncontent-base: rtsp://h/b/\r\n\r\n") \
+        == "rtsp://h/b/"
+    # No Content-Base -> fall back to the request URL (a compliant server).
+    assert content_base_uri(req, "RTSP/1.0 200 OK\r\n\r\nv=0\r\n") == req
+    print("  ok  PLAY/SETUP target the Content-Base, not the DESCRIBE request URL")
+
+
+def test_track_uri_resolves_relative_and_absolute_control():
+    base = "rtsp://h:41925/api/GetStream/"
+    assert track_uri(base, "stream=1") == "rtsp://h:41925/api/GetStream/stream=1"
+    # a base without a trailing slash still joins with exactly one
+    assert track_uri("rtsp://h/api/GetStream", "stream=1") \
+        == "rtsp://h/api/GetStream/stream=1"
+    # an absolute control URL wins outright
+    assert track_uri(base, "rtsp://h/api/GetStream/stream=1") \
+        == "rtsp://h/api/GetStream/stream=1"
+    print("  ok  track control resolves against the base (relative and absolute)")
+
+
+# --------------------------------------------------------------------------
 # The shaper -- clarity without latency or distortion
 # --------------------------------------------------------------------------
 
@@ -197,6 +232,8 @@ TESTS = (
     test_interleaved_demux_splits_rtp_and_rtsp,
     test_interleaved_demux_holds_partial_frames,
     test_rtp_payload_strips_header_and_csrc_and_extension,
+    test_play_targets_content_base_not_the_request_url,
+    test_track_uri_resolves_relative_and_absolute_control,
     test_shaper_unit_gain_no_highpass_is_exact_passthrough,
     test_shaper_agc_lifts_quiet_speech_toward_target,
     test_shaper_never_clips_a_loud_signal,

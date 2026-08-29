@@ -222,6 +222,25 @@ def rtp_payload(packet: bytes) -> bytes | None:
 # The tunnel client.
 # ---------------------------------------------------------------------------
 
+def content_base_uri(request_uri: str, describe_reply: str) -> str:
+    """The aggregate/control URL for SETUP and PLAY: the server's Content-Base
+    header when present, else the DESCRIBE request URL. A device may answer
+    DESCRIBE on one URL but host its media under a different base -- the VDB750
+    describes ".../api/GetStream?streamID=0" yet its media live under Content-Base
+    ".../api/GetStream/" (track control "stream=1"). PLAY/SETUP on the request URL
+    404s the very media just described; they must target the base."""
+    m = re.search(r"(?im)^Content-Base:\s*(\S+)", describe_reply)
+    return m.group(1).strip() if m else request_uri
+
+
+def track_uri(control_uri: str, track_control: str) -> str:
+    """A media track's control URL resolved against the aggregate control URL.
+    An absolute "rtsp://" control wins; a relative one is joined to the base."""
+    if track_control.startswith("rtsp://"):
+        return track_control
+    return control_uri.rstrip("/") + "/" + track_control.lstrip("/")
+
+
 class RtspTunnelListen:
     """Pulls one device's audio over the RTSP-in-HTTPS tunnel and hands each
     decoded PCM frame to `on_audio(pcm_s16le, sample_rate)`. See module docstring.
@@ -249,6 +268,7 @@ class RtspTunnelListen:
         self._rtsp_nonce = None
         self._rtsp_realm = "Alarm.com"
         self._rtsp_qop = None
+        self._control_uri = None  # aggregate URL (Content-Base) for SETUP/PLAY
         self._audio = None          # parsed SDP audio dict
         self._audio_channel = 0     # interleaved channel the audio SETUP got
         self._task = None
@@ -285,10 +305,10 @@ class RtspTunnelListen:
             return ""
         return self._digest_header(method, self.path, parse_digest_challenge(chal))
 
-    def _rtsp_auth(self, method: str) -> str:
+    def _rtsp_auth(self, method: str, uri: str | None = None) -> str:
         if not self._rtsp_nonce:
             return ""
-        return self._digest_header(method, self.rtsp_uri,
+        return self._digest_header(method, uri or self.rtsp_uri,
                                    {"realm": self._rtsp_realm, "nonce": self._rtsp_nonce,
                                     "qop": self._rtsp_qop})
 
@@ -329,10 +349,12 @@ class RtspTunnelListen:
         await pw.drain()
         self._post = (pr, pw)
 
-    async def _send_rtsp(self, method: str, extra: str = "") -> None:
+    async def _send_rtsp(self, method: str, extra: str = "",
+                         uri: str | None = None) -> None:
+        uri = uri or self.rtsp_uri
         self._cseq += 1
-        req = (f"{method} {self.rtsp_uri} RTSP/1.0\r\nCSeq: {self._cseq}\r\n"
-               f"{self._rtsp_auth(method)}{extra}\r\n")
+        req = (f"{method} {uri} RTSP/1.0\r\nCSeq: {self._cseq}\r\n"
+               f"{self._rtsp_auth(method, uri)}{extra}\r\n")
         _, pw = self._post
         pw.write(base64.b64encode(req.encode())); await pw.drain()
 
@@ -349,10 +371,11 @@ class RtspTunnelListen:
                 return None
             self._buf.extend(chunk)
 
-    async def _rtsp_exchange(self, method: str, extra: str = "") -> str:
+    async def _rtsp_exchange(self, method: str, extra: str = "",
+                             uri: str | None = None) -> str:
         """Send an RTSP request, return its reply text, transparently answering
         one 401 with the fresh nonce (the GStreamer server's stale-nonce flow)."""
-        await self._send_rtsp(method, extra)
+        await self._send_rtsp(method, extra, uri)
         while True:
             msg = await self._read_message(10)
             if msg is None:
@@ -368,7 +391,7 @@ class RtspTunnelListen:
                 self._rtsp_nonce = p.get("nonce")
                 self._rtsp_realm = p.get("realm", self._rtsp_realm)
                 self._rtsp_qop = p.get("qop")
-                await self._send_rtsp(method, extra)
+                await self._send_rtsp(method, extra, uri)
                 continue
             if not re.match(r"RTSP/1\.0 200", text):
                 raise RtspListenError(f"{method} failed: {text.splitlines()[0]}")
@@ -378,16 +401,20 @@ class RtspTunnelListen:
         await self._open_channels()
         await self._rtsp_exchange("OPTIONS")
         describe = await self._rtsp_exchange("DESCRIBE", "Accept: application/sdp\r\n")
+        # SETUP and PLAY target the server's Content-Base, not the DESCRIBE
+        # request URL (see content_base_uri): this device describes a "?query"
+        # URL but plays only under its "/path/" base.
+        self._control_uri = content_base_uri(self.rtsp_uri, describe)
         sdp = describe.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in describe else ""
         self._audio = parse_sdp_audio(sdp)
-        log.info("rtsp listen: SDP audio=%s", self._audio)
+        log.info("rtsp listen: SDP audio=%s control=%s", self._audio, self._control_uri)
         # SETUP the audio track over interleaved TCP (channels 0-1) -- there is
-        # no UDP through the tunnel.
+        # no UDP through the tunnel. Track control resolves against the base.
         track = self._audio["control"]
-        setup_uri = track if track.startswith("rtsp://") else f"{self.rtsp_uri}/{track.lstrip('/')}"
+        setup_uri = track_uri(self._control_uri, track)
         self._cseq += 1
         setup = (f"SETUP {setup_uri} RTSP/1.0\r\nCSeq: {self._cseq}\r\n"
-                 f"{self._rtsp_auth('SETUP')}"
+                 f"{self._rtsp_auth('SETUP', setup_uri)}"
                  f"Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n")
         _, pw = self._post
         pw.write(base64.b64encode(setup.encode())); await pw.drain()
@@ -410,7 +437,8 @@ class RtspTunnelListen:
                 f"SETUP did not create a session: {status_line!r} "
                 f"(track control={track!r})")
         await self._rtsp_exchange(
-            "PLAY", (f"Session: {self._session}\r\n" if self._session else ""))
+            "PLAY", (f"Session: {self._session}\r\n" if self._session else ""),
+            uri=self._control_uri)
         self.started = True
         self._task = asyncio.ensure_future(self._read_loop())
         log.info("rtsp listen: playing %s audio from %s (interleaved ch %d)",
@@ -456,8 +484,10 @@ class RtspTunnelListen:
                 pass
         try:
             if self._post and self.started:
-                await self._send_rtsp("TEARDOWN",
-                                      f"Session: {getattr(self, '_session', '') or ''}\r\n")
+                await self._send_rtsp(
+                    "TEARDOWN",
+                    f"Session: {getattr(self, '_session', '') or ''}\r\n",
+                    uri=self._control_uri or self.rtsp_uri)
         except Exception:
             pass
         for pair in (self._get, self._post):
