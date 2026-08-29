@@ -1253,7 +1253,8 @@ how it went: `result`/`reason`/`seconds` and the SIP leg's `frames_sent` /
 received from the doorbell mic across the call window);
 `uplink_dropped_bytes` and `downlink_dropped_bytes` (mu-law shed at each
 direction's latency cap — see `CALL_UPLINK_BUFFER_MS` /
-`CALL_DOWNLINK_BUFFER_MS`); and `talk`, the talkdown leg's own stats
+`CALL_DOWNLINK_BUFFER_MS`); `uplink_ducked_ms` (how long the echo ducker
+held the uplink down while the caller spoke); and `talk`, the talkdown leg's own stats
 (`chunks`, `seconds`, `played_seconds`, `renegotiations`, `reconnects`,
 `put_rtt_p50_ms`, `put_rtt_p95_ms`, `put_rtt_max_ms`, `late_chunks`). A
 healthy call shows dropped bytes near zero in both directions and

@@ -28,7 +28,7 @@ os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
 os.environ.setdefault("TELUS_PASSWORD", "unused")
 
 from bridge import call_bridge, config as c, rtsp_listen, sip_call  # noqa: E402
-from bridge.call_bridge import UplinkMulawBuffer, select_listen_url  # noqa: E402
+from bridge.call_bridge import EchoDucker, UplinkMulawBuffer, select_listen_url  # noqa: E402
 from bridge.sip_call import _mulaw_encode, pcm_s16le_to_mulaw  # noqa: E402
 from bridge.talk_fullduplex import LiveMulawSource  # noqa: E402
 
@@ -302,11 +302,44 @@ async def test_uplink_buffer_cap_is_a_latency_ceiling():
     print(f"  ok  uplink cap {buf._max * 1000 // SR}ms bounds delay; sheds oldest")
 
 
+async def test_echo_ducker_suppresses_uplink_while_caller_speaks():
+    """No AEC exists in this path; once the uplink latency cap removed the
+    4-5 s delay that masked it, the caller's voice came speaker -> mic ->
+    phone as a hard ~0.6 s echo (heard on live call round 3). The ducker is
+    the echo control: while the downlink carries active speech the uplink is
+    attenuated, and it recovers after the hangover so the visitor is heard
+    the moment the caller stops."""
+    d = EchoDucker(atten=0.05, hangover_ms=300, activity=0.02)
+    loud = (16000).to_bytes(2, "little", signed=True) * 80
+    quiet = (100).to_bytes(2, "little", signed=True) * 80
+    # Caller speaking -> uplink ducked, through the hangover, then recovery.
+    d.note_downlink(loud, now=10.0)
+    assert d.factor(10.1) == 0.05, "uplink not ducked while the caller speaks"
+    assert d.factor(10.29) == 0.05, "hangover did not hold through a word gap"
+    assert d.factor(10.35) == 1.0, "duck did not release after the hangover"
+    # Sub-activity downlink (line noise, comfort noise) must NOT duck.
+    d2 = EchoDucker(atten=0.05, hangover_ms=300, activity=0.02)
+    d2.note_downlink(quiet, now=10.0)
+    assert d2.factor(10.1) == 1.0, "quiet downlink ducked the visitor"
+    # apply() scales the samples, and atten=1.0 disables everything.
+    mic = (10000).to_bytes(2, "little", signed=True) * 80
+    d.note_downlink(loud, now=20.0)
+    out = d.apply(mic, now=20.1)
+    peak = max(abs(int.from_bytes(out[i:i + 2], "little", signed=True))
+               for i in range(0, len(out), 2))
+    assert peak == 500, f"duck factor not applied to the PCM (peak {peak})"
+    off = EchoDucker(atten=1.0, hangover_ms=300, activity=0.02)
+    off.note_downlink(loud, now=30.0)
+    assert off.apply(mic, now=30.1) == mic, "atten=1.0 must disable ducking"
+    print("  ok  ducker: caller speech ducks the uplink, releases, 1.0 disables")
+
+
 TESTS = (
     test_the_lin2ulaw_table_agrees_with_the_reference_encoder,
     test_live_source_fills_silence_and_ends_on_close,
     test_live_source_cap_is_a_conversational_latency_ceiling,
     test_uplink_buffer_cap_is_a_latency_ceiling,
+    test_echo_ducker_suppresses_uplink_while_caller_speaks,
     test_select_listen_url_prefers_direct_lan,
     test_capability_gate_degrades_for_partial_or_absent_audio,
     test_a_bridged_call_wires_both_directions_and_tears_down,

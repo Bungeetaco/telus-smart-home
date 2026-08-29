@@ -722,8 +722,27 @@ CALL_DOWNLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_DOWNLINK_AGC_MAX_GAIN", 
 CALL_UPLINK_HIGHPASS_HZ = float(os.environ.get("CALL_UPLINK_HIGHPASS_HZ", "250"))
 CALL_UPLINK_AGC_TARGET = float(os.environ.get("CALL_UPLINK_AGC_TARGET", "0.7"))
 CALL_UPLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MAX_GAIN", "16"))
-CALL_UPLINK_GATE_THRESHOLD = float(os.environ.get("CALL_UPLINK_GATE_THRESHOLD", "0.015"))
-CALL_UPLINK_GATE_ATTEN = float(os.environ.get("CALL_UPLINK_GATE_ATTEN", "0.15"))
+# Gate threshold CALIBRATED TO THE MEASURED MIC, not to a nominal level: this
+# doorbell's mic is very quiet (ambient floor measured live 2026-08-29 over
+# 15 s: frame-peak p50 0.0012, p95 0.0027, p99 0.0055, max 0.0089 normalized).
+# The first guess of 0.015 sat ABOVE this mic's conversational speech and
+# gated the visitor out entirely -- only a direct tap on the mic crossed it.
+# 0.006 is ~2x the p95 ambient peak: closed on the floor, open for speech.
+CALL_UPLINK_GATE_THRESHOLD = float(os.environ.get("CALL_UPLINK_GATE_THRESHOLD", "0.006"))
+CALL_UPLINK_GATE_ATTEN = float(os.environ.get("CALL_UPLINK_GATE_ATTEN", "0.25"))
+# Downlink-priority echo ducking. There is no acoustic echo canceller anywhere
+# in this path (the official app does AEC phone-side), and once the uplink
+# latency cap removed the 4-5 s delay that had been masking it, the caller's
+# voice went speaker -> mic -> straight back to their phone as a ~0.6 s echo
+# loud enough to cross the gate. The standard intercom fix: while downlink
+# audio is ACTIVE (decoded peak above CALL_ECHO_DUCK_ACTIVITY, with a hangover
+# so word gaps do not flutter), the uplink is attenuated to
+# CALL_ECHO_DUCK_ATTEN. The conversation becomes politely half-duplex -- the
+# caller talks over the visitor, not with them -- which is how every doorbell
+# intercom behaves. 1.0 disables ducking.
+CALL_ECHO_DUCK_ATTEN = float(os.environ.get("CALL_ECHO_DUCK_ATTEN", "0.05"))
+CALL_ECHO_DUCK_HANGOVER_MS = float(os.environ.get("CALL_ECHO_DUCK_HANGOVER_MS", "350"))
+CALL_ECHO_DUCK_ACTIVITY = float(os.environ.get("CALL_ECHO_DUCK_ACTIVITY", "0.02"))
 # Cap on the uplink mu-law buffer between the RTSP listen and the SIP leg --
 # the uplink's mouth-to-ear latency ceiling, the exact mirror of
 # CALL_DOWNLINK_BUFFER_MS below. The listen starts several seconds before the

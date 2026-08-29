@@ -344,7 +344,18 @@ and evidence. Grouped by whether anything can actually be done about them.
   ungated AGC rides gain up during speech pauses until noise hits the target.
   The uplink shaper gained a noise gate (downward expander:
   CALL_UPLINK_GATE_THRESHOLD/ATTEN) and a hotter profile (highpass 250 Hz,
-  target 0.7, max gain 16). Awaiting a confirming call on all three.
+  target 0.7, max gain 16). The round-3 call then went badly in two NEW ways, both from
+  the round-2 tuning itself: the gate threshold (0.015) had been guessed above
+  this very quiet mic's conversational speech -- ambient floor measured live at
+  frame-peak p50 0.0012 / p95 0.0027 / p99 0.0055 -- so the visitor was gated
+  out entirely (only a direct tap on the mic crossed it); and fixing the
+  uplink latency unmasked acoustic ECHO (speaker -> mic -> phone at ~0.6 s,
+  loud enough to cross the gate) because no AEC exists anywhere in this path
+  (the official app cancels phone-side). Fixes: gate recalibrated from the
+  measured floor (0.006, atten 0.25) and downlink-priority echo ducking added
+  (CALL_ECHO_DUCK_*): while the caller speaks, the uplink is attenuated hard
+  with a hangover -- the intercom-standard half-duplex bias. uplink_ducked_ms
+  surfaces in the call result. Awaiting the round-4 call.
 
   STILL OPEN from this rebuild:
   (b) the downlink PUT still shares the main event loop, so heavy Janus video

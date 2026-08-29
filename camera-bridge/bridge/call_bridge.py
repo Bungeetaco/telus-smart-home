@@ -74,6 +74,53 @@ def apply_settings(data: dict) -> list:
     return applied
 
 
+class EchoDucker:
+    """Downlink-priority ducking (half-duplex bias) -- the echo control.
+
+    No AEC exists in this path, and with the uplink latency cap in place the
+    caller's voice returns speaker -> mic -> phone as a ~0.6 s echo. So while
+    the downlink carries active speech, the uplink is attenuated hard: the
+    caller never hears the room they are talking into. note_downlink() is fed
+    every decoded downlink frame; factor() is applied to the uplink PCM.
+    Pure and clock-injected for testing; atten 1.0 disables."""
+
+    def __init__(self, *, atten: float | None = None,
+                 hangover_ms: float | None = None,
+                 activity: float | None = None):
+        self.atten = c.CALL_ECHO_DUCK_ATTEN if atten is None else atten
+        self.hangover_s = (c.CALL_ECHO_DUCK_HANGOVER_MS if hangover_ms is None
+                           else hangover_ms) / 1000.0
+        self.activity = int(32768 * (c.CALL_ECHO_DUCK_ACTIVITY if activity is None
+                                     else activity))
+        self._active_until = 0.0
+        self.ducked_ms = 0.0
+
+    def note_downlink(self, pcm: bytes, now: float) -> None:
+        if self.atten >= 1.0:
+            return
+        for i in range(0, len(pcm) - 1, 2):
+            v = int.from_bytes(pcm[i:i + 2], "little", signed=True)
+            if v >= self.activity or -v >= self.activity:
+                self._active_until = now + self.hangover_s
+                return
+
+    def factor(self, now: float) -> float:
+        return self.atten if (self.atten < 1.0
+                              and now < self._active_until) else 1.0
+
+    def apply(self, pcm: bytes, now: float) -> bytes:
+        f = self.factor(now)
+        if f >= 1.0:
+            return pcm
+        self.ducked_ms += len(pcm) / 2 / 8.0
+        out = bytearray(len(pcm))
+        for i in range(0, len(pcm) - 1, 2):
+            v = int(int.from_bytes(pcm[i:i + 2], "little", signed=True) * f)
+            out[i] = v & 0xFF
+            out[i + 1] = (v >> 8) & 0xFF
+        return bytes(out)
+
+
 class UplinkMulawBuffer:
     """Mu-law between the RTSP listen and the SIP leg -- capped, shed-oldest.
 
@@ -184,10 +231,11 @@ class CallBridge:
         down_shaper = downlink_shaper(c)
         live_source = talk_fullduplex.LiveMulawSource()
         uplink_buf = UplinkMulawBuffer()
+        ducker = EchoDucker()
 
-        # --- uplink: direct-LAN RTSP mic -> shape -> mu-law -> SIP ------------
+        # --- uplink: direct-LAN RTSP mic -> shape -> duck -> mu-law -> SIP ----
         def on_mic_audio(pcm: bytes, rate: int) -> None:
-            shaped = up_shaper.process(pcm)
+            shaped = ducker.apply(up_shaper.process(pcm), time.monotonic())
             uplink_buf.feed(sip_call.pcm_s16le_to_mulaw(shaped))
 
         listen = rtsp_listen.RtspTunnelListen(
@@ -201,10 +249,11 @@ class CallBridge:
 
         # --- downlink: SIP mu-law -> shape for the speaker -> talkdown PUT -----
         def on_caller_audio(mulaw: bytes) -> None:
+            pcm = sip_call.mulaw_to_pcm_s16le(mulaw)
+            ducker.note_downlink(pcm, time.monotonic())
             if down_shaper.passthrough:
                 live_source.feed(mulaw)
             else:
-                pcm = sip_call.mulaw_to_pcm_s16le(mulaw)
                 live_source.feed(sip_call.pcm_s16le_to_mulaw(down_shaper.process(pcm)))
 
         call = sip_call.SipCall(
@@ -252,6 +301,7 @@ class CallBridge:
                           if isinstance(talk, dict) and k in talk}
         result["uplink_frames"] = listen.frames
         result["uplink_dropped_bytes"] = uplink_buf.dropped_bytes
+        result["uplink_ducked_ms"] = round(ducker.ducked_ms)
         result["downlink_dropped_bytes"] = live_source.dropped_bytes
         self.last_result = result
         log.info("call bridge: call ended: %s",
