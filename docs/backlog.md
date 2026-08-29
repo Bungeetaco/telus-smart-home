@@ -328,8 +328,14 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 **Blocked on hardware or a device this account does not have**
 
-- **E13**: validate the webrtc/srtp fallback path; needs an ADC camera that
-  offers those endpoints.
+- **E13** (settled by capability query, not deferred): the VDB750 doorbell
+  reports `SupportsWebRTC = false` / `StreamProtocol = 0` (RTSP) in the live MWS
+  camera list (queried 2026-08-29). It is an RTSP+HTTP-PUT device; the Janus
+  WebRTC the bridge consumes is alarm.com's CLOUD transcode of that RTSP,
+  downstream only, not a doorbell WebRTC capability. So there is no webrtc/srtp
+  upstream path on this hardware to validate, and the official app uses the
+  same HTTP PUT talkback for this doorbell. The webrtc/srtp modules remain
+  untestable here for want of a `SupportsWebRTC=true` device.
 - **E20**: the audio-conditioning chain is tuned by ear for the VDB750's
   speaker; only matters once a different speaker exists.
 - **E33** (one point): whether `shouldDisplayBatteryLevel` is reliable; needs a
@@ -663,12 +669,27 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   travels with a renegotiated session in case that lands on a different kind.
 
 ## Fallback path (other ADC cameras)
-- **E13 (BLOCKED -- no hardware) Validate the webrtc/srtp fallback.**
-  `talk_webrtc.py` / `talk_srtp.py` were built on the pre-capture hypothesis and
-  have never run against a real webrtc/srtp-capable ADC camera. **This account has
-  no such device** -- both cameras here use the HTTP-PUT path -- so this cannot be
-  closed at any level of effort until one exists. The modules import cleanly in
-  CI, which is the only assurance available without hardware.
+- **E13 (BLOCKED -- no hardware; the VDB750 is confirmed NOT such a device)**
+  Validate the webrtc/srtp fallback. `talk_webrtc.py` / `talk_srtp.py` were built
+  on the pre-capture hypothesis and have never run against a real
+  webrtc/srtp-capable ADC camera. **This account has no such device.** Confirmed
+  2026-08-29 by querying the live MWS camera list: the VDB750 doorbell reports
+  `SupportsWebRTC=false` and `StreamProtocol=0` (RTSP), with upstream audio only
+  over the HTTP PUT (`susa=true` via `uae/duae/luae/puae`). The Janus WebRTC the
+  bridge consumes for this doorbell is alarm.com's cloud transcode of its RTSP,
+  DOWNSTREAM ONLY -- decompiling the Android app (v5.10.7) confirmed the app's
+  bidirectional-WebRTC audio-track path
+  (`videostreamer/webrtc/.../BasePeerConnectionClientImpl`, a local mic
+  `AudioTrack` gated by `supportsUpstreamAudio`) applies to `SupportsWebRTC=true`
+  cameras, and for the VDB750 the app uses the identical HTTP PUT the bridge does.
+  So no webrtc/srtp UPSTREAM path exists on this doorbell at all; this cannot be
+  closed until a `SupportsWebRTC=true` device exists. The modules import cleanly
+  in CI, the only assurance available without hardware.
+
+  DO NOT re-investigate "a better talkback transport" for the VDB750: the answer
+  is the HTTP PUT, the app agrees, and the device's own capability flags say so.
+  The PUT endpoint's real-time throughput ceiling (E99) is a device limit, not a
+  wiring choice.
 
   Two specific questions to settle when such a device is available:
 
