@@ -41,7 +41,6 @@ Secrets (the stream password) are used for Digest only and never logged.
 
 import asyncio
 import base64
-import fractions
 import logging
 import re
 import ssl
@@ -249,6 +248,7 @@ class RtspTunnelListen:
         self._cseq = 0
         self._rtsp_nonce = None
         self._rtsp_realm = "Alarm.com"
+        self._rtsp_qop = None
         self._audio = None          # parsed SDP audio dict
         self._audio_channel = 0     # interleaved channel the audio SETUP got
         self._task = None
@@ -262,26 +262,35 @@ class RtspTunnelListen:
         ctx.verify_mode = ssl.CERT_NONE  # device cert is self-signed
         return ctx
 
+    def _digest_header(self, method: str, uri: str, chal: dict) -> str:
+        """A complete RFC 2617 Authorization header. When the challenge carries
+        qop, the response is computed WITH nc/cnonce AND the header must echo
+        qop/nc/cnonce -- omitting them (a subtle trap) makes the server recompute
+        without qop and reject with another 401."""
+        realm = chal.get("realm", "")
+        nonce = chal.get("nonce", "")
+        qop = "auth" if "auth" in (chal.get("qop") or "") else None
+        nc = "00000001"
+        cnonce = f"{__import__('random').getrandbits(32):08x}"
+        resp = digest_response(self.username, realm, self._password, method, uri,
+                               nonce, qop=qop, nc=nc, cnonce=cnonce)
+        h = (f'Authorization: Digest username="{self.username}", realm="{realm}", '
+             f'nonce="{nonce}", uri="{uri}", response="{resp}"')
+        if qop:
+            h += f', qop=auth, nc={nc}, cnonce="{cnonce}"'
+        return h + "\r\n"
+
     def _http_auth(self, method: str, chal: str | None) -> str:
         if not chal:
             return ""
-        p = parse_digest_challenge(chal)
-        resp = digest_response(self.username, p.get("realm", ""), self._password,
-                               method, self.path, p.get("nonce", ""),
-                               qop=("auth" if "auth" in (p.get("qop") or "") else None),
-                               cnonce=f"{__import__('random').getrandbits(32):08x}")
-        return (f'Authorization: Digest username="{self.username}", '
-                f'realm="{p.get("realm","")}", nonce="{p.get("nonce","")}", '
-                f'uri="{self.path}", response="{resp}"\r\n')
+        return self._digest_header(method, self.path, parse_digest_challenge(chal))
 
     def _rtsp_auth(self, method: str) -> str:
         if not self._rtsp_nonce:
             return ""
-        resp = digest_response(self.username, self._rtsp_realm, self._password,
-                               method, self.rtsp_uri, self._rtsp_nonce)
-        return (f'Authorization: Digest username="{self.username}", '
-                f'realm="{self._rtsp_realm}", nonce="{self._rtsp_nonce}", '
-                f'uri="{self.rtsp_uri}", response="{resp}"\r\n')
+        return self._digest_header(method, self.rtsp_uri,
+                                   {"realm": self._rtsp_realm, "nonce": self._rtsp_nonce,
+                                    "qop": self._rtsp_qop})
 
     async def _open_channels(self):
         # GET data channel, with an HTTP-Digest retry.
@@ -292,25 +301,30 @@ class RtspTunnelListen:
                f"Cache-Control: no-cache\r\n")
         w.write((req + "\r\n").encode()); await w.drain()
         head = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), 8)
+        # The HTTP-Digest challenge from the 401 is kept: it authenticates the
+        # GET retry AND the POST command channel (the 200 that follows the retry
+        # carries no challenge, so reading it there would leave the POST
+        # unauthenticated and the server would drop the tunnel).
+        chal = None
         if b" 401 " in head:
-            chal = re.search(rb"WWW-Authenticate: (.+)", head)
+            m = re.search(rb"WWW-Authenticate: (.+)", head)
+            chal = m.group(1).decode() if m else None
             w.close()
             r, w = await asyncio.open_connection(self.host, self.port, ssl=self._ssl)
-            w.write((req + self._http_auth("GET", chal.group(1).decode()) + "\r\n").encode())
+            w.write((req + self._http_auth("GET", chal) + "\r\n").encode())
             await w.drain()
             head = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), 8)
         if b" 200 " not in head:
             raise RtspListenError(f"GET tunnel refused: {head[:80]!r}")
         self._get = (r, w)
-        # POST command channel (same cookie). Its body is a stream of base64 RTSP.
+        # POST command channel (same cookie), authenticated with the SAME
+        # challenge. Its body is a long stream of base64 RTSP requests.
         pr, pw = await asyncio.open_connection(self.host, self.port, ssl=self._ssl)
         post = (f"POST {self.path} HTTP/1.0\r\nHost: {self.host}\r\n"
                 f"x-sessioncookie: {self._cookie}\r\n"
                 f"Content-Type: application/x-rtsp-tunnelled\r\n"
                 f"Content-Length: 100000000\r\n")
-        # reuse the GET's challenge realm/nonce for the POST auth
-        chal = re.search(rb"WWW-Authenticate: (.+)", head)
-        pw.write((post + (self._http_auth("POST", chal.group(1).decode()) if chal else "")
+        pw.write((post + (self._http_auth("POST", chal) if chal else "")
                   + "\r\n").encode())
         await pw.drain()
         self._post = (pr, pw)
@@ -353,6 +367,7 @@ class RtspTunnelListen:
                 p = parse_digest_challenge(ch.group(1))
                 self._rtsp_nonce = p.get("nonce")
                 self._rtsp_realm = p.get("realm", self._rtsp_realm)
+                self._rtsp_qop = p.get("qop")
                 await self._send_rtsp(method, extra)
                 continue
             if not re.match(r"RTSP/1\.0 200", text):
@@ -365,6 +380,7 @@ class RtspTunnelListen:
         describe = await self._rtsp_exchange("DESCRIBE", "Accept: application/sdp\r\n")
         sdp = describe.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in describe else ""
         self._audio = parse_sdp_audio(sdp)
+        log.info("rtsp listen: SDP audio=%s", self._audio)
         # SETUP the audio track over interleaved TCP (channels 0-1) -- there is
         # no UDP through the tunnel.
         track = self._audio["control"]
@@ -382,10 +398,17 @@ class RtspTunnelListen:
                 raise RtspListenError("SETUP: tunnel closed")
             if msg[0] == "rtsp":
                 reply = msg[1]
+        status_line = reply.splitlines()[0] if reply else ""
         sess = re.search(r"Session:\s*([^\r\n;]+)", reply)
         self._session = sess.group(1).strip() if sess else None
         ilm = re.search(r"interleaved=(\d+)", reply)
         self._audio_channel = int(ilm.group(1)) if ilm else 0
+        log.info("rtsp listen: SETUP uri=%s -> %s session=%s interleaved=%d",
+                 setup_uri, status_line, self._session, self._audio_channel)
+        if not re.match(r"RTSP/1\.0 200", status_line) or not self._session:
+            raise RtspListenError(
+                f"SETUP did not create a session: {status_line!r} "
+                f"(track control={track!r})")
         await self._rtsp_exchange(
             "PLAY", (f"Session: {self._session}\r\n" if self._session else ""))
         self.started = True

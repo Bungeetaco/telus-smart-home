@@ -1,0 +1,67 @@
+{
+ "data": {
+  "id": "100000000-5264",
+  "type": "devices/bluetooth-arming-device",
+  "attributes": {
+   "managedDeviceType": 29,
+   "isDisarmingEnabledForDevice": true,
+   "enrolledPartitionId": "1",
+   "webSettings": 7205,
+   "canAccessWebSettings": true,
+   "canAccessAppSettings": true,
+   "canBeRenamed": false,
+   "canBeDeleted": true,
+   "hasState": false,
+   "canAccessTroubleshootingWizard": false,
+   "troubleshootingWizard": null,
+   "addDeviceResource": 0,
+   "canBeAssociatedToVideoDevice": false,
+   "associatedCameraDeviceIds": {},
+   "macAddress": "",
+   "manufacturer": "",
+   "isAssignedToCareReceiver": false,
+   "isOAuth": false,
+   "isZWave": false,
+   "supportsCommandClassBasic": false,
+   "isMalfunctioning": false,
+   "isZWaveWakeupNode": false,
+   "unitSupportsRemovingWakeupNode": false,
+   "primaryAssociatedDeviceIds": null,
+   "showDeletionMessage": false,
+   "isMatter": false,
+   "matterAssociatedIdToNameMap": null,
+   "matterParentNodeId": null,
+   "canBeSaved": true,
+   "canChangeDescription": true,
+   "description": "Sam’s iPhone",
+   "deviceModelId": 821,
+   "canConfirmStateChange": true,
+   "canReceiveCommands": true,
+   "remoteCommandsEnabled": true,
+   "hasPermissionToChangeState": true,
+   "deviceIcon": {
+    "icon": 324
+   },
+   "batteryLevelNull": null,
+   "batteryLevelClassification": null
+  },
+  "relationships": {
+   "system": {
+    "data": {
+     "id": "20000000",
+     "type": "systems/system"
+    }
+   },
+   "stateInfo": {
+    "data": {
+     "id": "100000000-5264-0",
+     "type": "devices/state-info"
+    }
+   }
+  }
+ },
+ "included": [],
+ "meta": {
+  "transformer_version": "1.1"
+ }
+}

@@ -287,10 +287,27 @@ and evidence. Grouped by whether anything can actually be done about them.
   test_call_bridge, both fail-first proven) + deployed; STILL NEEDS a live call
   with the operator present to confirm both directions are clear.
 
-  STILL OPEN from this rebuild: (a) the downlink PUT still shares the main event
-  loop, so heavy Janus video churn can still slow it; the fix is a dedicated
-  thread for the call, deferred because it needs a talk.py cross-thread refactor
-  and live validation. (b) audio-shaping defaults are unheard; tune live.
+  LISTEN CLIENT STATUS (2026-08-29 passive live validation): the direct-LAN
+  tunnel is proven THROUGH SETUP against the real device -- GET/POST tunnel
+  channels, HTTP Digest (with qop echoed) AND RTSP Digest, OPTIONS, DESCRIBE
+  (SDP parsed), SETUP (200 + Session). PLAY then returns `454 Session Not
+  Found`, so no RTP flows yet. Suspects, in order: the base64 framing of
+  successive RTSP requests down the POST channel (per-request padding can
+  desync a server that decodes the body as one continuous base64 stream), and
+  the SETUP->PLAY session/track-control handling. THE CALL IS THEREFORE NOT
+  FUNCTIONAL on this build until PLAY is resolved -- it fails at listen start
+  and the call ends cleanly (always-on video + clip talkdown are unaffected).
+  Finish this with the operator present (a real call validates it), then the
+  direct-LAN call is complete.
+
+  STILL OPEN from this rebuild: (a) PLAY 454 above -- the immediate blocker.
+  (b) the downlink PUT still shares the main event loop, so heavy Janus video
+  churn can still slow it; the fix is a dedicated thread for the call, deferred
+  because it needs a talk.py cross-thread refactor and live validation.
+  (c) audio-shaping defaults are unheard; tune live. (d) an off-LAN fallback:
+  when direct-LAN listen is unreachable, fall back to the cloud path (the Janus
+  tap removed here) so a bridge not on the device LAN still gets a call --
+  genuinely generic, worth restoring as a fallback rather than the default.
 
   **Superseded M2 note (kept for the record):** `bridge/call_bridge.py` splices an answered call
   to the doorbell -- uplink from a decoded-audio tap on camera_session

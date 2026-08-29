@@ -1,0 +1,32 @@
+{
+ "id": "100000000-2048",
+ "doorbellNotificationSetting": {
+  "id": "100000000-2048",
+  "type": "video/settings/doorbell-notification-settings",
+  "panelNotificationEnableDisableFeatureSupport": 2,
+  "smartChimeNotificationEnableDisableFeatureSupport": 0,
+  "notificationFormat": 0,
+  "isMotionNotificationEnabled": true,
+  "isMotionNotificationsOn": true,
+  "isButtonPressNotificationsOn": true,
+  "isSmartChimeNotificationsOn": false
+ },
+ "ledLightSetting": {
+  "id": "100000000-2048",
+  "type": "video/settings/led-light-settings",
+  "canTurnOnOffLedLight": true,
+  "canChangeLedBrightness": false,
+  "canChangeLedColor": false,
+  "isLedLightEnabled": true,
+  "ledBrightness": 0,
+  "ledLightColor": null
+ },
+ "solarPanelSetting": {
+  "id": "100000000-2048",
+  "type": "video/settings/solar-panel-settings",
+  "isConnectedToSolarPanel": false,
+  "connectedToSolarPanelFeatureSupport": 0
+ },
+ "type": "video/settings/general-settings",
+ "canUserEditVideoSettings": true
+}

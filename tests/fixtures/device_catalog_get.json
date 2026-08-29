@@ -1,0 +1,1215 @@
+{
+ "data": {
+  "id": 20000000,
+  "type": "settings/manage-devices/device-catalog",
+  "attributes": {
+   "availableManagedDeviceFilters": {
+    "2": "Detectors",
+    "5": "Locks",
+    "6": "Mobile Devices",
+    "7": "Bluetooth Devices",
+    "9": "Security",
+    "12": "Video Devices",
+    "100": "Ready to Associate",
+    "101": "Associated Devices"
+   },
+   "canAddDevices": true
+  },
+  "relationships": {
+   "managedDeviceCategories": {
+    "data": [
+     {
+      "id": "2",
+      "type": "settings/manage-devices/managed-device-category"
+     },
+     {
+      "id": "5",
+      "type": "settings/manage-devices/managed-device-category"
+     },
+     {
+      "id": "6",
+      "type": "settings/manage-devices/managed-device-category"
+     },
+     {
+      "id": "7",
+      "type": "settings/manage-devices/managed-device-category"
+     },
+     {
+      "id": "9",
+      "type": "settings/manage-devices/managed-device-category"
+     },
+     {
+      "id": "12",
+      "type": "settings/manage-devices/managed-device-category"
+     }
+    ],
+    "meta": {
+     "count": "6"
+    }
+   }
+  }
+ },
+ "included": [
+  {
+   "id": 2,
+   "type": "settings/manage-devices/managed-device-category",
+   "attributes": {
+    "name": "Detectors"
+   },
+   "relationships": {
+    "managedDevices": {
+     "data": [
+      {
+       "id": "100000000-4",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-5",
+       "type": "devices/sensor"
+      }
+     ],
+     "meta": {
+      "count": "2"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-4",
+   "type": "devices/sensor",
+   "attributes": {
+    "deviceType": 6,
+    "openClosedStatus": 2,
+    "state": 1,
+    "isFlexIO": false,
+    "deviceRole": 0,
+    "displayStateText": "Closed",
+    "isMonitoringEnabled": false,
+    "sensorNamingFormat": 3,
+    "supportsBypass": false,
+    "supportsImmediateBypass": false,
+    "isBypassed": false,
+    "managedDeviceType": 4,
+    "hasState": false,
+    "canBeRenamed": true,
+    "canBeDeleted": false,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": false,
+    "webSettings": 159,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 115,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 218
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensorRowInfo": {
+     "data": null
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": "100000000-5",
+   "type": "devices/sensor",
+   "attributes": {
+    "deviceType": 5,
+    "openClosedStatus": 2,
+    "state": 1,
+    "isFlexIO": false,
+    "deviceRole": 0,
+    "displayStateText": "Not Reset",
+    "isMonitoringEnabled": false,
+    "sensorNamingFormat": 3,
+    "supportsBypass": false,
+    "supportsImmediateBypass": false,
+    "isBypassed": false,
+    "managedDeviceType": 4,
+    "hasState": false,
+    "canBeRenamed": true,
+    "canBeDeleted": false,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": false,
+    "webSettings": 159,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 114,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 218
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensorRowInfo": {
+     "data": null
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": 5,
+   "type": "settings/manage-devices/managed-device-category",
+   "attributes": {
+    "name": "Locks"
+   },
+   "relationships": {
+    "managedDevices": {
+     "data": [
+      {
+       "id": "100000000-1200",
+       "type": "devices/lock"
+      }
+     ],
+     "meta": {
+      "count": "1"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-1200",
+   "type": "devices/lock",
+   "attributes": {
+    "state": 2,
+    "desiredState": 2,
+    "maxUserCodeLength": 8,
+    "supportsScheduledUserCodes": true,
+    "supportsTemporaryUserCodes": true,
+    "supportsLatchControl": false,
+    "canEnableRemoteCommands": false,
+    "canRefreshState": true,
+    "managedDeviceType": 9,
+    "canBeRenamed": true,
+    "hasState": true,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": true,
+    "availableTemporaryAccessCodes": 0,
+    "totalTemporaryAccessCodes": 0,
+    "supportsQuickLinks": true,
+    "canBeDeleted": true,
+    "webSettings": 301,
+    "canAccessTroubleshootingWizard": true,
+    "troubleshootingWizard": 10904,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": true,
+    "associatedCameraDeviceIds": {
+     "100000000-2048": "Doorbell"
+    },
+    "macAddress": "",
+    "manufacturer": "Kwikset",
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": true,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": true,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 12008,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": true,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 28
+    },
+    "batteryLevelNull": 97,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": {
+      "id": "100000000-1200-3",
+      "type": "devices/state-info"
+     }
+    }
+   }
+  },
+  {
+   "id": 6,
+   "type": "settings/manage-devices/managed-device-category",
+   "attributes": {
+    "name": "Mobile Devices"
+   },
+   "relationships": {
+    "managedDevices": {
+     "data": [
+      {
+       "id": "00000000-0000-4000-8000-000000000001_66",
+       "type": "devices/mobile-device"
+      },
+      {
+       "id": "00000000-0000-4000-8000-000000000002_65",
+       "type": "devices/mobile-device"
+      }
+     ],
+     "meta": {
+      "count": "2"
+     }
+    }
+   }
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000001_66",
+   "type": "devices/mobile-device",
+   "attributes": {
+    "isPushDevice": true,
+    "isGPSDevice": false,
+    "isPushNotificationEnabled": true,
+    "isLocationSharingEnabled": true,
+    "isCurrentDevice": false,
+    "canAccessGeoServicesPage": true,
+    "canAccessNotificationsPage": true,
+    "deviceId": 2200,
+    "managedDeviceType": 10,
+    "canAccessWebSettings": true,
+    "webSettings": 4521,
+    "hasState": false,
+    "canBeRenamed": true,
+    "canBeDeleted": true,
+    "canAccessAppSettings": true,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": null,
+    "macAddress": "",
+    "manufacturer": "",
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": false,
+    "canChangeDescription": false,
+    "description": "Example Android (app)",
+    "deviceModelId": 0,
+    "canConfirmStateChange": false,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": false,
+    "hasPermissionToChangeState": false,
+    "deviceIcon": {
+     "icon": 324
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": null
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000002_65",
+   "type": "devices/mobile-device",
+   "attributes": {
+    "isPushDevice": true,
+    "isGPSDevice": false,
+    "isPushNotificationEnabled": true,
+    "isLocationSharingEnabled": true,
+    "isCurrentDevice": false,
+    "canAccessGeoServicesPage": true,
+    "canAccessNotificationsPage": true,
+    "deviceId": 2201,
+    "managedDeviceType": 10,
+    "canAccessWebSettings": true,
+    "webSettings": 4521,
+    "hasState": false,
+    "canBeRenamed": true,
+    "canBeDeleted": true,
+    "canAccessAppSettings": true,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": null,
+    "macAddress": "",
+    "manufacturer": "",
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": false,
+    "canChangeDescription": false,
+    "description": "Example iPhone (app)",
+    "deviceModelId": 0,
+    "canConfirmStateChange": false,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": false,
+    "hasPermissionToChangeState": false,
+    "deviceIcon": {
+     "icon": 324
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": null
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": 7,
+   "type": "settings/manage-devices/managed-device-category",
+   "attributes": {
+    "name": "Bluetooth Devices"
+   },
+   "relationships": {
+    "managedDevices": {
+     "data": [
+      {
+       "id": "100000000-5263",
+       "type": "devices/bluetooth-arming-device"
+      },
+      {
+       "id": "100000000-5264",
+       "type": "devices/bluetooth-arming-device"
+      }
+     ],
+     "meta": {
+      "count": "2"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-5263",
+   "type": "devices/bluetooth-arming-device",
+   "attributes": {
+    "managedDeviceType": 29,
+    "isDisarmingEnabledForDevice": true,
+    "enrolledPartitionId": "1",
+    "webSettings": 7205,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": true,
+    "canBeRenamed": false,
+    "canBeDeleted": false,
+    "hasState": false,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": "",
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Android",
+    "deviceModelId": 821,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": true,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 324
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": {
+      "id": "100000000-5263-0",
+      "type": "devices/state-info"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-5264",
+   "type": "devices/bluetooth-arming-device",
+   "attributes": {
+    "managedDeviceType": 29,
+    "isDisarmingEnabledForDevice": true,
+    "enrolledPartitionId": "1",
+    "webSettings": 7205,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": true,
+    "canBeRenamed": false,
+    "canBeDeleted": false,
+    "hasState": false,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": "",
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Sam’s iPhone",
+    "deviceModelId": 821,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": true,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 324
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": {
+      "id": "100000000-5264-0",
+      "type": "devices/state-info"
+     }
+    }
+   }
+  },
+  {
+   "id": 9,
+   "type": "settings/manage-devices/managed-device-category",
+   "attributes": {
+    "name": "Security"
+   },
+   "relationships": {
+    "managedDevices": {
+     "data": [
+      {
+       "id": "100000000-127",
+       "type": "devices/partition"
+      },
+      {
+       "id": "100000000-6",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-1",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-3",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-2",
+       "type": "devices/sensor"
+      }
+     ],
+     "meta": {
+      "count": "5"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-127",
+   "type": "devices/partition",
+   "attributes": {
+    "partitionId": 1,
+    "state": 1,
+    "desiredState": 1,
+    "extendedArmingOptions": {
+     "Disarmed": [],
+     "ArmedStay": [
+      2,
+      1,
+      4
+     ],
+     "ArmedAway": [
+      2,
+      1,
+      4
+     ]
+    },
+    "supportsNightArmingSchedules": false,
+    "invalidExtendedArmingOptions": {
+     "Disarmed": [],
+     "ArmedStay": [],
+     "ArmedAway": []
+    },
+    "needsClearIssuesPrompt": false,
+    "canEnableAlexa": false,
+    "isAlexaEnabled": false,
+    "canAccessPanelWifi": true,
+    "canBypassSensorWhenArmed": false,
+    "dealerEnforcesForceBypass": false,
+    "hasSensorInTroubleCondition": false,
+    "hasOpenBypassableSensors": false,
+    "limitSelectiveBypassSensors": false,
+    "hideForceBypass": true,
+    "useAlternateForceBypass": false,
+    "sensorNamingFormat": 3,
+    "restrictedAccessOfflineControllers": [],
+    "hasActiveAlarm": false,
+    "hasOnlyArming": false,
+    "hasForceArm": false,
+    "managedDeviceType": 13,
+    "canBeRenamed": true,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": true,
+    "webSettings": 501,
+    "hasState": true,
+    "canBeDeleted": false,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": "",
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 9609,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": true,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 184
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensors": {
+     "data": [
+      {
+       "id": "100000000-6",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-229",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-4",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-5264",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-1",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-3",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-5263",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-2",
+       "type": "devices/sensor"
+      },
+      {
+       "id": "100000000-5",
+       "type": "devices/sensor"
+      }
+     ],
+     "meta": {
+      "count": "9"
+     }
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": {
+      "id": "100000000-127-4",
+      "type": "devices/state-info"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-6",
+   "type": "devices/sensor",
+   "attributes": {
+    "deviceType": 83,
+    "openClosedStatus": 2,
+    "state": 1,
+    "isFlexIO": false,
+    "deviceRole": 0,
+    "displayStateText": "Idle",
+    "isMonitoringEnabled": false,
+    "sensorNamingFormat": 3,
+    "supportsBypass": false,
+    "supportsImmediateBypass": true,
+    "isBypassed": false,
+    "managedDeviceType": 14,
+    "hasState": true,
+    "canBeRenamed": false,
+    "canBeDeleted": false,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": false,
+    "webSettings": 159,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 4517,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 317
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensorRowInfo": {
+     "data": null
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": "100000000-1",
+   "type": "devices/sensor",
+   "attributes": {
+    "deviceType": 1,
+    "openClosedStatus": 2,
+    "state": 1,
+    "isFlexIO": false,
+    "deviceRole": 0,
+    "displayStateText": "Closed",
+    "isMonitoringEnabled": true,
+    "sensorNamingFormat": 3,
+    "supportsBypass": true,
+    "supportsImmediateBypass": true,
+    "isBypassed": false,
+    "managedDeviceType": 14,
+    "hasState": true,
+    "canBeRenamed": true,
+    "canBeDeleted": false,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": false,
+    "webSettings": 159,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": true,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 110,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 317
+    },
+    "batteryLevelNull": 0,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensorRowInfo": {
+     "data": null
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": "100000000-3",
+   "type": "devices/sensor",
+   "attributes": {
+    "deviceType": 2,
+    "openClosedStatus": 2,
+    "state": 3,
+    "isFlexIO": false,
+    "deviceRole": 0,
+    "displayStateText": "Idle",
+    "isMonitoringEnabled": true,
+    "sensorNamingFormat": 3,
+    "supportsBypass": true,
+    "supportsImmediateBypass": true,
+    "isBypassed": false,
+    "managedDeviceType": 14,
+    "hasState": true,
+    "canBeRenamed": true,
+    "canBeDeleted": false,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": false,
+    "webSettings": 159,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": true,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 111,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 317
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensorRowInfo": {
+     "data": null
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": "100000000-2",
+   "type": "devices/sensor",
+   "attributes": {
+    "deviceType": 1,
+    "openClosedStatus": 2,
+    "state": 0,
+    "isFlexIO": false,
+    "deviceRole": 0,
+    "displayStateText": "Not Monitored",
+    "isMonitoringEnabled": false,
+    "sensorNamingFormat": 3,
+    "supportsBypass": true,
+    "supportsImmediateBypass": true,
+    "isBypassed": false,
+    "managedDeviceType": 14,
+    "hasState": true,
+    "canBeRenamed": true,
+    "canBeDeleted": false,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": false,
+    "webSettings": 159,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": true,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 110,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": false,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 317
+    },
+    "batteryLevelNull": 0,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "sensorRowInfo": {
+     "data": null
+    },
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": null
+    }
+   }
+  },
+  {
+   "id": 12,
+   "type": "settings/manage-devices/managed-device-category",
+   "attributes": {
+    "name": "Video Devices"
+   },
+   "relationships": {
+    "managedDevices": {
+     "data": [
+      {
+       "id": "100000000-2048",
+       "type": "devices/video-device"
+      },
+      {
+       "id": "100000000-2049",
+       "type": "devices/video-device"
+      }
+     ],
+     "meta": {
+      "count": "2"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-2048",
+   "type": "devices/video-device",
+   "attributes": {
+    "isChannel": false,
+    "isDoorbellCamera": true,
+    "hasClipAgeLimit": false,
+    "managedDeviceType": 19,
+    "webSettings": 119,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": true,
+    "onvifMultisensorParentMac": "",
+    "numberOfSensorsOnMultisensor": 1,
+    "hasState": false,
+    "canBeRenamed": true,
+    "canBeDeleted": true,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {
+     "100000000-1200": "Front Door"
+    },
+    "macAddress": "AABBCC000001",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 10979,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": true,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 410
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": {
+      "id": "100000000-2048-0",
+      "type": "devices/state-info"
+     }
+    }
+   }
+  },
+  {
+   "id": "100000000-2049",
+   "type": "devices/video-device",
+   "attributes": {
+    "isChannel": false,
+    "isDoorbellCamera": false,
+    "hasClipAgeLimit": false,
+    "managedDeviceType": 19,
+    "webSettings": 119,
+    "canAccessWebSettings": true,
+    "canAccessAppSettings": true,
+    "onvifMultisensorParentMac": "",
+    "numberOfSensorsOnMultisensor": 1,
+    "hasState": false,
+    "canBeRenamed": true,
+    "canBeDeleted": true,
+    "canAccessTroubleshootingWizard": false,
+    "troubleshootingWizard": null,
+    "addDeviceResource": 0,
+    "canBeAssociatedToVideoDevice": false,
+    "associatedCameraDeviceIds": {},
+    "macAddress": "AABBCC000002",
+    "manufacturer": null,
+    "isAssignedToCareReceiver": false,
+    "isOAuth": false,
+    "isZWave": false,
+    "supportsCommandClassBasic": false,
+    "isMalfunctioning": false,
+    "isZWaveWakeupNode": false,
+    "unitSupportsRemovingWakeupNode": false,
+    "primaryAssociatedDeviceIds": null,
+    "showDeletionMessage": false,
+    "isMatter": false,
+    "matterAssociatedIdToNameMap": null,
+    "matterParentNodeId": null,
+    "canBeSaved": true,
+    "canChangeDescription": true,
+    "description": "Example Device",
+    "deviceModelId": 837,
+    "canConfirmStateChange": true,
+    "canReceiveCommands": true,
+    "remoteCommandsEnabled": true,
+    "hasPermissionToChangeState": true,
+    "deviceIcon": {
+     "icon": 27
+    },
+    "batteryLevelNull": null,
+    "batteryLevelClassification": null
+   },
+   "relationships": {
+    "system": {
+     "data": {
+      "id": "20000000",
+      "type": "systems/system"
+     }
+    },
+    "stateInfo": {
+     "data": {
+      "id": "100000000-2049-0",
+      "type": "devices/state-info"
+     }
+    }
+   }
+  }
+ ],
+ "meta": {
+  "transformer_version": "2.0"
+ }
+}
