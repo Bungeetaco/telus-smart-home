@@ -701,6 +701,53 @@ async def test_a_live_call_uses_a_small_fixed_lead_and_never_adapts(tmp):
         await runner.cleanup()
 
 
+
+async def test_live_backlog_is_batched_so_the_drain_keeps_real_time(tmp):
+    """One 40 ms chunk per synchronous PUT caps the drain at 1/RTT; a slow-ack
+    device (measured live: ~80 ms per PUT under encoder load) then drains at
+    half real time and the latency cap sheds half the caller's speech. With
+    backlog the live drain batches chunks into one body (_live_put_bytes; the
+    device accepts >=400 ms bodies, ack cost is per request), so the drain
+    keeps real time at any plausible RTT."""
+    assert tf._live_put_bytes(0, 320, 1600) == 320
+    assert tf._live_put_bytes(320, 320, 1600) == 320
+    assert tf._live_put_bytes(1000, 320, 1600) == 960     # 80-byte multiple
+    assert tf._live_put_bytes(8000, 320, 1600) == 1600    # capped
+    assert tf._live_put_bytes(150, 320, 1600) == 320      # never below a chunk
+
+    src = tf.LiveMulawSource()
+    # A full-cap backlog (the source's own latency ceiling sheds anything
+    # deeper before it is ever drained -- pinned in test_call_bridge).
+    fed = b"\x07" * src._max
+    src.feed(fed)
+    src.close()
+    doorbell = Doorbell(latency_s=0.05)                   # a slow-ack device
+    runner = await _serve(doorbell, 8791)
+    try:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        result = await tf.stream_talkdown(
+            "http://127.0.0.1:8791/s1", "pw", src, username=USER,
+            codec="mulaw", audio_filter="", pace=True, live=True)
+        elapsed = loop.time() - t0
+    finally:
+        await runner.cleanup()
+    assert bytes(doorbell.received) == fed, "batched drain corrupted the audio"
+    n_bodies = -(-len(fed) // 1600)                       # 200 ms bodies
+    assert result["chunks"] == n_bodies, (
+        f"{result['chunks']} PUTs for {len(fed)} bytes -- not batching into "
+        f"CALL_MAX_PUT_MS bodies")
+    # Single-chunk bodies at 50 ms RTT: one round trip per 40 ms chunk means
+    # (fed/320)*50ms of wall time -- for a 600 ms cap that is ~0.75 s, versus
+    # ~0.3 s batched (the 300 ms live lead dominates). The assertion sits
+    # between the two so a regression to chunk-at-a-time fails here.
+    assert elapsed < 0.6, (
+        f"drain took {elapsed:.2f}s for {len(fed) / 8000:.1f}s of audio at "
+        f"50 ms RTT -- the single-chunk round-trip ceiling is back and a live "
+        f"call will shed speech")
+    print(f"  ok  live backlog batched: {result['chunks']} PUTs, {elapsed:.2f}s "
+          f"for {len(fed) / 8000:.1f}s of audio at 50ms RTT")
+
 async def main():
     import tempfile
     failures = 0
@@ -711,7 +758,8 @@ async def main():
                  test_reconnect_beats_renegotiation, test_cert_pin,
                  test_cert_pin_degrades_without_a_pin,
                  test_endpoint_selection, test_prebuffer_measurement,
-                 test_a_live_call_uses_a_small_fixed_lead_and_never_adapts]
+                 test_a_live_call_uses_a_small_fixed_lead_and_never_adapts,
+                 test_live_backlog_is_batched_so_the_drain_keeps_real_time]
         sync_tests = [test_recovery_classification]
         for test in sync_tests:
             try:

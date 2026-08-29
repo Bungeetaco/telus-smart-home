@@ -225,6 +225,33 @@ def test_ulaw_decode_is_correct_and_inverts_the_encoder():
     print("  ok  mu-law decode is correct and value-consistent with the encoder")
 
 
+
+def test_gate_stops_the_agc_amplifying_background_noise():
+    # An ungated AGC rides quiet background UP to the target during speech
+    # pauses -- measured on a live call as porch noise louder than the visitor.
+    # With the gate: sub-threshold audio comes out ATTENUATED, and speech-level
+    # audio still gets lifted.
+    def peaks(sh, amp, n=8000):
+        data = _s16([amp, -amp] * (n // 2))
+        out = _unpack(sh.process(data))
+        return max(abs(x) for x in out[n // 2:])
+    gated = Shaper(highpass_hz=0, agc_target=0.7, agc_max_gain=16.0,
+                   gate_threshold=0.015, gate_atten=0.15)
+    noise_amp = 160                                  # ~0.005, below the gate
+    noise_peak = peaks(gated, noise_amp)
+    assert noise_peak < noise_amp, (
+        f"background noise was amplified through the gate ({noise_amp} -> "
+        f"{noise_peak}) -- pauses will roar on the phone")
+    speech_peak = peaks(gated, 3300)                 # ~0.1, well above the gate
+    assert speech_peak > 3300 * 2, (
+        f"speech was not lifted ({speech_peak}) -- the gate is eating the voice")
+    # threshold 0 keeps the gate fully out of the path
+    ungated = Shaper(highpass_hz=0, agc_target=0.7, agc_max_gain=16.0,
+                     gate_threshold=0.0)
+    assert peaks(ungated, noise_amp) > noise_amp, "gate off should mean AGC-only"
+    print("  ok  gate attenuates sub-threshold noise, passes and lifts speech")
+
+
 TESTS = (
     test_sdp_audio_is_read_from_the_stream_not_assumed,
     test_sdp_static_payload_type_without_rtpmap,
@@ -239,6 +266,7 @@ TESTS = (
     test_shaper_never_clips_a_loud_signal,
     test_shaper_highpass_removes_dc,
     test_ulaw_decode_is_correct_and_inverts_the_encoder,
+    test_gate_stops_the_agc_amplifying_background_noise,
 )
 
 

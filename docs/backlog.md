@@ -325,8 +325,26 @@ and evidence. Grouped by whether anything can actually be done about them.
   cap, for the whole call (the 38 kB of dropped downlink bytes were the same
   event: overflow shed at the cap). Fixed by making the cap the conversational
   latency ceiling it really is (CALL_DOWNLINK_BUFFER_MS 4000 -> 600; the 4 s
-  evidence dated from the since-fixed session-storm period). Awaiting a
-  confirming call.
+  evidence dated from the since-fixed session-storm period). The confirming call (same day) verified the
+  delay fix and surfaced three more defects, fixed the same day: (1) the
+  downlink turned choppy -- the PUT drain is one synchronous HTTP round trip
+  per 40 ms chunk, and with the doorbell's encoder busy (it was pushing 27 fps
+  against a declared 15 mid-call) each PUT took ~80 ms, halving the drain and
+  shedding ~25 s of a 45 s call at the latency cap. Probed live: the device
+  accepts PUT bodies of >=400 ms (HTTP 200) and its ack cost is per REQUEST
+  (400 ms body ~9 ms, 40 ms bodies spiking to 86-209 ms), so the live drain
+  now batches backlog into bodies up to CALL_MAX_PUT_MS (200 ms) and pacing
+  runs on audio-sent rather than PUT count -- the drain keeps real time at any
+  plausible RTT. (2) the uplink had its own 4-5 s delay: the unbounded mic
+  buffer fills from the moment the RTSP listen opens, seconds before the phone
+  answers, and the SIP leg drains at exactly real time, so the pre-answer
+  backlog persisted -- the identical equal-rates bug the downlink had, fixed
+  the identical way (CALL_UPLINK_BUFFER_MS 600 ms cap, shed oldest). (3) the
+  visitor's voice was quiet with the porch background AMPLIFIED above it: an
+  ungated AGC rides gain up during speech pauses until noise hits the target.
+  The uplink shaper gained a noise gate (downward expander:
+  CALL_UPLINK_GATE_THRESHOLD/ATTEN) and a hotter profile (highpass 250 Hz,
+  target 0.7, max gain 16). Awaiting a confirming call on all three.
 
   STILL OPEN from this rebuild:
   (b) the downlink PUT still shares the main event loop, so heavy Janus video

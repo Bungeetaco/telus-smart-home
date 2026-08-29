@@ -37,7 +37,9 @@ class Shaper:
     def __init__(self, *, sample_rate: int = 8000, highpass_hz: float = 0.0,
                  agc_target: float = 0.5, agc_max_gain: float = 1.0,
                  agc_min_gain: float = 1.0,
-                 attack_ms: float = 5.0, release_ms: float = 200.0):
+                 attack_ms: float = 5.0, release_ms: float = 200.0,
+                 gate_threshold: float = 0.0, gate_atten: float = 0.15,
+                 gate_release_ms: float = 150.0):
         self.sample_rate = sample_rate
         # One-pole high-pass coefficient. highpass_hz<=0 disables it.
         if highpass_hz and highpass_hz > 0:
@@ -58,8 +60,20 @@ class Shaper:
         # Per-sample smoothing coefficients for gain moves (fast down, slow up).
         self._atk = math.exp(-1.0 / (sample_rate * attack_ms / 1000.0))
         self._rel = math.exp(-1.0 / (sample_rate * release_ms / 1000.0))
+        # Noise gate (downward expander). An AGC alone amplifies whatever is
+        # there when speech pauses -- on a porch that is wind and traffic, and a
+        # live call measured the background riding UP to the target while the
+        # visitor's voice sat below it. The gate tracks a fast-attack,
+        # slow-release envelope; while it sits below gate_threshold the desired
+        # gain is capped at gate_atten, so quiet stretches are pushed DOWN
+        # instead of amplified. threshold<=0 disables the gate entirely.
+        self.gate_threshold = max(0.0, gate_threshold)
+        self.gate_atten = max(0.0, min(1.0, gate_atten))
+        self._env = 0.0
+        self._env_rel = math.exp(-1.0 / (sample_rate * gate_release_ms / 1000.0))
         self.passthrough = (not self._hp_on
-                            and self.max_gain == 1.0 and self.min_gain == 1.0)
+                            and self.max_gain == 1.0 and self.min_gain == 1.0
+                            and self.gate_threshold <= 0.0)
 
     def process(self, pcm: bytes) -> bytes:
         """Shape one chunk of s16le mono PCM, returning s16le mono PCM."""
@@ -73,6 +87,8 @@ class Shaper:
         gain, target = self._gain, self.target
         maxg, ming = self.max_gain, self.min_gain
         atk, rel = self._atk, self._rel
+        gate_thr, gate_att = self.gate_threshold, self.gate_atten
+        env, env_rel = self._env, self._env_rel
         for i in range(n):
             s = int.from_bytes(pcm[2 * i:2 * i + 2], "little", signed=True)
             x = s / 32768.0
@@ -86,6 +102,12 @@ class Shaper:
             # so it acts as a soft AGC that also limits.
             mag = abs(x)
             desired = maxg if mag < 1e-6 else min(maxg, max(ming, target / mag))
+            if gate_thr > 0.0:
+                env = mag if mag > env else env * env_rel
+                if env < gate_thr:
+                    # Below the gate: attenuate, never amplify. Speech onset
+                    # reopens instantly (the envelope attack is per-sample).
+                    desired = min(desired, gate_att)
             coef = atk if desired < gain else rel
             gain = coef * gain + (1 - coef) * desired
             v = x * gain
@@ -95,6 +117,7 @@ class Shaper:
             out[2 * i + 1] = (iv >> 8) & 0xFF
         self._hp_prev_in, self._hp_prev_out = pin, pout
         self._gain = gain
+        self._env = env
         return bytes(out)
 
 
@@ -106,7 +129,10 @@ def downlink_shaper(c) -> Shaper:
 
 
 def uplink_shaper(c) -> Shaper:
-    """The doorbell-mic -> caller shaper, from config."""
+    """The doorbell-mic -> caller shaper, from config. Gated: an outdoor mic's
+    background must not be amplified to the AGC target during speech pauses."""
     return Shaper(highpass_hz=c.CALL_UPLINK_HIGHPASS_HZ,
                   agc_target=c.CALL_UPLINK_AGC_TARGET,
-                  agc_max_gain=c.CALL_UPLINK_AGC_MAX_GAIN)
+                  agc_max_gain=c.CALL_UPLINK_AGC_MAX_GAIN,
+                  gate_threshold=c.CALL_UPLINK_GATE_THRESHOLD,
+                  gate_atten=c.CALL_UPLINK_GATE_ATTEN)

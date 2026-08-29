@@ -1247,6 +1247,20 @@ Responses: `200 {"status": "started", "camera_id": ...}`;
 `404 {"error": "unknown_camera"}`; `400 {"error": "no_target"}`;
 `409 {"error": "call_in_progress"}`.
 
+When the call ends, the `call.last_result` object in `/control/status` carries
+how it went: `result`/`reason`/`seconds` and the SIP leg's `frames_sent` /
+`rtp_received` (20 ms frames each way); `uplink_frames` (RTSP audio frames
+received from the doorbell mic across the call window);
+`uplink_dropped_bytes` and `downlink_dropped_bytes` (mu-law shed at each
+direction's latency cap — see `CALL_UPLINK_BUFFER_MS` /
+`CALL_DOWNLINK_BUFFER_MS`); and `talk`, the talkdown leg's own stats
+(`chunks`, `seconds`, `played_seconds`, `renegotiations`, `reconnects`,
+`put_rtt_p50_ms`, `put_rtt_p95_ms`, `put_rtt_max_ms`, `late_chunks`). A
+healthy call shows dropped bytes near zero in both directions and
+`played_seconds` ≈ the call's `seconds`; a rising `put_rtt_p95_ms` with
+`downlink_dropped_bytes` growing means the device was acking slowly and the
+batched drain (`CALL_MAX_PUT_MS`) was riding through it.
+
 ## `POST /control/call/stop`
 
 Ends the live call in progress (the doorbell hangs up at its next frame slot

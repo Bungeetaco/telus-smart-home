@@ -676,12 +676,18 @@ CALL_LIVE_PREBUFFER_MS = float(os.environ.get("CALL_LIVE_PREBUFFER_MS", "300"))
 # one-way delay (measured live 2026-08-29). Do not deepen this to absorb
 # stalls; fix the stall.
 CALL_DOWNLINK_BUFFER_MS = int(os.environ.get("CALL_DOWNLINK_BUFFER_MS", "600"))
-# Decoded-audio tap depth for the call uplink, in 20 ms frames (~300 ms). The
-# doorbell mic arrives cloud-relayed (the same path the video takes) and can
-# jitter; too shallow a tap sheds frames and the caller hears the mic cut out.
-# This is a jitter buffer for that relay -- deep enough to smooth it, shallow
-# enough not to pile latency onto an already-relayed path.
-CALL_UPLINK_TAP_FRAMES = int(os.environ.get("CALL_UPLINK_TAP_FRAMES", "15"))
+# Largest PUT body a LIVE talkdown may send when it has backlog, in ms of
+# audio. The downlink drain is one synchronous HTTP PUT round trip per body;
+# at the historic one-40ms-chunk-per-PUT, a device acking slowly (measured
+# live: ~80 ms per PUT while the doorbell's own encoder was busy) caps the
+# drain at half real time and the latency cap then sheds half the caller's
+# speech. Probed on the device (2026-08-29): PutAudioStream accepts bodies of
+# at least 400 ms with HTTP 200, and the round trip is per-REQUEST, not
+# per-byte (400 ms body ~9 ms, 40 ms body spiking to 86-209 ms). Draining up
+# to 200 ms per PUT keeps the drain at real time with 5x headroom while
+# keeping bodies well inside what was probed. Bodies stay multiples of the
+# 10 ms frame the device has always been fed.
+CALL_MAX_PUT_MS = int(os.environ.get("CALL_MAX_PUT_MS", "200"))
 # --- Direct-LAN call audio path (backlog E96/E99) ---------------------------
 # The call's uplink (doorbell mic -> caller) comes from the device's OWN stream
 # over the direct-LAN RTSP-in-HTTPS tunnel (rtsp_listen), bypassing the cloud
@@ -704,11 +710,27 @@ RTSP_LISTEN_READ_TIMEOUT_S = float(os.environ.get("RTSP_LISTEN_READ_TIMEOUT_S", 
 CALL_DOWNLINK_HIGHPASS_HZ = float(os.environ.get("CALL_DOWNLINK_HIGHPASS_HZ", "250"))
 CALL_DOWNLINK_AGC_TARGET = float(os.environ.get("CALL_DOWNLINK_AGC_TARGET", "0.5"))
 CALL_DOWNLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_DOWNLINK_AGC_MAX_GAIN", "6"))
-#   Uplink (doorbell mic -> caller's phone): cut outdoor rumble and level a
-#   soft visitor for phone intelligibility.
-CALL_UPLINK_HIGHPASS_HZ = float(os.environ.get("CALL_UPLINK_HIGHPASS_HZ", "150"))
-CALL_UPLINK_AGC_TARGET = float(os.environ.get("CALL_UPLINK_AGC_TARGET", "0.5"))
-CALL_UPLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MAX_GAIN", "8"))
+#   Uplink (doorbell mic -> caller's phone): cut outdoor rumble, level a soft
+#   visitor for phone intelligibility, and GATE the pauses -- an ungated AGC
+#   amplifies the porch's background up to the target whenever the visitor
+#   stops talking (measured on a live call: background above the voice).
+#   250 Hz highpass cuts outdoor rumble harder than the original 150; target
+#   0.7 + max gain 16 lift a soft voice further; the gate caps gain at
+#   GATE_ATTEN while the fast-attack/slow-release envelope sits below
+#   GATE_THRESHOLD (normalized magnitude, ~ -36 dBFS at 0.015), so background
+#   is pushed down instead of ridden up. All by-ear first calibrations.
+CALL_UPLINK_HIGHPASS_HZ = float(os.environ.get("CALL_UPLINK_HIGHPASS_HZ", "250"))
+CALL_UPLINK_AGC_TARGET = float(os.environ.get("CALL_UPLINK_AGC_TARGET", "0.7"))
+CALL_UPLINK_AGC_MAX_GAIN = float(os.environ.get("CALL_UPLINK_AGC_MAX_GAIN", "16"))
+CALL_UPLINK_GATE_THRESHOLD = float(os.environ.get("CALL_UPLINK_GATE_THRESHOLD", "0.015"))
+CALL_UPLINK_GATE_ATTEN = float(os.environ.get("CALL_UPLINK_GATE_ATTEN", "0.15"))
+# Cap on the uplink mu-law buffer between the RTSP listen and the SIP leg --
+# the uplink's mouth-to-ear latency ceiling, the exact mirror of
+# CALL_DOWNLINK_BUFFER_MS below. The listen starts several seconds before the
+# phone answers, and the SIP leg drains at exactly real time, so any audio
+# buffered before the answer would otherwise persist as delay for the whole
+# call (measured live: 4-5 s). Past the cap the OLDEST audio is shed.
+CALL_UPLINK_BUFFER_MS = int(os.environ.get("CALL_UPLINK_BUFFER_MS", "600"))
 # Long enough to hear it clearly, short enough that a pocket-answered call
 # costs cents, not minutes.
 CALL_TONE_SECONDS = float(os.environ.get("CALL_TONE_SECONDS", "10"))

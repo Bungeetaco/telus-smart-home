@@ -74,6 +74,37 @@ def apply_settings(data: dict) -> list:
     return applied
 
 
+class UplinkMulawBuffer:
+    """Mu-law between the RTSP listen and the SIP leg -- capped, shed-oldest.
+
+    The exact mirror of the downlink's LiveMulawSource cap: the listen starts
+    several seconds before the phone answers and the SIP leg drains at exactly
+    real time, so any pre-answer backlog would persist as uplink delay for the
+    whole call (measured live: 4-5 s). The cap (config.CALL_UPLINK_BUFFER_MS)
+    is the uplink's mouth-to-ear latency ceiling; past it the OLDEST audio is
+    shed, keeping what the caller hears current."""
+
+    def __init__(self):
+        self._buf = bytearray()
+        self._max = 8000 * c.CALL_UPLINK_BUFFER_MS // 1000
+        self.dropped_bytes = 0
+
+    def feed(self, ulaw: bytes) -> None:
+        self._buf.extend(ulaw)
+        if len(self._buf) > self._max:
+            drop = len(self._buf) - self._max
+            del self._buf[:drop]
+            self.dropped_bytes += drop
+
+    def take(self, n: int) -> bytes | None:
+        """One n-byte frame, or None when short (the SIP leg sends silence)."""
+        if len(self._buf) < n:
+            return None
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+
 def select_listen_url(doorbell: dict) -> tuple[str | None, str | None]:
     """Pick the direct-LAN RTSP listen URL by CALL_LISTEN_ENDPOINT_ORDER, first
     present wins. Returns (kind, url). Direct/LAN is preferred; a bridge not on
@@ -152,12 +183,12 @@ class CallBridge:
         up_shaper = uplink_shaper(c)
         down_shaper = downlink_shaper(c)
         live_source = talk_fullduplex.LiveMulawSource()
-        ulaw_buf = bytearray()
+        uplink_buf = UplinkMulawBuffer()
 
         # --- uplink: direct-LAN RTSP mic -> shape -> mu-law -> SIP ------------
         def on_mic_audio(pcm: bytes, rate: int) -> None:
             shaped = up_shaper.process(pcm)
-            ulaw_buf.extend(sip_call.pcm_s16le_to_mulaw(shaped))
+            uplink_buf.feed(sip_call.pcm_s16le_to_mulaw(shaped))
 
         listen = rtsp_listen.RtspTunnelListen(
             listen_url, doorbell["stream_user"], doorbell["stream_password"],
@@ -166,11 +197,7 @@ class CallBridge:
         def frame_source() -> bytes | None:
             # One 20 ms mu-law frame, or None (silence) when the mic buffer is
             # short -- correct while audio is sparse or the listen is warming up.
-            if len(ulaw_buf) >= 160:
-                out = bytes(ulaw_buf[:160])
-                del ulaw_buf[:160]
-                return out
-            return None
+            return uplink_buf.take(160)
 
         # --- downlink: SIP mu-law -> shape for the speaker -> talkdown PUT -----
         def on_caller_audio(mulaw: bytes) -> None:
@@ -218,9 +245,13 @@ class CallBridge:
             self._talk.stop(camera_id)
         talk = await talk_task
         result["talk"] = {k: talk.get(k) for k in
-                          ("chunks", "seconds", "renegotiations", "error")
+                          ("chunks", "seconds", "played_seconds",
+                           "renegotiations", "reconnects", "put_rtt_p50_ms",
+                           "put_rtt_p95_ms", "put_rtt_max_ms", "late_chunks",
+                           "error")
                           if isinstance(talk, dict) and k in talk}
         result["uplink_frames"] = listen.frames
+        result["uplink_dropped_bytes"] = uplink_buf.dropped_bytes
         result["downlink_dropped_bytes"] = live_source.dropped_bytes
         self.last_result = result
         log.info("call bridge: call ended: %s",

@@ -380,6 +380,11 @@ class LiveMulawSource(_ChunkSource):
         self.produced = 0
         self.dropped_bytes = 0
 
+    @property
+    def backlog(self) -> int:
+        """Bytes waiting to be drained -- what a live PUT may batch per body."""
+        return len(self._buf)
+
     def feed(self, data: bytes) -> None:
         if self._closed or not data:
             return
@@ -619,6 +624,22 @@ def _percentile(values: list, pct: float) -> float:
     return ordered[idx]
 
 
+def _live_put_bytes(backlog: int, chunk_bytes: int, max_put_bytes: int) -> int:
+    """How much a LIVE drain should ask for in one PUT body.
+
+    One 40 ms chunk per synchronous PUT round trip caps the drain rate at
+    1/RTT bodies per second; with the device acking slowly that is under real
+    time, and the latency cap then sheds speech (measured live: half the call).
+    With backlog, batch it -- the device accepts large bodies and its ack cost
+    is per request (probed: 400 ms body ~9 ms). Bodies stay multiples of the
+    80-byte 10 ms frame the device has always been fed, never below one chunk
+    and never above max_put_bytes."""
+    if backlog <= chunk_bytes:
+        return chunk_bytes
+    want = min(backlog, max_put_bytes)
+    return max(chunk_bytes, (want // 80) * 80)
+
+
 async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                           username: str = DIGEST_USER, codec: str = DEFAULT_CODEC,
                           audio_filter: str | None = None,
@@ -661,6 +682,8 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
         raise TalkdownError(f"unknown codec {codec!r}")
     bytes_per_s = spec["bytes_per_s"]
     chunk_bytes = bytes_per_s * CHUNK_MS // 1000
+    max_put_bytes = max(chunk_bytes,
+                        (bytes_per_s * c.CALL_MAX_PUT_MS // 1000) // 80 * 80)
 
     # None -> the config default filter; "" -> conditioning disabled;
     # any string -> that ffmpeg filter chain (per-request override).
@@ -686,7 +709,7 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
     pending = b""             # the chunk being delivered; retained across a
                               # reconnect/renegotiation so the resume offset is
                               # exact even though a stream cannot be rewound
-    idx = 0                   # chunks sent overall, drives the pacing schedule
+    idx = 0                   # PUTs sent overall (logs, adapt cadence); pacing is by AUDIO sent
     # A live call keeps a small FIXED lead: it cannot be buffered ahead, so the
     # clip lead and its adaptive growth would be pure latency (see
     # config.CALL_LIVE_PREBUFFER_MS). A clip keeps the tuned lead.
@@ -722,7 +745,7 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
         small buffer."""
         nonlocal start
         if start is not None:
-            start = time.monotonic() - idx * (CHUNK_MS / 1000.0) + lead_ms / 1000.0
+            start = time.monotonic() - sent / bytes_per_s + lead_ms / 1000.0
 
     def _maybe_adapt_lead() -> None:
         """E6, opt-in: raise the jitter-buffer lead to cover the worst observed
@@ -828,7 +851,15 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                             recover = "renegotiate"
                             break
                         if not pending:
-                            pending = await src.next_chunk(chunk_bytes)
+                            want = chunk_bytes
+                            if live:
+                                # Batch the backlog into one body (see
+                                # _live_put_bytes): the drain must keep real
+                                # time even when the device acks slowly.
+                                want = _live_put_bytes(
+                                    getattr(src, "backlog", 0), chunk_bytes,
+                                    max_put_bytes)
+                            pending = await src.next_chunk(want)
                             if not pending:
                                 finished = True
                                 break
@@ -843,18 +874,19 @@ async def stream_talkdown(put_url: str, password: str, audio_source: str, *,
                         reconnects = 0        # this session is demonstrably alive
                         idx += 1
                         if pace:
-                            # Schedule-based pacing: sleep until THIS chunk's
-                            # real-time slot (start + idx*CHUNK_MS), absorbing
-                            # per-PUT latency so wall-clock tracks audio time (a
-                            # fixed sleep-after-each-PUT drifted ~10%). The
-                            # lead keeps a constant jitter buffer at the doorbell
-                            # so playback stays continuous instead of
-                            # underrunning into gaps.
-                            slack = (start + idx * (CHUNK_MS / 1000.0)
+                            # Schedule-based pacing: sleep until this body's
+                            # real-time slot (start + seconds of AUDIO sent),
+                            # absorbing per-PUT latency so wall-clock tracks
+                            # audio time (a fixed sleep-after-each-PUT drifted
+                            # ~10%). By audio sent, not PUT count, because a
+                            # live drain may batch several chunks into one body
+                            # -- the schedule then lets it burst back onto real
+                            # time and resume pacing, never outrun it.
+                            slack = (start + sent / bytes_per_s
                                      - lead_ms / 1000.0) - time.monotonic()
                             if slack > 0:
                                 await asyncio.sleep(slack)
-                            elif idx * CHUNK_MS > lead_ms:
+                            elif (sent * 1000.0) / bytes_per_s > lead_ms:
                                 # E6 measurement: the slot had already passed, so
                                 # the lead is being eaten by round-trip time.
                                 # Chunks inside the opening lead are excluded --

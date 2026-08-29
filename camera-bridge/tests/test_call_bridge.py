@@ -28,7 +28,7 @@ os.environ.setdefault("TELUS_EMAIL", "test@example.invalid")
 os.environ.setdefault("TELUS_PASSWORD", "unused")
 
 from bridge import call_bridge, config as c, rtsp_listen, sip_call  # noqa: E402
-from bridge.call_bridge import select_listen_url  # noqa: E402
+from bridge.call_bridge import UplinkMulawBuffer, select_listen_url  # noqa: E402
 from bridge.sip_call import _mulaw_encode, pcm_s16le_to_mulaw  # noqa: E402
 from bridge.talk_fullduplex import LiveMulawSource  # noqa: E402
 
@@ -275,10 +275,38 @@ def test_apply_settings_is_partial_and_clearing_and_never_leaks():
     print("  ok  apply_settings: partial, clearing, type-guarded")
 
 
+
+
+async def test_uplink_buffer_cap_is_a_latency_ceiling():
+    """The uplink mirror of the downlink cap. The RTSP listen starts seconds
+    before the phone answers and the SIP leg drains at exactly real time, so
+    pre-answer backlog persists as delay for the whole call -- measured live as
+    4-5 s of doorbell-to-phone lag. The cap bounds it; overflow sheds OLDEST."""
+    SR = 8000
+    buf = UplinkMulawBuffer()
+    assert buf._max <= SR, (
+        f"uplink cap is {buf._max / SR:.1f}s of audio -- all of it is delay the "
+        f"phone hears; keep it under 1 s")
+    buf.feed(b"\x07" * SR)          # 1 s of pre-answer (stale) mic audio
+    buf.feed(b"\x08" * SR)          # 1 s of fresh speech
+    assert buf.dropped_bytes == 2 * SR - buf._max, (
+        f"overflow was not shed: dropped {buf.dropped_bytes}")
+    first = buf.take(160)
+    assert first == b"\x08" * 160, "oldest-first shed failed: stale audio kept"
+    # Short buffer -> None (the SIP leg fills silence), and FIFO drain.
+    drained = 0
+    while buf.take(160) is not None:
+        drained += 160
+    assert drained == buf._max - 160 - (buf._max - 160) % 160, drained
+    assert buf.take(160) is None
+    print(f"  ok  uplink cap {buf._max * 1000 // SR}ms bounds delay; sheds oldest")
+
+
 TESTS = (
     test_the_lin2ulaw_table_agrees_with_the_reference_encoder,
     test_live_source_fills_silence_and_ends_on_close,
     test_live_source_cap_is_a_conversational_latency_ceiling,
+    test_uplink_buffer_cap_is_a_latency_ceiling,
     test_select_listen_url_prefers_direct_lan,
     test_capability_gate_degrades_for_partial_or_absent_audio,
     test_a_bridged_call_wires_both_directions_and_tears_down,

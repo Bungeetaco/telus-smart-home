@@ -166,6 +166,16 @@ relay). Order is `config.TALK_PUT_ENDPOINT_ORDER = (direct, local, public, cloud
 relay `uae` (which appends a `?camera_id=<token>` routing token); everything else
  (Digest, µ-law body, chunking) is identical. Confirmed by a cellular capture.
 
+### PUT body size
+
+Bodies larger than one 40 ms chunk are accepted: probed live to 400 ms of
+mu-law per PUT, all HTTP 200, playback intact. The round-trip cost is per
+REQUEST, not per byte -- a 400 ms body acks in ~9 ms while 40 ms bodies spike
+to 86-209 ms when the device is busy -- so a sender that must keep a real-time
+drain under jitter batches audio into larger bodies rather than shrinking
+them. Bodies have only ever been sent as multiples of the 80-byte 10 ms
+frame; other sizes are unprobed.
+
 ## Step 5: teardown
 
 POST `Action=EndLiveStream` + envelope + `DeviceId=<did>&ForDevice=0`. Response
