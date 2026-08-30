@@ -390,7 +390,21 @@ and evidence. Grouped by whether anything can actually be done about them.
   min_gain unclamped) with the gate off -- four rounds of AGC+gate tuning on
   this very quiet mic did net harm. And (c) CALL_DEBUG_CAPTURE_DIR records
   uplink-raw / uplink-sent / downlink-sent per call, so the next bad call is
-  analyzed from audio, not described from memory. Awaiting the round-5 call.
+  analyzed from audio, not described from memory. Round 5 ran with captures: every
+  transport leg measured clean (SIP gap-free, drain at real time, video
+  paused/resumed on cue) yet the operator still could not converse -- and the
+  uplink_raw capture showed the mic feed NEAR-SILENT for the whole call
+  (median peak -63 dB, a physical tap -26 dB) while a passive doorstep probe
+  minutes later carried normal speech at healthy levels through the same
+  path, with the speaker playing a test clip fine. Suppression by an unarmed
+  silent PUT was ruled out; the remaining suspects are the ARMED full-duplex
+  session and/or the paused video pipeline, and a staged 2x2 isolation test
+  (tools: doorstep3 probe -- armed-PUT x video-paused, operator talking
+  continuously) is the next step. SHELVED HERE BY THE OPERATOR (2026-08-30):
+  the feature is on the backburner; the call endpoints stay deployed but
+  nothing dials without an explicit /control/call/doorbell. The doorbell
+  Lovelace view is archived from the dashboard (storage backup kept;
+  ha-config/doorbell-dashboard.yaml rebuilds it).
 
   STILL OPEN from this rebuild:
   (b) the downlink PUT still shares the main event loop, so heavy Janus video
