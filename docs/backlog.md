@@ -260,6 +260,18 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E101** (fixed, integration, auto-recovery) - a clean VM reboot
+  (2026-08-29 16:22-17:05 UTC) left DNS briefly unresolvable while HA started;
+  the TELUS login's later steps failed and the integration raised
+  AuthenticationFailed, locking itself into reauth -- the operator had to
+  re-enter credentials that were never wrong, and restart HA. Fixed by
+  reserving AuthenticationFailed for step 1's explicit credential rejection;
+  flow-completion, SSO-handoff and identity-parse failures now raise
+  UnexpectedResponse (-> ConfigEntryNotReady, auto-retried), because after
+  step 1 accepts the password no later failure can mean the password is wrong.
+  Same principle as the earlier 429 fix, applied to the whole flow. Covered by
+  tests/test_login_error_classification.py (proven fail-first).
+
 - **E100** (open, small, robustness) - when Alarm.com serves a gutted
   videoSource (observed live: `janusGatewayUrl: None` with `iceServers`
   present but empty, on one camera while its sibling streamed normally), the

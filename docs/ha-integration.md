@@ -395,11 +395,17 @@ Alarm.com's; only the login handshake differs. The replacement
 
 Two important behaviors:
 
-- **Transient vs. credential errors.** A `429` or `5xx` from the login gateway
-  is treated as transient (`UnexpectedResponse` → `ConfigEntryNotReady`, HA's
-  auto-retry state), not as bad credentials (`AuthenticationFailed` →
-  reauth/setup-error). This was confirmed live: `429` hit repeatedly after a day
-  of frequent restarts and previously forced a needless manual reauth each time.
+- **Transient vs. credential errors.** `AuthenticationFailed` (→ reauth) is
+  raised for exactly one thing: the identity gateway explicitly rejecting the
+  credentials in step 1. Everything else -- a `429`/`5xx` from the gateway, a
+  failed flow completion (step 2), an SSO handoff that lands on the wrong page
+  (step 3), a malformed identity response (step 4), or any network error -- is
+  `UnexpectedResponse`/`ClientError` → `ConfigEntryNotReady`, HA's
+  auto-retried state, because once step 1 has accepted the password no later
+  failure can mean the password is wrong. Confirmed live twice: a `429` storm
+  after a day of frequent restarts, and a VM boot that raced DNS -- both
+  previously locked the integration behind a needless manual reauth that
+  re-entering the (correct) credentials was never going to fix.
 - **Base URL re-pointing.** `URL_BASE` is patched to the TELUS host, but that
   only covers URLs the library *formats* at call time. The camera-settings
   extension bakes a fully-qualified Alarm.com URL into a class attribute at its

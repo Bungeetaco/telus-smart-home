@@ -159,8 +159,16 @@ async def _telus_async_login(self: AlarmController) -> None:
             headers=_BROWSER_HEADERS,
         ) as resp:
             if resp.status != 200:
-                log.error("TELUS login flow completion failed with status %s", resp.status)
-                raise AuthenticationFailed("TELUS login flow did not complete.")
+                # Credentials were already ACCEPTED by step 1's 200; a failure
+                # here is the gateway's flow being unavailable, never proof of a
+                # bad password. UnexpectedResponse maps to ConfigEntryNotReady
+                # (auto-retry); AuthenticationFailed would demand a needless
+                # reauth -- measured live 2026-08-29: a VM boot raced DNS, the
+                # flow failed transiently, and the integration locked itself
+                # behind a manual reauth instead of recovering on its own.
+                log.warning("TELUS login flow completion failed with status %s "
+                            "-- will retry, not a credentials problem", resp.status)
+                raise UnexpectedResponse("TELUS login flow did not complete.")
 
         # Step 3: OAuth2 authorization code grant. Follow the full redirect chain --
         # auth-gateway -> TokenSso.ashx -> DetermineLandingPage.aspx -- which is what
@@ -182,10 +190,14 @@ async def _telus_async_login(self: AlarmController) -> None:
         ) as resp:
             final_url = str(resp.url)
             if "DetermineLandingPage" not in final_url and "web/system" not in final_url:
-                log.error("TELUS SSO handoff did not land on the expected page: %s", final_url)
-                raise AuthenticationFailed(
-                    "TELUS SSO handoff failed -- possibly an MFA challenge this patch doesn't handle yet."
-                )
+                # Same reasoning as step 2: the password was already accepted,
+                # so a wrong landing page is a flow change, an infra hiccup, or
+                # an MFA interstitial -- re-entering the same credentials fixes
+                # none of those, so this must not trigger reauth.
+                log.error("TELUS SSO handoff did not land on the expected page: %s "
+                          "-- will retry (a persistent repeat of this line may be "
+                          "an MFA challenge this patch doesn't handle)", final_url)
+                raise UnexpectedResponse("TELUS SSO handoff did not complete.")
 
     except aiohttp.ClientError as err:
         log.exception("Network error during TELUS SSO login.")
@@ -224,8 +236,11 @@ async def _telus_async_login(self: AlarmController) -> None:
             if not self._user_email:
                 raise UnexpectedResponse("Failed to get user's email address.")
         except KeyError as err:
+            # A malformed identity response is upstream having a moment (or a
+            # schema change), not a credentials problem -- the login itself
+            # already succeeded to get this far.
             log.exception("Failed to get user's identity info.")
-            raise AuthenticationFailed from err
+            raise UnexpectedResponse from err
 
         try:
             self._session_refresh_interval_ms = json_rsp["data"][0]["attributes"][

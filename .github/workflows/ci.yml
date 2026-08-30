@@ -26,6 +26,8 @@ jobs:
           pip install $reqs
       - name: Assert the monkeypatch still applies (fails loudly if upstream moved an internal)
         run: python .github/scripts/check_patch.py
+      - name: Login error classification (needs the real library; stubbed job skips it)
+        run: python tests/test_login_error_classification.py
 
   integration-tests:
     name: Integration tests
