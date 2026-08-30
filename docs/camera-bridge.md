@@ -693,15 +693,24 @@ RTSP replies, and decodes to PCM. `bridge/call_shape.py` conditions each
 direction for clarity with low-latency in-process DSP (high-pass + soft AGC),
 tunable and defaulting to sensible values.
 
-`bridge/call_bridge.py` builds on it for the full bridged call: the doorbell
-mic reaches the caller through a decoded-audio tap on `camera_session` (the
-same frames the RTSP publisher gets), re-encoded to mu-law and pulled by the
-SIP leg's uplink; the caller's voice reaches the doorbell speaker as the SIP
-leg's received RTP fed into a `talk_fullduplex.LiveMulawSource`, which
-talkdown's existing chunked-PUT transport drains. Every leg is mu-law at
-8 kHz, so nothing transcodes. One call at a time; either half ending ends the
-other. Started with `POST /control/call/doorbell`, stopped with
-`/control/call/stop`.
+`bridge/call_bridge.py` orchestrates the full bridged call. Uplink: the
+doorbell mic arrives over the direct-LAN listen (`rtsp_listen`), is shaped
+(`call_shape`), passes the echo ducker (`EchoDucker` -- while decoded caller
+audio is active the uplink is attenuated hard, the half-duplex bias every
+intercom uses, because no AEC exists anywhere in this path), and waits in a
+capped `UplinkMulawBuffer` (shed-oldest; the cap is the uplink's mouth-to-ear
+latency ceiling) for the SIP leg to pull 20 ms frames. Downlink: the SIP
+leg's received RTP is shaped and fed to a `talk_fullduplex.LiveMulawSource`
+(same shed-oldest cap) that talkdown's chunked-PUT transport drains, batching
+backlog into larger PUT bodies so the drain holds real time when the device
+acks slowly. Every leg is mu-law at 8 kHz, so nothing transcodes. For the
+call's duration the called camera's always-on video pipeline is paused and
+then resumed (`CALL_PAUSE_VIDEO_DURING_CALL`) so the device's encoder serves
+the call, and `CALL_DEBUG_CAPTURE_DIR` can record all three streams for
+analysis. One call at a time; either half ending ends the other. Started
+with `POST /control/call/doorbell`, stopped with `/control/call/stop`.
+(The feature is currently shelved with one open defect; backlog E99 carries
+the live-round evidence and the resume point.)
 
 The feature's credentials and gate are Home-Assistant-managed exactly like the
 TELUS credentials: the options flow writes `call_settings.json` to the shared

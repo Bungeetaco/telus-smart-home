@@ -260,6 +260,15 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E102** (open, small, ops) - the stack watcher fails a sample whenever the
+  talkdown `failed` counter is NONZERO, but that counter is cumulative per
+  process: two failed speaks during a transient outage keep every later
+  5-minute sample shouting FAIL until the next container restart resets
+  /control/metrics, burying real failures in noise. The watcher already
+  persists previous counters for its drop deltas; the talk check should use
+  the same delta. Both copies need the change (ops/stack-watch.sh in the repo
+  AND the VM copy cron runs).
+
 - **E101** (fixed, integration, auto-recovery) - a clean VM reboot
   (2026-08-29 16:22-17:05 UTC) left DNS briefly unresolvable while HA started;
   the TELUS login's later steps failed and the integration raised
@@ -399,8 +408,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   path, with the speaker playing a test clip fine. Suppression by an unarmed
   silent PUT was ruled out; the remaining suspects are the ARMED full-duplex
   session and/or the paused video pipeline, and a staged 2x2 isolation test
-  (tools: doorstep3 probe -- armed-PUT x video-paused, operator talking
-  continuously) is the next step. SHELVED HERE BY THE OPERATOR (2026-08-30):
+  (`camera-bridge/tools/probe_call_mic_isolation.py` -- armed-PUT x
+  video-paused, operator talking continuously at the door) is the next step. SHELVED HERE BY THE OPERATOR (2026-08-30):
   the feature is on the backburner; the call endpoints stay deployed but
   nothing dials without an explicit /control/call/doorbell. The doorbell
   Lovelace view is archived from the dashboard (storage backup kept;
