@@ -19,6 +19,7 @@ the component READMEs.
 - [Alarm.com rate-limiting (HTTP 429)](#alarmcom-rate-limiting-http-429)
 - [Doorbell / event snapshots arrive tens of seconds late](#doorbell--event-snapshots-arrive-tens-of-seconds-late)
 - [Camera stream freezes or goes dark](#camera-stream-freezes-or-goes-dark)
+- [A camera reaches `webrtcup` but never delivers a frame](#a-camera-reaches-webrtcup-but-never-delivers-a-frame)
 - [Every session publishes, then dies ~5 s later](#every-session-publishes-then-dies-5-s-later)
 - [Frames dropped as `consumer falling behind`, on the camera with audio](#frames-dropped-as-consumer-falling-behind-on-the-camera-with-audio)
 - [Frames lost at every rotation, in a burst just after the new session starts](#frames-lost-at-every-rotation-in-a-burst-just-after-the-new-session-starts)
@@ -366,6 +367,39 @@ the encoder). It updates when each ~165 s session ends, so it can lag the live
 session by up to one rotation. `publisher_alive` and `last_publish_at` answer the
 question the rest of the response cannot: whether ffmpeg is still taking the
 frames `last_frame_at` says arrived.
+
+---
+
+## A camera reaches `webrtcup` but never delivers a frame
+
+**Symptom.** One camera's feed is down and stays down: every session attempt
+logs `webrtcup`, then fails with `no frames received before timeout (waited
+20.0s of 20.0s; webrtcup seen before the wait)`, repeating on the reconnect
+backoff indefinitely. RTSP readers log `no stream is available on path
+'<path>'`, the camera's **Stream state** sensor sits on `reconnecting`, and
+the other camera streams normally the whole time.
+
+**Cause.** The subscriber leg is healthy - ICE completes and the gateway
+answers - but no media is being published into the session. When the sibling
+camera streams normally through the same process, the bridge, host networking
+and cloud path are all demonstrably fine, and the fault is the camera's own
+publish leg (or the cloud's session for it). A device in this state can still
+look otherwise alive: settings reads/writes and activity clip uploads keep
+working and its reported WiFi signal stays normal, because those travel over
+HTTP rather than the wedged media path.
+
+**What the bridge does.** Retries forever on the capped backoff. The wedge
+escape hatch (see
+[Container restart-loop against an upstream outage](#container-restart-loop-against-an-upstream-outage))
+is deliberately vetoed while a peer camera is delivering (`no successful
+frame for Ns ... NOT restarting`): nothing local is wedged, so a container
+restart cannot reach the fault, and neither can any other lever the bridge
+has. Backlog E103 tracks device-side escalation.
+
+**Fix.** Confirm live view also fails in the vendor's own app, which isolates
+the device/cloud from this stack; then power-cycle the camera. Candidate
+remote kicks (cycling the camera's live-video-resolution setting to force an
+encoder reconfigure) are recorded in E103 and are so far unverified.
 
 ---
 

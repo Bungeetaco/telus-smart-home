@@ -260,6 +260,33 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E103** (open, robustness) - a camera whose cloud publish leg wedges is
+  unreachable by every recovery lever the bridge has, and the bridge retries
+  forever with nothing escalating to the device. Observed live for 22+ hours
+  on the doorbell (2026-08-30/31): every attempt completed ICE and got
+  `webrtcup`, then not one media frame arrived before `FIRST_FRAME_TIMEOUT_S`
+  (454 failed sessions in 24 h on the capped backoff). The run began
+  mid-stream, on a session that had been publishing normally, moments after an
+  audio-shape reconnect. Everything that isolates the fault points at the
+  device's publisher rather than the network, cloud path, or bridge: the
+  sibling camera streamed normally through the same process the whole time;
+  the wedged camera kept serving its other cloud functions (settings reads and
+  writes, activity clip uploads 40 minutes into the outage); and its reported
+  WiFi signal held its usual level throughout. The E89 wedge hatch correctly
+  vetoed a container restart (a peer was delivering, so no local resource was
+  wedged) - that design is right and this entry does not reopen it. What is
+  missing is escalation AT THE DEVICE once one camera's no-frame run gets
+  long. Candidates, all unverified: cycle the camera's live-video-resolution
+  setting through the settings API after N minutes without a frame (an encoder
+  reconfigure may kick the publisher; needs a live test the next time this
+  happens); a distinct `no_media` stream-health state, so an automation can
+  page the operator instead of the sensor sitting on `reconnecting`
+  indefinitely; and a device reboot command - pyalarmdotcomajax 0.5.13
+  exposes none, so the web portal should be surveyed for one
+  (`docs/web-portal-api-findings.md`). Until one exists the remedy is
+  operator-side: confirm live view also fails in the vendor's own app (which
+  isolates the device/cloud from this stack), then power-cycle the camera.
+
 - **E102** (open, small, ops) - the stack watcher fails a sample whenever the
   talkdown `failed` counter is NONZERO, but that counter is cumulative per
   process: two failed speaks during a transient outage keep every later
