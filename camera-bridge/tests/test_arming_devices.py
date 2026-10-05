@@ -73,6 +73,7 @@ c.SHARED_DIR = _TMP
 c.CONTROL_SECRET_PATH = os.path.join(_TMP, "control_secret")
 
 from bridge import arming_devices as ad     # noqa: E402
+from bridge import cloud_hold               # noqa: E402
 from bridge import control_server as cs     # noqa: E402
 from bridge.telus_auth import RateLimited   # noqa: E402
 
@@ -957,6 +958,11 @@ async def routes_at(devices=None, setter=None, partitions=None, panel=None):
     cs.partitions_mod = types.SimpleNamespace(
         PartitionError=cs.partitions_mod.PartitionError,
         get_partitions=get_partitions)
+    # The cloud hold is process-wide and outlives the app: a RateLimited
+    # answered by one test would leave every later website call refused
+    # locally for that wait. Each app starts from a cleared hold (its own
+    # contract is pinned in test_cloud_hold.py).
+    cloud_hold.HOLD.note_success()
     app = cs.create_app(FakeTelusSession(), asyncio.Lock(), {}, {}, None, None)
     headers = {"Authorization": f"Bearer {app[cs.APP_CURRENT_SECRET]['value']}"}
     try:
@@ -1305,6 +1311,11 @@ async def test_bluetooth_disarming_route_maps_the_error_contract():
         for call in (client.get("/control/bluetooth-disarming", headers=headers),
                      client.post("/control/bluetooth-disarming",
                                  json={"timeout": 5}, headers=headers)):
+            # Each call checked against a fresh edge answer: the first 429
+            # also starts the process-wide cloud hold, under which the second
+            # would be refused locally with the hold's remaining wait (see
+            # test_cloud_hold.py for that contract).
+            cloud_hold.HOLD.note_success()
             resp = await call
             assert resp.status == 429 and resp.headers["Retry-After"] == "9"
 

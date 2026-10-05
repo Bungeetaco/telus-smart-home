@@ -207,8 +207,10 @@ crash-restart guard.
 | --- | --- | --- |
 | `RECONNECT_BACKOFF_INITIAL_S` | `2` | Initial reconnect backoff. |
 | `RECONNECT_BACKOFF_MAX_S` | `30` | Maximum reconnect backoff (sequence 2, 4, 8, 16, 30, …). |
-| `RATE_LIMIT_RETRY_MAX_S` | `30 * 60` (30 min) | Absolute ceiling on a single `Retry-After`-driven sleep. A sanity clamp on a garbage header value, not a second-guess of a reasonable one: observed real values are ~101s. Used to be 300s applied as a plain `min()`, which had the bridge coming back sooner than the server asked and re-entering the rate-limit window. |
+| `RATE_LIMIT_RETRY_MAX_S` | `2 * 60 * 60` (2 h) | Absolute ceiling on a single `Retry-After`-driven sleep. A sanity clamp on a garbage header value, not a second-guess of a reasonable one. Used to be 300s applied as a plain `min()`, which had the bridge coming back sooner than the server asked and re-entering the rate-limit window; then 30 min on the strength of ~101s observed values, until the edge answered `Retry-After: 1825` (2026-10-03 and 2026-10-05) and the clamp was cutting 25 s off a real window. |
 | `RATE_LIMIT_RETRY_MARGIN_S` | `2` | Margin added on top of the server's stated wait so clock/rounding skew can't land the retry just inside the window again. |
+| `CLOUD_HOLD_INITIAL_S` | `60` (env-overridable) | How long every TELUS website call is held after a 401/403 that **survives a fresh login** -- the edge refusing the account rather than an expired cookie (backlog E104; see [camera-bridge.md](camera-bridge.md#the-cloud-hold-cloud_holdpy)). Doubles per consecutive strike; the first call after a hold expires is the probe. An explicit `Retry-After` is honoured as-is instead. |
+| `CLOUD_HOLD_MAX_S` | `30 * 60` (env-overridable) | Ceiling on that doubling: the observed block is ~30 min, and a longer hold would only delay the probe. |
 | `VOIPMS_SIP_SERVER` / `VOIPMS_SIP_ACCOUNT` / `VOIPMS_SIP_PASSWORD` | (empty) | The VoIP.ms POP hostname and SIP sub-account for the outbound call leg. All three empty by default, which disables `POST /control/call/test` entirely; the deployment opts in via its env file. The password is used for digest computation only and never appears in a SIP message or a log. |
 | `VOIPMS_DID` | (empty) | Caller ID number presented on outbound calls. |
 | `DOORBELL_CALL_TARGET` | (empty) | Default number the call leg dials when a request supplies no target. |
@@ -480,7 +482,7 @@ patch these).
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `120` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the status-LED and TELUS-notification switches, the privacy switch, the siren buttons and the camera diagnostic sensors. |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | `600` | How often the camera-settings coordinator re-reads `/settings` and `/diagnostics` for every known camera, backing the speaker-volume number, the chime switches and wired-chime-type select, the status-LED and TELUS-notification switches, the privacy switch, the siren buttons and the camera diagnostic sensors. Was 120 until 2026-10-05 (backlog E105): at 120 s this was the account's single largest request consumer (~420 website reads an hour for two cameras), and the edge rate-limited the account twice in three days. |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | `900` | How often the Bluetooth arming devices are re-read, backing the per-phone "Disarm alarm on arrival" switches. Deliberately far slower than the camera settings: nothing but a person can change these records, the poll is not the feedback path for a user's own toggle (the write adopts the record the response echoes), and each cycle is a live round trip competing for the same undocumented rate-limit budget. The cost is that a change made in the TELUS app, or a newly paired phone, takes up to 15 minutes to appear. |
 | `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | see `const.py` | How often the camera list is re-read from the bridge. Cheap: a local read of an in-memory dict, not a TELUS round trip. |
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | see `const.py` | How often clip/event history is re-read, backing the recent-activity sensors and event entities. |
@@ -498,6 +500,14 @@ the portal, and Alarm.com's rate limits are undocumented and can lock an account
 shortening it buys responsiveness nobody needs at a real account-level risk. A
 write through one of the `POST` routes asks for its own immediate refresh, so a
 slider you just moved does not wait out the interval.
+
+Every TELUS-backed coordinator (this one, the two 30 s event polls, the
+automation rules, and both arming-device polls) also **honours a bridge `429`**:
+it keeps what it last read and does not poll again for the bridge's
+`Retry-After`, whether that is the edge's own wait or the remaining time on the
+bridge's cloud hold (`RateLimitHoldMixin` in `bridge_client.py`, backlog E105).
+The two loopback-only coordinators (camera list, stream health) are not held;
+nothing Alarm.com-backed is behind them.
 
 The siren, privacy, image and video routes have **no interval of their own**:
 they are only ever called from an explicit user action. Nothing in either half of

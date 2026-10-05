@@ -38,7 +38,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from homeassistant.util import dt as dt_util
 
-from .bridge_client import bridge_get
+from .bridge_client import RateLimitHoldMixin, bridge_get
 from .camera import CameraBridgeCoordinator
 from .camera_settings_coordinator import (
     async_add_camera_entities,
@@ -174,11 +174,17 @@ def _classify(description: str) -> str:
     return "other"
 
 
-class VideoEventsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+class VideoEventsCoordinator(RateLimitHoldMixin, DataUpdateCoordinator[list[dict[str, Any]]]):
     """Polls the camera-bridge's /control/events endpoint.
 
     Events across all cameras, newest first -- entities filter to their own
     camera_id client-side (see TelusCameraEvent below).
+
+    A bridge 429 (the alarm.com edge rate-limiting the account, or the
+    bridge's own cloud hold) keeps the last page and pauses the poll for the
+    stated wait -- see RateLimitHoldMixin. The page is stale, not wrong, so
+    the event entities stay available and simply fire nothing until the
+    bridge is serving again.
     """
 
     def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
@@ -194,8 +200,15 @@ class VideoEventsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def _async_update_data(self) -> list[dict[str, Any]]:
         """Fetch the current video event list from the bridge."""
 
+        if self._held():
+            return self.data or []
         try:
             body = await bridge_get(self.hass, CAMERA_BRIDGE_EVENTS_URL, params={"limit": "20"})
+        except aiohttp.ClientResponseError as err:
+            if err.status == 429:
+                self._hold_for(err, "video event page")
+                return self.data or []
+            raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
 
@@ -355,11 +368,14 @@ class TelusCameraEvent(CoordinatorEntity[VideoEventsCoordinator], EventEntity):
         super()._handle_coordinator_update()
 
 
-class ActivityHistoryCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+class ActivityHistoryCoordinator(RateLimitHoldMixin, DataUpdateCoordinator[list[dict[str, Any]]]):
     """Polls the camera-bridge's /control/history endpoint -- TELUS's
     system-wide Activity feed (arm/disarm, door/lock, camera triggers,
     doorbell presses, etc), not just camera clips (VideoEventsCoordinator
     above is video-only). Newest first, matching the bridge's own ordering.
+
+    Same 429 handling as VideoEventsCoordinator (RateLimitHoldMixin): the
+    last page is kept and the poll pauses for the bridge's Retry-After.
     """
 
     def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
@@ -375,8 +391,15 @@ class ActivityHistoryCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def _async_update_data(self) -> list[dict[str, Any]]:
         """Fetch the current activity feed from the bridge."""
 
+        if self._held():
+            return self.data or []
         try:
             body = await bridge_get(self.hass, CAMERA_BRIDGE_HISTORY_URL, params={"limit": "20"})
+        except aiohttp.ClientResponseError as err:
+            if err.status == 429:
+                self._hold_for(err, "activity page")
+                return self.data or []
+            raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
 

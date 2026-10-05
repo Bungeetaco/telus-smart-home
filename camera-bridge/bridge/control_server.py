@@ -594,7 +594,8 @@ from .mws_client import (
     get_doorbell_settings,
     parse_chime_type_options,
 )
-from .telus_auth import RateLimited, relogin_if_stale
+from .cloud_hold import CloudHeld, call_with_relogin
+from .telus_auth import RateLimited
 from .telus_rest import (
     get_snapshot_url,
     get_video_events_by_ids,
@@ -609,20 +610,21 @@ log = logging.getLogger(__name__)
 
 
 async def _fetch_with_relogin(telus_session, login_lock, coro_fn, *args):
-    """Call coro_fn(telus_session, *args); on a 401/403 (expired session
-    cookie), re-login once (serialized against every other login() caller
-    via login_lock, same as main.py's get_video_source_with_relogin) and
-    retry exactly once before giving up.
+    """Call coro_fn(telus_session, *args) against the TELUS website: on a
+    401/403 (expired session cookie) re-login once and retry exactly once,
+    and consult the process-wide cloud hold first.
+
+    The behaviour lives in cloud_hold.call_with_relogin, shared with main.py's
+    video-source fetch so the control routes and the camera loops agree on
+    "the edge is refusing us". Kept under this name because every route below
+    (and the route tests) call it. A call refused by the hold raises CloudHeld
+    -- a RateLimited -- which the routes answer as 429 + Retry-After rather
+    than the 502 that used to send Home Assistant straight back into the
+    limiter on its next cycle.
     """
-    try:
-        return await coro_fn(telus_session, *args)
-    except aiohttp.ClientResponseError as err:
-        if err.status in (401, 403):
-            log.warning("Control endpoint: %s got %s, re-logging in to TELUS",
-                        coro_fn.__name__, err.status)
-            await relogin_if_stale(telus_session, login_lock)
-            return await coro_fn(telus_session, *args)
-        raise
+    return await call_with_relogin(
+        telus_session, login_lock, coro_fn, *args,
+        what=f"Control endpoint: {getattr(coro_fn, '__name__', 'website call')}")
 
 
 # Accepted body fields for the image/video settings writes and the type each
@@ -1191,6 +1193,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
             async with telus_session.session.get(snapshot_url) as resp:
                 resp.raise_for_status()
                 jpeg_bytes = await resp.read()
+        except RateLimited as err:
+            return _rate_limited(err, "snapshot fetch", camera_id)
         except aiohttp.ClientResponseError as err:
             # str(ClientResponseError) embeds the request URL, and for the fetch
             # above that is the SIGNED snapshot URL -- so the blanket handler
@@ -1300,6 +1304,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         try:
             events = await _fetch_with_relogin(telus_session, login_lock, list_video_events, limit)
+        except RateLimited as err:
+            return _rate_limited(err, "video events fetch")
         except Exception:
             log.exception("Control endpoint: video events fetch failed")
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1326,6 +1332,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         try:
             videos = await _fetch_with_relogin(
                 telus_session, login_lock, get_video_events_by_ids, [video_event_id])
+        except RateLimited as err:
+            return _rate_limited(err, "clip URL fetch", video_event_id)
         except Exception:
             log.exception("Control endpoint: fresh clip URL fetch failed for %s", video_event_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1352,6 +1360,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         try:
             rules = await _fetch_with_relogin(telus_session, login_lock, list_automation_rules)
+        except RateLimited as err:
+            return _rate_limited(err, "automation rules fetch")
         except Exception:
             log.exception("Control endpoint: automation rules fetch failed")
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1372,6 +1382,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
 
         try:
             events = await _fetch_with_relogin(telus_session, login_lock, list_history_events, limit)
+        except RateLimited as err:
+            return _rate_limited(err, "activity history fetch")
         except Exception:
             log.exception("Control endpoint: activity history fetch failed")
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1385,6 +1397,8 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         rule_id = request.match_info["rule_id"]
         try:
             await _fetch_with_relogin(telus_session, login_lock, action_fn, rule_id)
+        except RateLimited as err:
+            return _rate_limited(err, action_fn.__name__, rule_id)
         except Exception:
             log.exception("Control endpoint: %s failed for rule %s", action_fn.__name__, rule_id)
             return web.json_response({"error": "telus_error"}, status=502)
@@ -1492,7 +1506,7 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
                         "siren/privacy routes unavailable")
         return mobile
 
-    def _rate_limited(err: RateLimited, what: str, camera_id: str) -> web.Response:
+    def _rate_limited(err: RateLimited, what: str, subject: str | None = None) -> web.Response:
         """Turn an edge rate-limit into a 429 that carries the server's own wait.
 
         These routes used to answer 502 for this, which tells a caller "upstream
@@ -1501,12 +1515,23 @@ def create_app(telus_session, login_lock, camera_registry: dict, camera_status: 
         The header is the server's number, not ours; a caller that honours it
         backs off exactly as far as TELUS asked and no further.
 
+        A call refused by the local cloud hold (cloud_hold.CloudHeld) is the
+        same answer with the hold's REMAINING wait, logged at debug: the hold
+        itself was logged once when it started, and a poller that has not yet
+        read the Retry-After asks again every cycle, so a warning here per
+        refused request would be the log storm the hold exists to end.
+
         Retry-After is emitted as an integer number of seconds, which is the form
         every HTTP client understands (RFC 9110 also allows a date; nothing here
         needs one)."""
         wait = max(1, int(err.retry_after_s or 1))
-        log.warning("Control endpoint: %s for %s rate limited by the edge; "
-                    "answering 429 Retry-After=%ss", what, camera_id, wait)
+        label = f"{what} for {subject}" if subject is not None else what
+        if isinstance(err, CloudHeld):
+            log.debug("Control endpoint: %s refused by the cloud hold; "
+                      "answering 429 Retry-After=%ss", label, wait)
+        else:
+            log.warning("Control endpoint: %s rate limited by the edge; "
+                        "answering 429 Retry-After=%ss", label, wait)
         return web.json_response({"error": "rate_limited", "retry_after": wait},
                                  status=429, headers={"Retry-After": str(wait)})
 

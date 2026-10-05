@@ -1756,12 +1756,16 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     # this used to min() against a 300s cap, so a longer window
                     # had us knocking again before Cloudflare said we could,
                     # which restarts the window instead of clearing it. Only
-                    # RATE_LIMIT_RETRY_MAX_S (30min) clamps it now, as a guard
+                    # RATE_LIMIT_RETRY_MAX_S (2h) clamps it now, as a guard
                     # against an absurd header value.
                     delay = c.rate_limit_sleep_s(exc.retry_after_s)
-                    log.warning("%s: rate-limited by Cloudflare, sleeping %.0fs "
-                                "(server-specified Retry-After=%.0fs, not the fixed backoff)",
-                                camera["id"], delay, exc.retry_after_s)
+                    # The same sleep whether the wait came from the edge's own
+                    # Retry-After or from the process-wide cloud hold
+                    # (cloud_hold.CloudHeld, a RateLimited): both mean "the
+                    # website will refuse us until then", and the message
+                    # carries which one it was.
+                    log.warning("%s: %s -- sleeping %.0fs (the stated wait, not the "
+                                "fixed backoff)", camera["id"], exc, delay)
                     await asyncio.sleep(delay)
                 else:
                     await asyncio.sleep(backoff)

@@ -128,10 +128,12 @@ RECONNECT_BACKOFF_MAX_S = 30
 # us coming back *sooner than the server explicitly asked* -- precisely the
 # behaviour that re-enters a rate-limit window instead of clearing it (see
 # telus_auth.RateLimited and the multi-hour outage documented on main.py's
-# _login_with_retry). Observed real values are ~101s, so 30 minutes sits far
-# past anything legitimate while still bounding an accidental
-# "Retry-After: 86400".
-RATE_LIMIT_RETRY_MAX_S = 30 * 60
+# _login_with_retry). This was 30 minutes on the strength of ~101s observed
+# values -- and then the edge answered Retry-After: 1825 on 2026-10-03 and
+# again on 2026-10-05 (backlog E104), 25 seconds PAST that cap, so the clamp
+# was quietly doing the very thing it exists to prevent. Two hours is still
+# far past any window seen while bounding an accidental "Retry-After: 86400".
+RATE_LIMIT_RETRY_MAX_S = 2 * 60 * 60
 # Small margin added on top of the server's stated wait, so a clock/rounding
 # skew of a second or two can't land the retry just inside the window again.
 RATE_LIMIT_RETRY_MARGIN_S = 2
@@ -142,6 +144,25 @@ def rate_limit_sleep_s(retry_after_s: float) -> float:
     source of truth for both call sites so the two can't drift apart -- they
     previously each open-coded the same min()/margin expression."""
     return min(max(float(retry_after_s), 0.0), RATE_LIMIT_RETRY_MAX_S) + RATE_LIMIT_RETRY_MARGIN_S
+
+
+# --- Cloud hold (cloud_hold.py) ---------------------------------------------
+# When a website call still answers 401/403 AFTER a fresh, successful login, the
+# cookie was not the problem: the alarm.com edge is refusing the account (seen
+# live 2026-10-03 and 2026-10-05, each time for its Retry-After of ~30 min,
+# with every poll re-logging-in and retrying into it -- backlog E104). Every
+# website call is then held for this long, doubling on each consecutive
+# occurrence up to the cap, and the first call after a hold expires is the
+# probe. An explicit Retry-After is honoured as-is instead, through
+# rate_limit_sleep_s above. 60s is short enough that an ordinary cookie
+# expiry that happened to coincide with one flaky answer costs a minute, and
+# the doubling reaches the observed ~30 min window in six strikes rather than
+# re-knocking 160+ times inside it.
+CLOUD_HOLD_INITIAL_S = float(os.environ.get("CLOUD_HOLD_INITIAL_S", "60"))
+# Ceiling on the doubling: the observed block is ~30 min, so a longer hold
+# would only delay the probe that finds the edge serving again. An EXPLICIT
+# Retry-After is not subject to this cap (RATE_LIMIT_RETRY_MAX_S applies).
+CLOUD_HOLD_MAX_S = float(os.environ.get("CLOUD_HOLD_MAX_S", str(30 * 60)))
 
 
 # If a single camera goes this long with no successful frame batch -- a

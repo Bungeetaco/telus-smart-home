@@ -208,18 +208,33 @@ async def test_arming_coordinator_degradation_rules():
     finally:
         restore()
 
-    for status in (401, 429):
-        restore = scripted_read(
-            aiohttp.ClientResponseError(request_info=None, history=(), status=status))
+    restore = scripted_read(
+        aiohttp.ClientResponseError(request_info=None, history=(), status=401))
+    try:
         try:
-            try:
-                await coordinator._async_update_data()
-            except ha_stubs.UpdateFailed:
-                pass
-            else:
-                raise AssertionError(f"a {status} must be UpdateFailed, not data")
-        finally:
-            restore()
+            await coordinator._async_update_data()
+        except ha_stubs.UpdateFailed:
+            pass
+        else:
+            raise AssertionError("a 401 must be UpdateFailed, not data")
+    finally:
+        restore()
+
+    # A 429 used to be UpdateFailed too. It now keeps the last page and holds
+    # the poll for the bridge's Retry-After (RateLimitHoldMixin, backlog E105):
+    # the bridge is reachable and the record is stale rather than wrong, and a
+    # coordinator that came straight back on its next cycle was one more knock
+    # on the edge limiter. Pinned fully in test_bridge_hold.py; here only the
+    # degradation rule itself.
+    restore = scripted_read(
+        aiohttp.ClientResponseError(request_info=None, history=(), status=429))
+    try:
+        assert await coordinator._async_update_data() == {"ad42": dict(PHONE)}, (
+            "a 429 must keep the last page, not fail the poll")
+        assert coordinator._held(), "a 429 must start the poll hold"
+    finally:
+        restore()
+    coordinator._hold_until = 0.0  # clear the hold for the checks below
 
     # An id-less record cannot be addressed by the write route; drop it.
     restore = scripted_read({"devices": [dict(PHONE), {"description": "ghost"}]})

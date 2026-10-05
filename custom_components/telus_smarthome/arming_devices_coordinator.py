@@ -76,7 +76,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 # From bridge_client, the module that defines them, rather than second-hand
 # through camera_settings_coordinator (which imports the same name from here for
 # its own use) -- switch.py and camera.py already import it this way.
-from .bridge_client import bridge_get, read_control_secret
+from .bridge_client import RateLimitHoldMixin, bridge_get, read_control_secret
 from .const import (
     ARMING_DEVICES_POLL_INTERVAL_SECONDS,
     CAMERA_BRIDGE_ARMING_DEVICE_DISARMING_URL_TEMPLATE,
@@ -99,7 +99,7 @@ LOGGER = logging.getLogger(__name__)
 _POST_TIMEOUT_S = 30
 
 
-class ArmingDevicesCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
+class ArmingDevicesCoordinator(RateLimitHoldMixin, DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Polls GET /control/arming-devices.
 
     `data` is keyed by arming device id; each value is one element of the
@@ -123,6 +123,8 @@ class ArmingDevicesCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]])
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch the current arming device list from the bridge."""
 
+        if self._held():
+            return self.data or {}
         try:
             body = await bridge_get(self.hass, CAMERA_BRIDGE_ARMING_DEVICES_URL)
         except aiohttp.ClientResponseError as err:
@@ -140,11 +142,12 @@ class ArmingDevicesCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]])
                 raise UpdateFailed("Camera bridge rejected control secret (401)") from err
             if err.status == 429:
                 # Alarm.com's limits are undocumented and a stampede can lock the
-                # account (AGENTS.md), so this waits for the next scheduled cycle
-                # instead of retrying -- the header is surfaced for the log only.
-                raise UpdateFailed(
-                    "Alarm.com is rate-limiting this account; arming devices not read"
-                ) from err
+                # account (AGENTS.md). This used to wait only for the next
+                # scheduled cycle; it now honours the bridge's Retry-After and
+                # keeps the last list meanwhile (RateLimitHoldMixin) -- stale
+                # switches, not unavailable ones, since the bridge is reachable.
+                self._hold_for(err, "arming device list")
+                return self.data or {}
             raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
@@ -299,7 +302,7 @@ def async_add_arming_device_entities(
     config_entry.async_on_unload(coordinator.async_add_listener(_add_new))
 
 
-class PanelBluetoothCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class PanelBluetoothCoordinator(RateLimitHoldMixin, DataUpdateCoordinator[dict[str, Any]]):
     """Polls GET /control/bluetooth-disarming -- the PANEL-level settings (E41).
 
     `data` is the route's body verbatim: `pairing_enabled`, `timeout`, their
@@ -332,6 +335,8 @@ class PanelBluetoothCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch the panel's Bluetooth disarming settings from the bridge."""
+        if self._held():
+            return self.data or {}
         try:
             body = await bridge_get(self.hass, CAMERA_BRIDGE_BLUETOOTH_DISARMING_URL)
         except aiohttp.ClientResponseError as err:
@@ -345,10 +350,10 @@ class PanelBluetoothCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if err.status == 401:
                 raise UpdateFailed("Camera bridge rejected control secret (401)") from err
             if err.status == 429:
-                raise UpdateFailed(
-                    "Alarm.com is rate-limiting this account; panel Bluetooth "
-                    "settings not read"
-                ) from err
+                # Same as the device list above: honour the bridge's Retry-After
+                # and keep the last document meanwhile.
+                self._hold_for(err, "panel Bluetooth settings")
+                return self.data or {}
             raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Could not reach camera bridge: {err}") from err

@@ -693,7 +693,7 @@ a real error.
 | `VideoEventsCoordinator` (event.py) | `/control/events` | 30 s | per-camera event entities |
 | `ActivityHistoryCoordinator` (event.py) | `/control/history` | 30 s | activity event entity, doorbell-press event entities, activity-feed sensor |
 | `AutomationRulesCoordinator` (switch.py) | `/control/automations` | 300 s | automation-rule switches |
-| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 120 s | volume number, privacy switch, siren buttons, camera diagnostic sensors, and *which cameras are doorbells* (creation gate only; the doorbell event entity itself rides the activity coordinator) |
+| `CameraSettingsCoordinator` (camera_settings_coordinator.py) | `/control/cameras/{id}/settings` + `/diagnostics` | 600 s | volume number, privacy switch, siren buttons, camera diagnostic sensors, and *which cameras are doorbells* (creation gate only; the doorbell event entity itself rides the activity coordinator) |
 | `StreamHealthCoordinator` (sensor.py) | `/control/status` | 30 s | per-camera stream-health sensors (stream state, dropped frames, audio state), camera-bridge connectivity binary sensor |
 | `TalkMetricsCoordinator` (sensor.py) | `/control/metrics` | 120 s | talkdown status/failure sensors |
 
@@ -708,6 +708,20 @@ the short poll buys "the stream died" being visible within half a minute at no
 rate-limit cost;
 see [Stream health and bridge connectivity](#stream-health-and-bridge-connectivity)
 for how it is shared between `sensor.py` and `binary_sensor.py`.
+
+Every TELUS-backed coordinator in the table (events, activity history,
+automation rules, camera settings, and the two arming-device coordinators in
+`arming_devices_coordinator.py`) mixes in `RateLimitHoldMixin` from
+`bridge_client.py`: a bridge `429 rate_limited` keeps the last page and
+**pauses that coordinator's polling for the bridge's `Retry-After`** -- the
+edge's own wait, or the remaining time on the bridge's cloud hold -- instead of
+failing the update and coming straight back on the next interval, which for the
+two 30 s pollers was ~120 knocks an hour into a 30 min block (backlog E105).
+The page is stale rather than wrong and the bridge is reachable, so the entities
+stay available on what they last knew. The settings sweep stops at the first
+camera to answer 429 and keeps every camera's last page. The two loopback-only
+coordinators (`CameraBridgeCoordinator`, `StreamHealthCoordinator`) are not
+held.
 
 ### Camera platform
 
@@ -871,7 +885,10 @@ routes; see [The Bluetooth disarming entities](#the-bluetooth-disarming-entities
 
 One `CameraSettingsCoordinator`, shared by all four platforms, polls
 `/control/cameras/{id}/settings` and `/control/cameras/{id}/diagnostics` per
-bridge-reported camera every **120 s**.
+bridge-reported camera every **600 s** (120 s until 2026-10-05: at that rate
+it was the account's single largest request consumer, ~420 website reads an
+hour for two cameras, and the edge rate-limited the account twice in three
+days -- backlog E105).
 
 That interval is deliberately slow. Each cycle is two bridge requests per camera
 and nine upstream TELUS reads behind them: four website settings documents
@@ -1199,13 +1216,14 @@ From `const.py` (timing and identity):
 | --- | --- | --- |
 | `CONF_DEFAULT_UPDATE_INTERVAL_SECONDS` | 300 | Default REST poll (fallback behind push) |
 | `CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT` | 30 | Default reconnect delay after a socket close |
+| `WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS` | 300 | Ceiling on the reconnect delay while connect attempts keep **failing before reaching RUNNING** (`ws_backoff.reconnect_delay`): the delay doubles from the reconnect timeout per consecutive failure and resets on the first attempt that connects. A healthy socket the server drops on its routine ~6 min cycle keeps the fixed delay. Every attempt costs a REST token fetch, and the failures seen live are TCP connect timeouts to the websocket host arriving in streaks (backlog E106) |
 | `KEEP_ALIVE_INTERVAL_SECONDS` | 60 | Session keepalive interval |
 | `HEARTBEAT_SECONDS` (heartbeat patch) | 55 | Websocket ping interval |
 | `WEBSOCKET_START_TIMEOUT_SECONDS` (controller) | 60 | Pre-`RUNNING` backstop |
 | `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | 60 | Camera-list poll |
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | 30 | Video-clip / activity poll |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | 300 | Automation-rule poll |
-| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 120 | Camera settings + diagnostics poll |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 600 | Camera settings + diagnostics poll (120 until 2026-10-05, backlog E105) |
 | `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` | 45 | Per-request timeout for the `/diagnostics` bridge read (the signal read alone can take ~25 s on some models); the `/settings` read keeps the shared 10 s default |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | 900 | Bluetooth arming devices **and** the panel-wide Bluetooth settings poll |
 | `TALK_METRICS_POLL_INTERVAL_SECONDS` | 120 | Talkdown-counter poll (`/control/metrics`) |

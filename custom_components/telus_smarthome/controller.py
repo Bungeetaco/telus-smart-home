@@ -35,7 +35,9 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     CONF_WEBSOCKET_RECONNECT_TIMEOUT,
     KEEP_ALIVE_INTERVAL_SECONDS,
+    WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS,
 )
+from .ws_backoff import reconnect_delay
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +66,10 @@ class AlarmIntegrationController:
         self._ws_state: WebSocketState = WebSocketState.STOPPED
         self._ws_seen_running = False
         self._ws_close_event = asyncio.Event()
+        # Reconnect back-off (backlog E106): whether the attempt in flight ever
+        # reached RUNNING, and how many attempts in a row have not.
+        self._ws_attempt_reached_running = False
+        self._ws_connect_failures = 0
 
         # Diagnostic auth/session health, surfaced via a diagnostic sensor entity
         # (see sensor.py) so the user can see auth is failing from within Home
@@ -256,6 +262,8 @@ class AlarmIntegrationController:
         # vanished for a full poll cycle with nothing in the log to show for it.
         # Refresh once per reconnect, not on the initial connect (setup has just
         # polled), so the blind window costs ~1s instead of a poll interval.
+        if state == WebSocketState.RUNNING:
+            self._ws_attempt_reached_running = True
         if state == WebSocketState.RUNNING and previous not in (None, WebSocketState.STOPPED):
             if self._ws_seen_running:
                 self.hass.async_create_task(self.update_coordinator.async_request_refresh())
@@ -281,6 +289,7 @@ class AlarmIntegrationController:
         while True:
             try:
                 self._ws_close_event.clear()
+                self._ws_attempt_reached_running = False
                 self.api.start_websocket(self._ws_state_handler)
 
                 # start_websocket() only spawns a task; if that task dies before it
@@ -313,7 +322,25 @@ class AlarmIntegrationController:
                 if self._ws_state == WebSocketState.STOPPED:
                     break
 
-                await asyncio.sleep(ws_reconnect_timeout)
+                # A socket that connected and was later dropped (the server's
+                # routine ~6 min close) reconnects on the fixed delay, as before.
+                # An attempt that never reached RUNNING -- a connect timeout, a
+                # rejected token -- backs off: each one cost a REST token fetch
+                # against an edge that rate-limits the whole account, and they
+                # arrive in streaks (backlog E106).
+                if self._ws_attempt_reached_running:
+                    self._ws_connect_failures = 0
+                    delay = ws_reconnect_timeout
+                else:
+                    self._ws_connect_failures += 1
+                    delay = reconnect_delay(
+                        ws_reconnect_timeout, self._ws_connect_failures,
+                        WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS)
+                    LOGGER.warning(
+                        "Websocket attempt %d did not reach RUNNING (state=%s); "
+                        "next attempt in %.0fs",
+                        self._ws_connect_failures, self._ws_state, delay)
+                await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 raise
             except Exception:

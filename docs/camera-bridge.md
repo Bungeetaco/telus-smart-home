@@ -598,10 +598,45 @@ sleeps for that stated wait via `config.rate_limit_sleep_s`, **not** the fixed
 `2/4/8/16/30s` backoff, because a short fixed schedule just re-enters the same
 rate-limit window instead of clearing it (this compounding is what turned one
 incident into a multi-hour outage). The sleep is clamped only by
-`RATE_LIMIT_RETRY_MAX_S` (30 min) as a guard against an absurd header value, plus
-a small margin. A rate-limit failure is also **not** counted toward the
-consecutive-failure escape hatch, since restarting the container only re-runs the
-login and re-triggers the window.
+`RATE_LIMIT_RETRY_MAX_S` (2 h; it was 30 min until the edge answered
+`Retry-After: 1825` and the clamp quietly cut 25 s off it) as a guard against an
+absurd header value, plus a small margin. A rate-limit failure is also **not**
+counted toward the consecutive-failure escape hatch, since restarting the
+container only re-runs the login and re-triggers the window.
+
+## The cloud hold (`cloud_hold.py`)
+
+The edge does not always say 429. On 2026-10-03 and 2026-10-05 it refused the
+account for its stated ~30 min with **`403 Forbidden` on ordinary website GETs
+while the SSO login kept succeeding**, which every caller read as an expired
+cookie: re-login, retry, 403 again, 502 to Home Assistant, and the next poll
+did it all over -- 168 re-login warnings in an hour, both camera streams down
+for the window because each session rotation needs one website call.
+
+`cloud_hold.HOLD` is the one process-wide answer to "is the edge refusing us
+right now", and `cloud_hold.call_with_relogin` is the one path every website
+call takes (the control routes through `_fetch_with_relogin`, the camera
+loops through `main.get_video_source_with_relogin`, and the discovery poll):
+
+- a 401/403 that a fresh login **fixes** costs what it always did -- one
+  login, one retry, no hold;
+- a 401/403 that **survives** the fresh login holds every website call for
+  `CLOUD_HOLD_INITIAL_S` (60 s), doubling per consecutive strike up to
+  `CLOUD_HOLD_MAX_S` (30 min); the first call after a hold expires is the
+  probe, and a success resets the strikes;
+- an explicit edge wait (a 429, or a `RateLimited` parsed by a module such as
+  `camera_settings`) holds for the server's own number through
+  `rate_limit_sleep_s`, and a longer hold in force is never shortened.
+
+A call refused by the hold raises `CloudHeld`, a `RateLimited`, so the control
+routes answer the honest `429` + `Retry-After` they already answer for an edge
+429 (Home Assistant's coordinators honour it -- see
+[ha-integration.md](ha-integration.md#coordinators-and-endpoints)), and the
+camera loop sleeps the remaining wait through its existing `RateLimited`
+branch instead of walking the 2/4/8/30 s schedule into the limiter. The hold
+only ever delays website calls; it never touches the login itself and an
+expired hold costs nothing. The mobile (MWS) session's reads are not routed
+through it -- they absorb a rate limit per read already. Backlog E104.
 
 ## Login serialization
 

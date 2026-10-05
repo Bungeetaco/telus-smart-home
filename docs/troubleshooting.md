@@ -235,17 +235,45 @@ get this wrong:
    server told it to*, restarting the rate-limit window instead of clearing
    it. This turned one bad night into a multi-hour outage.
 
+**The block does not always say 429 (2026-10-03 and 2026-10-05).** Twice in
+three days the edge refused the account for its stated `Retry-After: 1825`
+with **`403 Forbidden` on ordinary website GETs while the SSO login kept
+succeeding**. Every caller read the 403 as an expired cookie -- re-login,
+retry, 403 again, `502` to Home Assistant -- and the next poll did it all over:
+168 re-login warnings in one hour, `Camera discovery poll failed` every cycle,
+and **both camera streams down for the whole window**, because each session
+rotation needs one website call (the video-source fetch) and that call was
+walking into the block on the 2/4/8/30 s reconnect schedule. The container was
+`Up` with zero restarts and the bridge connectivity sensor stayed `on` the whole
+time: container state tells you nothing here, read the bridge log. The window
+closes on its own when the `Retry-After` elapses; restarting the bridge only
+adds a login to the limiter. Home Assistant's own session is on the same
+account and gets the same 403 (`KeepAlive.aspx`) within a couple of minutes.
+
 **Fix / design.**
 
 - **Honor `Retry-After`.** The bridge waits for the server-specified interval;
-  the cap on that wait is now high enough (30 minutes) that it does not truncate
-  realistic windows and cause an early re-knock.
+  the cap on that wait is 2 hours (`RATE_LIMIT_RETRY_MAX_S`). It was 30
+  minutes until the 1825 s window above showed the clamp cutting 25 s off a
+  real wait, which is the early re-knock it exists to prevent.
+- **Treat a 403 that survives a fresh login as the block it is.** The bridge's
+  process-wide cloud hold (`cloud_hold.py`, backlog E104) stops every website
+  call -- control routes, video-source fetches, discovery -- for 60 s, doubling
+  per consecutive strike up to 30 min; the first call after a hold expires is
+  the probe. An ordinary cookie expiry still costs one login and one retry.
+  Held routes answer `429` with the remaining wait, and the camera loops sleep
+  it instead of reconnecting into it. The log says `Holding every TELUS website
+  call for Ns: ...` once per hold and `cloud hold cleared` when a call succeeds.
 - **Do not tight-retry.** Back off; let the restart guard provide the floor for
   the process-death paths.
 - **Don't increase your own request rate to compensate for slow updates.**
   Lowering `update_interval` or the event poll to "catch up" trades directly
   against 429 exposure. Keep the poll at its default and accept the push design
-  above.
+  above. The account's steady-state budget is what causes the block in the
+  first place: the camera-settings poll was moved from 120 s to 600 s on
+  2026-10-05 because at 120 s it was the largest single consumer (~420 website
+  reads an hour for two cameras), and every TELUS-backed coordinator now pauses
+  for the bridge's `Retry-After` instead of re-polling into it (backlog E105).
 
 > On the integration side, wrong-password vs. MFA-challenge vs. server-error is
 > deliberately differentiated at the *exception-type* level
@@ -1403,21 +1431,32 @@ anyway; that is a UI choice, not an API constraint.
 
 ## A control answers `429`, or Home Assistant keeps retrying into a rate limit
 
-The camera settings and diagnostics reads, every camera settings write (both its
-pre-read and the write itself), and the siren, privacy, partition, bypass,
-arming-device and Bluetooth-disarming routes answer `429` with a `Retry-After`
-header carrying **the server's own wait**, plus
-`{"error": "rate_limited", "retry_after": N}`. Honour that value rather than
-retrying on your own schedule; the next attempt otherwise walks straight back
-into the limiter, and Alarm.com's limits are undocumented and can lock the
-account.
+Every route that makes a TELUS website call -- the events, history, clip and
+snapshot reads, automation rules and their pause/resume, the camera settings
+and diagnostics reads, every camera settings write (both its pre-read and the
+write itself), and the siren, privacy, partition, bypass, arming-device and
+Bluetooth-disarming routes -- answers `429` with a `Retry-After` header plus
+`{"error": "rate_limited", "retry_after": N}`. The wait is **the server's own**
+for an explicit edge rate limit, or the remaining time on the bridge's
+process-wide cloud hold after a 403 that survived a fresh login (see
+[Alarm.com rate-limiting](#alarmcom-rate-limiting-http-429)). Honour that value
+rather than retrying on your own schedule; the next attempt otherwise walks
+straight back into the limiter, and Alarm.com's limits are undocumented and can
+lock the account.
 
-The Home Assistant entities surface this rather than retrying: a rate-limited
-siren press, privacy toggle, camera-settings, arming-device or
-Bluetooth-disarming write raises a `HomeAssistantError` beginning "Alarm.com is
-rate-limiting this account" and carrying the server's wait ("try again in
-{N}s", or "try again later" when no wait is readable). The integration never
-retries the write itself: repeat the action after the stated interval.
+The Home Assistant coordinators honour it: a TELUS-backed poll that is answered
+`429` keeps its last page and does not poll again until the wait is over,
+logging once `Alarm.com is rate-limiting this account; keeping the last ... and
+not polling again for Ns`. The entities stay available on what they last knew;
+the camera list and stream-health polls are loopback-only and are not held.
+
+The Home Assistant entities surface a rate-limited **write** rather than
+retrying: a rate-limited siren press, privacy toggle, camera-settings,
+arming-device or Bluetooth-disarming write raises a `HomeAssistantError`
+beginning "Alarm.com is rate-limiting this account" and carrying the server's
+wait ("try again in {N}s", or "try again later" when no wait is readable). The
+integration never retries the write itself: repeat the action after the stated
+interval.
 
 The one absorb: the settings read's two MWS-backed sections (siren and privacy)
 swallow a rate-limited MWS read internally (the negative result is cached for

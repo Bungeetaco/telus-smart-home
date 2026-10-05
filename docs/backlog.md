@@ -260,6 +260,95 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E107** (open, device, doorbell) - the doorbell's own publish leg keeps
+  wedging briefly: in the 48 h to 2026-10-05 the HA stream-state sensor
+  recorded ~79 doorbell drops of 30-60 s, plus a 17 min run (01:43 UTC) and an
+  8 min run (15:05), every one the E103 signature (`webrtcup`, then `no frames
+  received before timeout`), while the living-room camera had seven. The
+  doorbell answers LAN pings at 160+ ms where every other VLAN-38 host answers
+  in under 10 ms, so the leading suspect is its Wi-Fi link rather than the
+  cloud. Nothing in this repo can fix that; what is open is (a) an access point
+  or placement change at the house and (b) E103's device-side escalation.
+  Recorded so the next "cameras are down" is not misread as the E104 edge
+  block, which takes BOTH cameras down together.
+
+- **E106** (DONE 2026-10-05, integration) - the push websocket's reconnect
+  backs off while connects keep FAILING. `pyalarmdotcomajax` fetches a fresh
+  websocket token over REST on every connect attempt, and the attempts seen
+  failing live are TCP connect timeouts to `webskt.alarm.com:8443`
+  (`ConnectionTimeoutError` in the HA log) arriving in streaks -- up to 16 an
+  hour, one every ~36 s on the fixed 30 s delay -- each a request against the
+  edge that rate-limits the whole account (E104). `controller.py` now tracks
+  whether the attempt in flight ever reached RUNNING: a healthy socket the
+  server drops on its routine ~6 min cycle reconnects on the fixed delay as
+  before, and an attempt that never connected doubles the delay from the
+  configured reconnect timeout up to `WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS`
+  (300), resetting on the first connect that succeeds. The arithmetic lives in
+  `ws_backoff.py` so the stubbed test harness can pin it (`test_ws_backoff.py`)
+  without importing `controller.py`. Why the connects time out is NOT known:
+  from the same VM the host connects in 60 ms when probed, there is no IPv6
+  in play (A record only, no v6 route), and the timeouts come in clusters with
+  no local event beside them -- left open as the next question if the streaks
+  continue after this lands.
+
+- **E105** (DONE 2026-10-05, integration) - the coordinators honour a bridge
+  `429`, and the settings poll is five times slower. A TELUS-backed poll that
+  was answered 429 used to raise `UpdateFailed` and come straight back on its
+  next interval -- the two 30 s event pollers alone were ~120 knocks an hour
+  into the E104 block, each one re-logging the bridge in and re-opening the
+  window. `RateLimitHoldMixin` (`bridge_client.py`) on the events, activity
+  history, automation rules, camera settings and both arming-device
+  coordinators keeps the last page and makes NO bridge call until the bridge's
+  `Retry-After` (bounded, 2 h cap) has elapsed; the settings sweep stops at the
+  first camera to answer 429 and keeps every camera's page. The page is stale,
+  not wrong, so the entities stay available on it. The loopback-only camera
+  list and stream health polls are not held. Separately,
+  `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` went 120 -> 600: at 120 s it was the
+  account's single largest consumer, seven website reads per camera per cycle
+  (~420/h for two cameras, against ~240/h for both event polls together) for
+  values that change on the order of weeks, and a write still refreshes itself
+  at once. The event polls stay at 30 s on purpose: the doorbell-press and
+  clip notifications ride them and the cloud already adds 32-64 s. Pinned in
+  `tests/test_bridge_hold.py`; `test_arming_entities.py` updated for the new
+  429 rule.
+
+- **E104** (DONE 2026-10-05, bridge) - the process-wide cloud hold
+  (`bridge/cloud_hold.py`). Observed live twice in three days (2026-10-03
+  10:44-11:14 and 2026-10-05 16:25-16:59 UTC): the alarm.com edge refused the
+  account for its stated `Retry-After: 1825` with **403 Forbidden on ordinary
+  website GETs while the SSO login kept succeeding**. Every caller read the 403
+  as an expired cookie -- re-login, retry, 403, `502` to Home Assistant -- and
+  the next poll did it again: 168 re-login warnings in one hour, discovery
+  failing every cycle, and **both camera streams down for the full window**
+  (the video-source fetch each rotation needs was walking into the block on
+  the 2/4/8/30 s schedule). The container was `Up` with zero restarts and the
+  bridge connectivity sensor on throughout; HA's own session got the same 403
+  (`KeepAlive.aspx`) two minutes earlier. Now every website call -- control
+  routes via `_fetch_with_relogin`, the camera loops via
+  `get_video_source_with_relogin`, and discovery -- goes through
+  `cloud_hold.call_with_relogin`: a 401/403 a fresh login FIXES costs one
+  login and one retry as before; one that SURVIVES the login holds every
+  website call for `CLOUD_HOLD_INITIAL_S` (60 s), doubling per consecutive
+  strike to `CLOUD_HOLD_MAX_S` (30 min), with the first call after expiry as
+  the probe and a success resetting the strikes; an explicit edge wait (429,
+  parsed `RateLimited`, rate-limited login) holds for the server's own number
+  and a longer hold is never shortened. A refused call raises `CloudHeld` (a
+  `RateLimited`), so held routes answer `429` + `Retry-After` instead of 502
+  and the camera loops sleep the remaining wait through their existing
+  `RateLimited` branch. Found along the way and fixed with it:
+  `RATE_LIMIT_RETRY_MAX_S` was 30 min on the strength of ~101 s observed
+  values, so the real 1825 s window was being clamped to 1802 s -- the bridge
+  coming back 23 s before it was told, which is precisely the re-knock the
+  clamp's own comment warns about. Now 2 h. Pinned in
+  `camera-bridge/tests/test_cloud_hold.py`; the two existing route suites
+  clear the hold per app since it outlives the app. What this does NOT do:
+  hold the mobile (MWS) reads (they absorb a rate limit per read already) or
+  defer the proactive session rotation during a hold (alarm.com kills the
+  session server-side at ~180 s anyway, so a deferral would buy seconds).
+  Also not done: explain WHY the edge blocks -- the steady-state request
+  budget (E105) is the leading suspect, and whether the blocks stop after
+  E104-E106 land is the thing to watch.
+
 - **E103** (open, robustness) - a camera whose cloud publish leg wedges is
   unreachable by every recovery lever the bridge has, and the bridge retries
   forever with nothing escalating to the device. Observed live for 22+ hours
@@ -507,6 +596,18 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 **Recently shipped, listed only because the trap is expensive**
 
+- **E104 / E105 / E106** (DONE 2026-10-05) - the alarm.com edge can refuse the
+  whole account for ~30 min with **403s that look exactly like an expired
+  session cookie** while the login keeps succeeding; re-login-and-retry on
+  every poll is the one response that keeps the window open, and it took both
+  camera streams down twice in three days with the container `Up` and the
+  bridge sensor `on`. The bridge now holds every website call after a 403 that
+  survives a fresh login (`cloud_hold.py`), the integration's TELUS-backed
+  coordinators pause for a bridge `429`'s `Retry-After`, the settings poll is
+  600 s, and the websocket reconnect backs off while connects keep failing.
+  Watch whether the blocks stop; if not, the request budget (E105) is the next
+  thing to cut. Restarting the bridge during a block only adds a login.
+
 - **E79** (DONE) - Frigate records to the NAS vault pool over virtiofs. If the
   VM ever fails to start with `virtiofsd died unexpectedly`, the real error is in
   `/var/log/syslog`, not the empty virtiofsd log, and the fix is
@@ -545,6 +646,10 @@ and evidence. Grouped by whether anything can actually be done about them.
 
 - **E57**: `pyalarmdotcomajax` maintenance is paused upstream. Pinning is why
   nothing needs doing; the entry lists the triggers that would reopen it.
+- **E107**: the doorbell's 30-60 s `no frames` blips (the E103 signature,
+  ~79 in 48 h to 2026-10-05, none of them the E104 block, which takes BOTH
+  cameras down together). Its LAN ping sits at 160+ ms, so the fix is at the
+  house -- Wi-Fi placement or an access point -- not in this repo.
 
 ## High value
 _Implemented since live testing:_ **E-COND audio conditioning (with per-request

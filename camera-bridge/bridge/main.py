@@ -9,7 +9,8 @@ from . import config as c
 from . import control_server
 from . import memory_trace
 from . import restart_guard
-from .telus_auth import RateLimited, TelusSession, relogin_if_stale
+from .cloud_hold import CloudHeld, call_with_relogin
+from .telus_auth import RateLimited, TelusSession
 from .telus_rest import list_cameras, get_video_source
 from . import call_bridge
 from .camera_session import run_camera_forever
@@ -35,15 +36,15 @@ async def get_video_source_with_relogin(telus: TelusSession, camera_id: str, log
     fallback-file watcher, the other cameras) and skips the login entirely if one of
     those already refreshed the session while this call was queued -- see that
     helper for why the de-duplication matters as much as the serialization.
+
+    Shared with the control routes through cloud_hold.call_with_relogin, so a
+    403 that survives the fresh login (the alarm.com edge refusing the account,
+    not an expired cookie) holds EVERY website call -- this one included -- and
+    the camera loop sleeps the hold through its existing RateLimited path
+    instead of walking the 2/4/8/30 s reconnect schedule into the limiter.
     """
-    try:
-        return await get_video_source(telus, camera_id)
-    except aiohttp.ClientResponseError as err:
-        if err.status in (401, 403):
-            log.warning("%s: video source fetch got %s, re-logging in to TELUS", camera_id, err.status)
-            await relogin_if_stale(telus, login_lock)
-            return await get_video_source(telus, camera_id)
-        raise
+    return await call_with_relogin(telus, login_lock, get_video_source, camera_id,
+                                   what=f"{camera_id}: video source fetch")
 
 
 async def _login_with_retry(telus: TelusSession, login_lock: asyncio.Lock) -> None:
@@ -219,6 +220,7 @@ async def discover_and_launch_cameras(
     telus: TelusSession,
     camera_registry: dict[str, dict],
     lifecycle: CameraLifecycleManager,
+    login_lock: asyncio.Lock,
 ) -> None:
     """Poll TELUS for the camera list forever, registering any camera not already
     known and starting its pipeline immediately. A camera newly added to the account
@@ -234,7 +236,23 @@ async def discover_and_launch_cameras(
     """
     while True:
         try:
-            cameras = await list_cameras(telus)
+            cameras = await call_with_relogin(telus, login_lock, list_cameras,
+                                              what="camera discovery")
+        except CloudHeld as exc:
+            # The edge is refusing the account and the hold already said so once
+            # at WARNING; a traceback per cycle for the duration would be the
+            # log storm the hold exists to end. Sleep the usual interval: the
+            # registry is complete for every camera that matters, and a camera
+            # added during a hold is picked up on the first cycle after it.
+            log.info("Camera discovery skipped (%s), next attempt in %ss",
+                     exc, c.CAMERA_DISCOVERY_INTERVAL_S)
+            await asyncio.sleep(c.CAMERA_DISCOVERY_INTERVAL_S)
+            continue
+        except RateLimited as exc:
+            log.warning("Camera discovery rate limited by the edge (Retry-After=%.0fs), "
+                        "will retry in %ss", exc.retry_after_s, c.CAMERA_DISCOVERY_INTERVAL_S)
+            await asyncio.sleep(c.CAMERA_DISCOVERY_INTERVAL_S)
+            continue
         except Exception:
             log.exception("Camera discovery poll failed, will retry in %ss",
                           c.CAMERA_DISCOVERY_INTERVAL_S)
@@ -402,7 +420,7 @@ async def main():
                 await lifecycle.activate(entry)
 
             discovery_task = asyncio.ensure_future(
-                discover_and_launch_cameras(telus, camera_registry, lifecycle))
+                discover_and_launch_cameras(telus, camera_registry, lifecycle, login_lock))
             call_settings_task = asyncio.ensure_future(
                 watch_call_settings(_load_call_settings_if_present()))
             fallback_task = asyncio.ensure_future(

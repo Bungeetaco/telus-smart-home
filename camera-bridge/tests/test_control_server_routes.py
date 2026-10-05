@@ -76,6 +76,7 @@ c.SHARED_DIR = _TMP
 c.CONTROL_SECRET_PATH = os.path.join(_TMP, "control_secret")
 
 from bridge import aiortc_opus_patch  # noqa: E402
+from bridge import cloud_hold  # noqa: E402
 from bridge import control_server as cs  # noqa: E402
 from bridge.mws_client import TOKEN_STATUS_LOGGED_OUT  # noqa: E402
 from bridge.telus_auth import RateLimited  # noqa: E402
@@ -409,6 +410,11 @@ async def _app(siren=None, privacy=None, settings_module=None, mint=None,
 
     registry = {CAM_DENIED: {"id": CAM_DENIED}, CAM_ALLOWED: {"id": CAM_ALLOWED}}
     manager = FakeTalkManager() if talk_manager is ... else talk_manager
+    # The cloud hold is process-wide and outlives the app: a test that answers
+    # one website call with a RateLimited leaves every later website call
+    # refused locally for that wait. Each app starts from a cleared hold; the
+    # hold's own behaviour is pinned in test_cloud_hold.py.
+    cloud_hold.HOLD.note_success()
     app = cs.create_app(FakeTelusSession(), asyncio.Lock(), registry, {}, None,
                         manager)
     headers = {"Authorization": f"Bearer {app[cs.APP_CURRENT_SECRET]['value']}"}
@@ -823,6 +829,12 @@ async def test_a_rate_limited_website_call_answers_429_not_502():
             f"{resp.headers.get('Retry-After')!r}")
         assert body == {"error": "rate_limited", "retry_after": 120}, (
             f"{route}: {body}")
+        # A RateLimited from the website also starts the process-wide cloud
+        # hold, under which the NEXT route would be answered locally with the
+        # hold's remaining wait and never reach the shim. Clear it so every
+        # route here is checked against a fresh edge answer; the hold's own
+        # contract is pinned in test_cloud_hold.py.
+        cloud_hold.HOLD.note_success()
 
     # The reads, and a write whose PRE-READ is limited (get_audio_settings).
     async with _app(settings_module=shim(cs.camera_settings.set_call_volume)) \

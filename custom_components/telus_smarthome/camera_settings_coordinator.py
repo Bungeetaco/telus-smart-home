@@ -38,7 +38,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .bridge_client import bridge_get, read_control_secret
+from .bridge_client import RateLimitHoldMixin, bridge_get, read_control_secret
 from .camera import CameraBridgeCoordinator
 from .const import (
     CAMERA_BRIDGE_CAMERA_DIAGNOSTICS_URL_TEMPLATE,
@@ -53,7 +53,11 @@ from .const import (
 LOGGER = logging.getLogger(__name__)
 
 
-class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
+class _RateLimitedHold(UpdateFailed):
+    """One camera's read answered 429: the hold is set, the sweep stops."""
+
+
+class CameraSettingsCoordinator(RateLimitHoldMixin, DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Polls /control/cameras/{id}/settings and .../diagnostics for every known camera.
 
     `data` is keyed by camera id; each value is
@@ -62,6 +66,11 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
     for is simply absent from `data` rather than present-with-empty-values, so
     entity gating can't mistake "bridge too old to have these routes" for "the
     camera says it supports nothing".
+
+    A bridge 429 on any camera's read stops the sweep: every camera keeps its
+    last page and the poll pauses for the bridge's Retry-After
+    (RateLimitHoldMixin). This is the heaviest TELUS-backed poll in the
+    integration, so it is the one that most needs to stop knocking.
     """
 
     def __init__(
@@ -87,6 +96,9 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
         if not camera_ids:
             return {}
 
+        if self._held():
+            return self.data or {}
+
         # Checked once up front rather than inferred from bridge_get returning
         # None per request: a missing secret and a 404 would otherwise look the
         # same here, and "no secret yet" (normal for a minute after either
@@ -106,6 +118,15 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
             # warns against.
             try:
                 entry = await self._async_fetch_camera(camera_id)
+            except _RateLimitedHold:
+                # The hold is set (logged once by _hold_for). Every camera not
+                # yet read keeps its last page, this one included, and the
+                # sweep ends here rather than asking the next camera's routes
+                # for the same answer.
+                for remaining in camera_ids[camera_ids.index(camera_id):]:
+                    if remaining in previous:
+                        data[remaining] = previous[remaining]
+                break
             except UpdateFailed as err:
                 # ONE camera's failure must not blank the others. This used to
                 # propagate, so a single slow camera failed the whole sweep and
@@ -173,6 +194,11 @@ class CameraSettingsCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]
                 # Secret on disk is stale relative to what the bridge enforces;
                 # self-heals on the next cycle -- same case as camera.py.
                 raise UpdateFailed("Camera bridge rejected control secret (401)") from err
+            if err.status == 429:
+                wait = self._hold_for(err, "camera settings")
+                raise _RateLimitedHold(
+                    f"Alarm.com is rate-limiting this account; holding for {wait:.0f}s"
+                ) from err
             raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Could not reach camera bridge: {err}") from err

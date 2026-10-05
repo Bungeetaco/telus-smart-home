@@ -40,6 +40,18 @@ KEEP_ALIVE_INTERVAL_SECONDS = 60
 # rate-limiting a live account.
 CONF_DEFAULT_UPDATE_INTERVAL_SECONDS = 300  # 5 minutes
 CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT = 30  # seconds
+# Ceiling on the reconnect delay while websocket connects keep FAILING before
+# reaching RUNNING (controller.async_start_websocket_monitor; backlog E106).
+# Every attempt costs a REST token fetch (pyalarmdotcomajax fetches a fresh
+# websocket token per connect) on an account whose edge rate-limits the whole
+# account, and the failures seen live are TCP connect timeouts to
+# webskt.alarm.com that come in streaks (up to 16 an hour, one every ~36 s on
+# the fixed 30 s delay). The delay doubles from the configured reconnect
+# timeout per consecutive failure up to this cap and resets on the first
+# attempt that reaches RUNNING; the ordinary ~6 min server-side drop of a
+# healthy socket (docs/troubleshooting.md) is NOT a failure and keeps the
+# fast fixed delay, so push stays up as much as it did.
+WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS = 300
 
 LOGGER = logging.getLogger(__package__)
 
@@ -442,19 +454,28 @@ CAMERA_BRIDGE_CAMERA_PRIVACY_URL_TEMPLATE = (
 
 # How often camera_settings_coordinator.py re-reads the two GET routes above,
 # for every known camera. Deliberately slow: unlike the camera list (a local
-# in-memory dict on the bridge), each of these is a live round trip to TELUS,
-# so the per-cycle cost is 2 requests per camera. These settings only change
-# when someone edits them in the app or the portal, and Alarm.com's rate limits
-# are undocumented and can lock the account (docs/troubleshooting.md), so this
-# buys responsiveness nobody needs at a real risk. A write through one of the
-# POST routes requests its own immediate refresh rather than waiting for this.
-CAMERA_SETTINGS_POLL_INTERVAL_SECONDS = 120
+# in-memory dict on the bridge), each of these is a live round trip to TELUS --
+# two bridge requests per camera and SEVEN website reads behind them (four
+# settings documents and three diagnostics reads; the two MWS reads are cached
+# account-wide). These settings only change when someone edits them in the app
+# or the portal, and Alarm.com's rate limits are undocumented and can lock the
+# account (docs/troubleshooting.md), so this buys responsiveness nobody needs
+# at a real risk. A write through one of the POST routes requests its own
+# immediate refresh rather than waiting for this.
+#
+# 120 -> 600 on 2026-10-05 (backlog E105). At 120 s this poll was the single
+# largest consumer of the account's request budget: 7 reads x 2 cameras x 30
+# cycles = ~420 website calls per hour, more than the two 30 s event polls
+# combined (~240/h), for values that change on the order of weeks. The edge
+# rate-limited the whole account twice in three days; this is the cheapest
+# cut with no user-visible cost, since a write still refreshes itself at once.
+CAMERA_SETTINGS_POLL_INTERVAL_SECONDS = 600
 # The diagnostics route is three sequential alarm.com reads behind one request,
 # and alarm.com seems to query the camera itself for the signal figure. Measured
 # live at 1.6s on a doorbell and 25s on an indoor camera in the SAME account, so
 # the shared 10s bridge timeout is not a slow-bridge signal here -- it is normal
 # for some models, and enforcing 10s failed the poll for every camera at once.
-# Comfortably inside the 120s poll interval even if two cameras are both slow.
+# Comfortably inside the poll interval even if two cameras are both slow.
 CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS = 45
 
 # How often camera.py re-polls the bridge for its camera list. This is a

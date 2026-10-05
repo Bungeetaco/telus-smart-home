@@ -42,7 +42,7 @@ from .arming_devices_coordinator import (
     async_set_disarming_enabled,
 )
 from .base_device import ConfigBaseDevice
-from .bridge_client import bridge_get, read_control_secret
+from .bridge_client import RateLimitHoldMixin, bridge_get, read_control_secret
 from .camera_settings_coordinator import (
     CameraSettingsCoordinator,
     CameraSettingsEntity,
@@ -234,7 +234,7 @@ async def async_setup_entry(
         _build_panel_bluetooth)
 
 
-class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+class AutomationRulesCoordinator(RateLimitHoldMixin, DataUpdateCoordinator[list[dict[str, Any]]]):
     """Polls the camera-bridge's /control/automations endpoint.
 
     Infrequent poll: pause/resume is normally a manual user action (via
@@ -242,6 +242,9 @@ class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     own like camera discovery does. A pause/resume through this switch
     triggers its own immediate refresh rather than waiting on this poll
     (see AutomationRuleSwitch.async_turn_on/off).
+
+    A bridge 429 keeps the last rule list and pauses the poll for the stated
+    wait (RateLimitHoldMixin); the switches stay on their last known state.
     """
 
     def __init__(self, hass: core.HomeAssistant, config_entry: ConfigEntry) -> None:
@@ -257,8 +260,15 @@ class AutomationRulesCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def _async_update_data(self) -> list[dict[str, Any]]:
         """Fetch the current automation rule list from the bridge."""
 
+        if self._held():
+            return self.data or []
         try:
             body = await bridge_get(self.hass, CAMERA_BRIDGE_AUTOMATIONS_URL)
+        except aiohttp.ClientResponseError as err:
+            if err.status == 429:
+                self._hold_for(err, "automation rule list")
+                return self.data or []
+            raise UpdateFailed(f"Camera bridge returned HTTP {err.status}") from err
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Could not reach camera bridge: {err}") from err
 
