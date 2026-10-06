@@ -52,6 +52,9 @@ secrets.env.example for why), then `sudo docker compose up -d --build`.
   opens a Janus/WebRTC session (`janus_client.py`) and feeds decoded frames
   into an ffmpeg process that publishes them to MediaMTX over RTSP
   (`ffmpeg_sink.py`). `camera_session.py` owns the per-camera reconnect loop.
+  Every website call goes through `cloud_hold.py`, which holds all of them
+  while the edge is refusing the account; `device_kick.py` is the opt-in
+  escalation for a camera whose own publish leg has wedged.
 - Runs as a single Docker container (`telus-cam-bridge`), `--network host`,
   `--restart unless-stopped`, managed via `docker-compose.yml` (see
   "Installing" above and "Recreating the container" below).

@@ -196,7 +196,7 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `state` | string | One of `streaming`, `connecting`, `reconnecting`, `restart_deferred` |
+| `state` | string | One of `streaming`, `connecting`, `reconnecting`, `no_media`, `restart_deferred` |
 | `consecutive_failures` | int | Reconnect attempts since the last good frame |
 | `last_frame_at` | int \| null | Unix timestamp of the most recent frame, or `null` |
 | `fps` | number \| null | The frame rate the running ffmpeg was **declared** with (`-framerate`, post-clamp to 1–30), not a live measurement of what the camera is delivering. `null` until the camera first reaches the `streaming` state. It can change between polls without a restart: the frame rate is a device setting, so the bridge keeps re-measuring it and rebuilds the publisher when the delivered rate moves materially away from the declared one (see [camera-bridge.md](camera-bridge.md#the-frame-rate-is-adaptive-not-latched)). The delivered rate rides beside it in `measured_fps` |
@@ -217,6 +217,9 @@ counters live at [`/control/metrics`](#get-controlmetrics) below.
 | `measured_fps` | int \| null | The rate the camera is actually **delivering**: the bridge's last settled measurement (a median over `RATE_RESAMPLE_FRAMES` inter-frame deltas, taken clear of the session-start burst). Read it against `fps`, which is what ffmpeg was **declared** with: a material gap is padding (measured below declared) or dropping (measured above) before ffmpeg says so. `null` until the first settled batch; survives rotations; updated as frames flow, so it lags a reconnect gap |
 | `rate_pending` | int \| null | A **confirmed** rate change waiting for the session rotation that applies it (rate rebuilds happen only at rotations, so readers pay one reconnect instead of a failed session). `null` otherwise, including after the rotation re-checked the current reading and found the change no longer real |
 | `duplicated_frame_warnings` | int | Lifetime count, since process start, of ffmpeg's `frames duplicated` stderr warnings, accumulated across publisher rebuilds like `dropped_frames`. The **encoder's own** corroboration that the declared rate exceeds what the camera delivers. Observability only, and read it knowing its limits: it is one-directional (a too-LOW declaration, the direction that destroys frames, never fires it), not quantitative, and coarse (fixed 1000-frame thresholds). A rate correction that worked shows here as the count going quiet |
+| `device_kicks` | int | How many device kicks (`device_kick.cycle_live_resolution`, the opt-in escalation for a camera stuck in `no_media`) have been sent for this camera since process start, successes and failures alike. Present (`0`) from the camera's first status entry, and stays `0` unless `DEVICE_KICK_ENABLED` is set |
+| `last_device_kick_at` | int \| null | Unix timestamp of the last kick, or `null` |
+| `last_device_kick` | string \| null | What the last kick reported: `ok: {...}` with the resolution restored and the alternate it cycled through, `failed: <error>` (a failed restore names the value the camera was LEFT at), or `not sent: <reason>` when the cloud hold refused the call; `null` until one has been attempted |
 
 The top-level `audio_decoder` block carries the audio decode counters for the
 whole process, not for one camera. That is a limit of what is knowable, not an
@@ -239,10 +242,19 @@ sub-account present), `active`, the `camera_id` and `since` of a call in
 flight, and `last_result` (how the previous call ended, persisted so it
 survives the call).
 
-`state: "restart_deferred"` is the most informative value: the camera hit the
-`SESSION_WEDGE_TIMEOUT_S` escape hatch, but it has fired too often
-lately to be a local wedge, so `restart_guard.py` is holding the process before
-it exits.
+`state: "no_media"` is the value to page on: for at least `NO_MEDIA_STATE_AFTER_S`
+every session this camera opened completed ICE and then delivered no media,
+while another camera kept delivering through the same process. Nothing local
+is wedged (the peer proves it) and the cloud path is up (ICE completed), so the
+fault is at the device's own publish leg, where no lever on this side reaches;
+the bridge keeps retrying, and with `DEVICE_KICK_ENABLED` it also cycles the
+camera's live-resolution setting once per `DEVICE_KICK_COOLDOWN_S` (the three
+`device_kick*` fields above). See
+[camera-bridge.md](camera-bridge.md#device-side-escalation-device_kickpy).
+
+`state: "restart_deferred"` means the camera hit the `SESSION_WEDGE_TIMEOUT_S`
+escape hatch, but it has fired too often lately to be a local wedge, so
+`restart_guard.py` is holding the process before it exits.
 
 Building a health check on this: the frame-silence watchdog is **video-only**, so
 a camera whose audio has stopped still reports `state: "streaming"` with a fresh

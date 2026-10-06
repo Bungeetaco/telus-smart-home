@@ -148,6 +148,7 @@
           "connecting": "Connecting",
           "streaming": "Streaming",
           "reconnecting": "Reconnecting",
+          "no_media": "No media from camera",
           "restart_deferred": "Restart deferred"
         }
       },

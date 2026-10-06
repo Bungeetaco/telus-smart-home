@@ -7,6 +7,7 @@ import aiohttp
 
 from . import config as c
 from . import control_server
+from . import device_kick
 from . import memory_trace
 from . import restart_guard
 from .cloud_hold import CloudHeld, call_with_relogin
@@ -358,7 +359,14 @@ async def main():
             lambda camera: run_camera_forever(
                 telus, camera,
                 lambda t, cid: get_video_source_with_relogin(t, cid, login_lock),
-                camera_status))
+                camera_status,
+                # Device-side escalation for a wedged publish leg (backlog
+                # E103), inert unless DEVICE_KICK_ENABLED. Through the cloud
+                # hold like every other website call, so a held edge refuses
+                # the kick instead of the kick walking into the block.
+                kick_device=lambda cid: call_with_relogin(
+                    telus, login_lock, device_kick.cycle_live_resolution, cid,
+                    what=f"{cid}: device kick")))
 
         # Talkdown (two-way audio) manager, handed to the control server the same
         # way `lifecycle` is. Constructed only when the feature is enabled so it

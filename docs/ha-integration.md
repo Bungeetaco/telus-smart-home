@@ -885,10 +885,7 @@ routes; see [The Bluetooth disarming entities](#the-bluetooth-disarming-entities
 
 One `CameraSettingsCoordinator`, shared by all four platforms, polls
 `/control/cameras/{id}/settings` and `/control/cameras/{id}/diagnostics` per
-bridge-reported camera every **600 s** (120 s until 2026-10-05: at that rate
-it was the account's single largest request consumer, ~420 website reads an
-hour for two cameras, and the edge rate-limited the account twice in three
-days -- backlog E105).
+bridge-reported camera every **600 s**.
 
 That interval is deliberately slow. Each cycle is two bridge requests per camera
 and nine upstream TELUS reads behind them: four website settings documents
@@ -1223,7 +1220,7 @@ From `const.py` (timing and identity):
 | `CAMERA_DISCOVERY_POLL_INTERVAL_SECONDS` | 60 | Camera-list poll |
 | `VIDEO_EVENTS_POLL_INTERVAL_SECONDS` | 30 | Video-clip / activity poll |
 | `AUTOMATION_RULES_POLL_INTERVAL_SECONDS` | 300 | Automation-rule poll |
-| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 600 | Camera settings + diagnostics poll (120 until 2026-10-05, backlog E105) |
+| `CAMERA_SETTINGS_POLL_INTERVAL_SECONDS` | 600 | Camera settings + diagnostics poll; seven website reads per camera per cycle, the account's largest consumer at any shorter interval |
 | `CAMERA_DIAGNOSTICS_TIMEOUT_SECONDS` | 45 | Per-request timeout for the `/diagnostics` bridge read (the signal read alone can take ~25 s on some models); the `/settings` read keeps the shared 10 s default |
 | `ARMING_DEVICES_POLL_INTERVAL_SECONDS` | 900 | Bluetooth arming devices **and** the panel-wide Bluetooth settings poll |
 | `TALK_METRICS_POLL_INTERVAL_SECONDS` | 120 | Talkdown-counter poll (`/control/metrics`) |
@@ -1294,7 +1291,7 @@ container logs.
 
 | Entity | Platform | Device | State |
 | --- | --- | --- | --- |
-| **Stream state** | `sensor` (enum, diagnostic) | the camera device | `connecting`, `streaming`, `reconnecting`, or `restart_deferred` |
+| **Stream state** | `sensor` (enum, diagnostic) | the camera device | `connecting`, `streaming`, `reconnecting`, `no_media`, or `restart_deferred` |
 | **Dropped frames** | `sensor` (`total_increasing`, diagnostic) | the camera device | lifetime count of frames the bridge dropped for that camera |
 | **Audio state** | `sensor` (enum, diagnostic) | the camera device | `not_consuming`, `no_audio_yet`, `flowing`, or `stalled` |
 | **Camera bridge** | `binary_sensor` (connectivity, diagnostic) | the integration service device | **on** while the last `/control/status` poll got an answer out of the bridge |
@@ -1313,10 +1310,15 @@ from a coordinator listener (the same pattern as the camera platform), so a
 camera the bridge starts reporting later (or a bridge that comes up after HA)
 gets its sensors with no restart.
 
-**Stream state** pins the four states the bridge's `run_camera_forever` loop
-can report. `restart_deferred` is the most informative one: the camera hit the
-bridge's escape hatch, but `restart_guard` is holding the process before it
-exits. The vocabulary is owned by a separately-deployed bridge, so a state this
+**Stream state** pins the five states the bridge's `run_camera_forever` loop
+can report. `no_media` is the one to build an automation on: the camera keeps
+negotiating sessions and delivering no frames while another camera streams
+through the same bridge, which places the fault at the device (backlog E103;
+the bridge's own, opt-in, response is described in
+[camera-bridge.md](camera-bridge.md#device-side-escalation-device_kickpy)).
+`restart_deferred` means the camera hit the bridge's escape hatch, but
+`restart_guard` is holding the process before it exits. The vocabulary is
+owned by a separately-deployed bridge, so a state this
 build does not know degrades to **unknown** rather than erroring on every
 update, with the verbatim value still readable in the `raw_state` attribute.
 The supporting numbers ride along as attributes rather than more entities:

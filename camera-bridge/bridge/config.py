@@ -241,6 +241,28 @@ SESSION_WEDGE_TIMEOUT_S = 1800
 # hatch behaves exactly as it did before.
 SESSION_WEDGE_PEER_FRESH_S = 120
 
+# --- Device-side escalation (device_kick.py, backlog E103) ------------------
+# A failure run made of "no media after webrtcup" sessions WHILE a peer camera
+# keeps delivering is a fault at the device's own publish leg: nothing local is
+# wedged (the peer proves it) and the cloud path is up (ICE completed), so no
+# lever on this side can reach it. After this long in that state the camera's
+# status reads `no_media` instead of `reconnecting`, which is what an
+# automation can page on -- the longest such run seen was 22+ hours on
+# `reconnecting`. Short enough to be useful, long enough that the doorbell's
+# ordinary 30-60 s blips (which are the same signature and self-heal) never
+# reach it.
+NO_MEDIA_STATE_AFTER_S = float(os.environ.get("NO_MEDIA_STATE_AFTER_S", "300"))
+# Whether, once a camera has been in that state for DEVICE_KICK_AFTER_S, the
+# bridge cycles the camera's live-resolution setting through the settings API
+# to force an encoder reconfigure (device_kick.cycle_live_resolution). OFF by
+# default: the kick writes to a device in someone's home and whether it clears
+# the wedge is unverified. At most one kick per camera per
+# DEVICE_KICK_COOLDOWN_S, counted in /control/status (`device_kicks`).
+DEVICE_KICK_ENABLED = os.environ.get("DEVICE_KICK_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on")
+DEVICE_KICK_AFTER_S = float(os.environ.get("DEVICE_KICK_AFTER_S", "600"))
+DEVICE_KICK_COOLDOWN_S = float(os.environ.get("DEVICE_KICK_COOLDOWN_S", "1800"))
+
 # --- Restart-frequency guard for that escape hatch (see restart_guard.py) ---
 # The hatch is right for a one-off local wedge and wrong for a sustained
 # upstream failure: every failure looks identical from inside the reconnect

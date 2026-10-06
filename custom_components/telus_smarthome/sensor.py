@@ -99,7 +99,7 @@ SOLAR_PANEL_STATES = [SOLAR_PANEL_CONNECTED, SOLAR_PANEL_NOT_CONNECTED]
 # value outside this list (a future bridge with a new state) to None instead
 # of erroring, with the verbatim value still visible in its raw_state
 # attribute.
-STREAM_STATES = ["connecting", "streaming", "reconnecting", "restart_deferred"]
+STREAM_STATES = ["connecting", "streaming", "reconnecting", "no_media", "restart_deferred"]
 
 # The four states CameraAudioStateSensor can report. Pinned as named constants
 # for the same reason as SOLAR_PANEL_STATES/STREAM_STATES above, but note the
@@ -606,8 +606,11 @@ class _StreamHealthEntity(CoordinatorEntity[StreamHealthCoordinator], SensorEnti
 
 class CameraStreamStateSensor(_StreamHealthEntity):
     """Where one camera's video pipeline currently is in its lifecycle:
-    `connecting`, `streaming`, `reconnecting` or `restart_deferred` (the
-    bridge's escape hatch fired but restart_guard is holding the process).
+    `connecting`, `streaming`, `reconnecting`, `no_media` (the camera
+    negotiates sessions and delivers no frames while another camera streams
+    through the same bridge -- a fault at the device, which is what an
+    automation should page on) or `restart_deferred` (the bridge's escape
+    hatch fired but restart_guard is holding the process).
 
     The pipeline's supporting numbers ride along as attributes rather than as
     more entities -- fps in particular is an attribute BY DESIGN: it is the

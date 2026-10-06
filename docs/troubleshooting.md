@@ -235,27 +235,30 @@ get this wrong:
    server told it to*, restarting the rate-limit window instead of clearing
    it. This turned one bad night into a multi-hour outage.
 
-**The block does not always say 429 (2026-10-03 and 2026-10-05).** Twice in
-three days the edge refused the account for its stated `Retry-After: 1825`
-with **`403 Forbidden` on ordinary website GETs while the SSO login kept
-succeeding**. Every caller read the 403 as an expired cookie -- re-login,
-retry, 403 again, `502` to Home Assistant -- and the next poll did it all over:
-168 re-login warnings in one hour, `Camera discovery poll failed` every cycle,
-and **both camera streams down for the whole window**, because each session
-rotation needs one website call (the video-source fetch) and that call was
-walking into the block on the 2/4/8/30 s reconnect schedule. The container was
-`Up` with zero restarts and the bridge connectivity sensor stayed `on` the whole
-time: container state tells you nothing here, read the bridge log. The window
-closes on its own when the `Retry-After` elapses; restarting the bridge only
-adds a login to the limiter. Home Assistant's own session is on the same
-account and gets the same 403 (`KeepAlive.aspx`) within a couple of minutes.
+**The block does not always say 429.** The edge also refuses the account for
+its stated wait (observed: `Retry-After: 1825`) with **`403 Forbidden` on
+ordinary website GETs while the SSO login keeps succeeding**. Read as an
+expired cookie, that 403 produces re-login, retry, 403 again and a `502` to
+Home Assistant, and the next poll does it all over: on the order of 170
+re-login warnings an hour, `Camera discovery poll failed` every cycle, and
+**both camera streams down for the whole window**, because each session
+rotation needs one website call (the video-source fetch) and that call walks
+into the block on the 2/4/8/30 s reconnect schedule. The container stays `Up`
+with zero restarts and the bridge connectivity sensor stays `on` throughout:
+container state tells you nothing here, read the bridge log. The window closes
+on its own when the `Retry-After` elapses; restarting the bridge only adds a
+login to the limiter. Home Assistant's own session is on the same account and
+gets the same 403 (`KeepAlive.aspx`) within a couple of minutes. Both camera
+streams going down together is what separates this from a wedged camera (see
+[a camera that reaches `webrtcup` but never delivers a frame](#a-camera-reaches-webrtcup-but-never-delivers-a-frame)),
+which takes one camera down while the other streams.
 
 **Fix / design.**
 
 - **Honor `Retry-After`.** The bridge waits for the server-specified interval;
-  the cap on that wait is 2 hours (`RATE_LIMIT_RETRY_MAX_S`). It was 30
-  minutes until the 1825 s window above showed the clamp cutting 25 s off a
-  real wait, which is the early re-knock it exists to prevent.
+  the cap on that wait is 2 hours (`RATE_LIMIT_RETRY_MAX_S`), well above the
+  1825 s window above, because a cap under a real wait is itself an early
+  re-knock.
 - **Treat a 403 that survives a fresh login as the block it is.** The bridge's
   process-wide cloud hold (`cloud_hold.py`, backlog E104) stops every website
   call -- control routes, video-source fetches, discovery -- for 60 s, doubling
@@ -270,10 +273,11 @@ account and gets the same 403 (`KeepAlive.aspx`) within a couple of minutes.
   Lowering `update_interval` or the event poll to "catch up" trades directly
   against 429 exposure. Keep the poll at its default and accept the push design
   above. The account's steady-state budget is what causes the block in the
-  first place: the camera-settings poll was moved from 120 s to 600 s on
-  2026-10-05 because at 120 s it was the largest single consumer (~420 website
-  reads an hour for two cameras), and every TELUS-backed coordinator now pauses
-  for the bridge's `Retry-After` instead of re-polling into it (backlog E105).
+  first place: the camera-settings poll is 600 s because it is seven website
+  reads per camera per cycle (~420 reads an hour for two cameras at 120 s,
+  more than both 30 s event polls together), and every TELUS-backed
+  coordinator pauses for the bridge's `Retry-After` instead of re-polling into
+  it (backlog E105).
 
 > On the integration side, wrong-password vs. MFA-challenge vs. server-error is
 > deliberately differentiated at the *exception-type* level
@@ -422,12 +426,23 @@ escape hatch (see
 is deliberately vetoed while a peer camera is delivering (`no successful
 frame for Ns ... NOT restarting`): nothing local is wedged, so a container
 restart cannot reach the fault, and neither can any other lever the bridge
-has. Backlog E103 tracks device-side escalation.
+has. After `NO_MEDIA_STATE_AFTER_S` of this with the peer still delivering,
+the camera's `/control/status` state and its Home Assistant **Stream state**
+sensor read **`no_media`** instead of `reconnecting` -- that is the value to
+build an alert on, since the short blips of the same signature a weak Wi-Fi
+link produces (30-60 s, self-healing) never reach it. With
+`DEVICE_KICK_ENABLED` the bridge also cycles the camera's live-resolution
+setting once per `DEVICE_KICK_COOLDOWN_S` to force an encoder reconfigure, and
+records each attempt in the `device_kick*` status fields; see
+[camera-bridge.md](camera-bridge.md#device-side-escalation-device_kickpy)
+for what the kick writes and for its unverified status. Backlog E103.
 
 **Fix.** Confirm live view also fails in the vendor's own app, which isolates
-the device/cloud from this stack; then power-cycle the camera. Candidate
-remote kicks (cycling the camera's live-video-resolution setting to force an
-encoder reconfigure) are recorded in E103 and are so far unverified.
+the device/cloud from this stack; then power-cycle the camera. If the opt-in
+kick is enabled, `last_device_kick` says whether it was sent and what it did;
+a `failed: ... camera LEFT at ...` value means the restore write failed and
+the live resolution must be set back by hand through the settings route or the
+vendor app.
 
 ---
 

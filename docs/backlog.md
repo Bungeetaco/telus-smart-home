@@ -264,13 +264,15 @@ and evidence. Grouped by whether anything can actually be done about them.
   wedging briefly: in the 48 h to 2026-10-05 the HA stream-state sensor
   recorded ~79 doorbell drops of 30-60 s, plus a 17 min run (01:43 UTC) and an
   8 min run (15:05), every one the E103 signature (`webrtcup`, then `no frames
-  received before timeout`), while the living-room camera had seven. The
-  doorbell answers LAN pings at 160+ ms where every other VLAN-38 host answers
+  received before timeout`), while the indoor camera had seven. The doorbell
+  answers LAN pings at 160+ ms where every other host on the same LAN answers
   in under 10 ms, so the leading suspect is its Wi-Fi link rather than the
-  cloud. Nothing in this repo can fix that; what is open is (a) an access point
-  or placement change at the house and (b) E103's device-side escalation.
-  Recorded so the next "cameras are down" is not misread as the E104 edge
-  block, which takes BOTH cameras down together.
+  cloud. Nothing in this repo can fix that; what is open is an access point
+  or placement change on site. E103's `no_media` state and opt-in kick now
+  cover the long runs, and the short blips stay below
+  `NO_MEDIA_STATE_AFTER_S` by design. Recorded so the next "cameras are down"
+  is not misread as the E104 edge block, which takes BOTH cameras down
+  together.
 
 - **E106** (DONE 2026-10-05, integration) - the push websocket's reconnect
   backs off while connects keep FAILING. `pyalarmdotcomajax` fetches a fresh
@@ -349,7 +351,9 @@ and evidence. Grouped by whether anything can actually be done about them.
   budget (E105) is the leading suspect, and whether the blocks stop after
   E104-E106 land is the thing to watch.
 
-- **E103** (open, robustness) - a camera whose cloud publish leg wedges is
+- **E103** (PARTLY DONE: the `no_media` state and the opt-in kick are
+  shipped; the kick's effect on a wedged device is unverified; robustness) - a
+  camera whose cloud publish leg wedges is
   unreachable by every recovery lever the bridge has, and the bridge retries
   forever with nothing escalating to the device. Observed live for 22+ hours
   on the doorbell (2026-08-30/31): every attempt completed ICE and got
@@ -375,6 +379,34 @@ and evidence. Grouped by whether anything can actually be done about them.
   (`docs/web-portal-api-findings.md`). Until one exists the remedy is
   operator-side: confirm live view also fails in the vendor's own app (which
   isolates the device/cloud from this stack), then power-cycle the camera.
+
+  Shipped on 2026-10-06, two of the three candidates. (1) The `no_media`
+  state: `camera_session._is_no_media_failure` names the signature (the
+  first-frame wait expiring AFTER `webrtcup`, or a running session going
+  silent; ICE never coming up is excluded as the network's fault), and a
+  failure run of it lasting `NO_MEDIA_STATE_AFTER_S` (300 s) while a peer is
+  fresh sets `/control/status` `state: "no_media"`; the HA Stream state
+  sensor carries the value, so an automation can page on it. The threshold
+  sits above the doorbell's ordinary 30-60 s blips of the same signature
+  (E107). (2) The kick, `device_kick.cycle_live_resolution`: write the live
+  resolution to the first OTHER offered option, then back; through the cloud
+  hold (E104); opt-in via `DEVICE_KICK_ENABLED` (default false), after
+  `DEVICE_KICK_AFTER_S` (600 s) in `no_media`, once per
+  `DEVICE_KICK_COOLDOWN_S` (1800 s); every attempt counted in
+  `device_kicks` / `last_device_kick_at` / `last_device_kick`; an unsupported
+  camera is never written; a failed restore is CRITICAL and names the value
+  the camera was left at. Pinned in `tests/test_device_kick.py` and three
+  `test_camera_session.py` cases (needs both a healthy peer AND the
+  signature; exactly one kick per cooldown; off by default; a failing kick is
+  recorded and never ends the loop), and `tests/test_stream_health_sensors.py`
+  for the sensor vocabulary. (3) A device reboot command: still none in
+  pyalarmdotcomajax 0.5.13 and not surveyed on the portal. **What stays
+  open:** whether the resolution cycle actually clears a wedged publisher.
+  The wedge has not recurred since the kick was written, so it has never run
+  against one; the next occurrence is the live test (enable the kick, watch
+  `last_device_kick` and whether `last_frame_at` moves within the next
+  rotation). Until then the kick stays off by default and this entry stays
+  partly done.
 
 - **E102** (open, small, ops) - the stack watcher fails a sample whenever the
   talkdown `failed` counter is NONZERO, but that counter is cumulative per

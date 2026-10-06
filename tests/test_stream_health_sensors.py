@@ -262,6 +262,23 @@ def test_stream_state_degrades_an_unknown_vocabulary():
     print("  ok  stream state: an unknown state degrades to None, verbatim in raw_state")
 
 
+def test_stream_state_reports_no_media():
+    """`no_media` is the one state built to be paged on.
+
+    The bridge reports it for a camera that negotiates sessions and delivers
+    no frames while another camera streams through the same process (a fault
+    at the device, backlog E103). If this build did not know the word it would
+    degrade to unknown like any other -- and an automation triggering on the
+    state would never fire, which is the exact failure the state exists to
+    end. So the vocabulary must carry it, as a reportable value."""
+    coordinator = make_coordinator()
+    entity = CameraStreamStateSensor(coordinator, CAMERA_ID)
+    assert "no_media" in STREAM_STATES
+    assert poll(entity, coordinator, {CAMERA_ID: status(state="no_media")}) == "no_media"
+    assert entity.extra_state_attributes["raw_state"] == "no_media"
+    print("  ok  stream state: no_media is reported, not degraded to unknown")
+
+
 def test_stream_state_unavailable_when_the_camera_is_dropped():
     coordinator = make_coordinator()
     entity = CameraStreamStateSensor(coordinator, CAMERA_ID)
@@ -600,6 +617,7 @@ def main():
         test_failed_poll_raises_update_failed,
         test_stream_state_maps_the_payload,
         test_stream_state_degrades_an_unknown_vocabulary,
+        test_stream_state_reports_no_media,
         test_stream_state_unavailable_when_the_camera_is_dropped,
         test_dropped_frames_maps_the_payload,
         test_dropped_frames_tolerates_missing_and_null,

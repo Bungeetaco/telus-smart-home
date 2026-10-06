@@ -379,8 +379,30 @@ class RateWatcher:
         return wanted
 
 
-async def run_camera_forever(telus, camera: dict, get_video_source, status: dict):
+def _is_no_media_failure(exc: BaseException) -> bool:
+    """Is this failure the device-side signature: a session that negotiated
+    and then delivered no media? Either the first-frame wait expiring AFTER
+    `webrtcup` (the E103 shape) or a running session going silent. ICE never
+    coming up is deliberately NOT included: that is the network or the cloud
+    path, which the device cannot be blamed for."""
+    message = str(exc)
+    if message.startswith("no frames received before timeout"):
+        return "webrtcup seen" in message
+    return message.startswith("no frame for ")
+
+
+async def run_camera_forever(telus, camera: dict, get_video_source, status: dict,
+                             kick_device=None):
+    """The per-camera loop. `kick_device(camera_id)`, when given, is the
+    device-side escalation for a camera whose publish leg has wedged
+    (device_kick.cycle_live_resolution, already routed through the cloud hold
+    by main.py); it is only ever called with DEVICE_KICK_ENABLED, after
+    DEVICE_KICK_AFTER_S in the `no_media` state, at most once per
+    DEVICE_KICK_COOLDOWN_S."""
     backoff = c.RECONNECT_BACKOFF_INITIAL_S
+    # Monotonic time of the last device kick, so the cooldown is measured from
+    # the kick rather than from the run's start; None until one has been sent.
+    last_kick_at: float | None = None
     consecutive_failures = 0  # reset on any successful frame batch. Reported in
     # /control/status and useful for reading the log; it is NOT what arms the
     # os._exit() escape hatch in the except block below -- see failing_since.
@@ -421,6 +443,9 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         "state": "connecting", "consecutive_failures": 0, "last_frame_at": None,
         "fps": None, "hardware_encode": None, "last_error": None,
         "dropped_frames": 0,
+        # Device-side escalation (device_kick.py): kicks sent since process
+        # start, the wall-clock time of the last one, and what it reported.
+        "device_kicks": 0, "last_device_kick_at": None, "last_device_kick": None,
         # Audio fields are deliberately SEPARATE from fps/dropped_frames rather
         # than folded into them: those two are a documented /control/status
         # contract about the video stream, and a caller that has always read
@@ -474,6 +499,32 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
 
     def _update_status(**fields):
         status[camera_id].update(fields)
+
+    async def _kick_device(wedged_for: float) -> None:
+        """Send one device kick and record it, whatever happens.
+
+        Never raises into the reconnect loop: a kick that fails is logged and
+        counted, and the loop goes on retrying the session exactly as before.
+        A RateLimited (the cloud hold refusing the call) is not an error of
+        the kick's own; it is logged at INFO and the cooldown still applies, so
+        a held edge is not probed once per failed session."""
+        log.warning("%s: no media for %.0fs with a healthy peer; sending a device kick "
+                    "(DEVICE_KICK_ENABLED)", camera["id"], wedged_for)
+        try:
+            result = await kick_device(camera["id"])
+        except RateLimited as kick_exc:
+            log.info("%s: device kick not sent: %s", camera["id"], kick_exc)
+            _update_status(last_device_kick=f"not sent: {kick_exc}")
+            return
+        except Exception as kick_exc:  # noqa: BLE001 -- every outcome is recorded
+            log.exception("%s: device kick failed", camera["id"])
+            _update_status(device_kicks=status[camera_id]["device_kicks"] + 1,
+                           last_device_kick_at=time.time(),
+                           last_device_kick=f"failed: {kick_exc!r}")
+            return
+        _update_status(device_kicks=status[camera_id]["device_kicks"] + 1,
+                       last_device_kick_at=time.time(),
+                       last_device_kick=f"ok: {result}")
 
     def _peer_still_delivering() -> bool:
         """Is ANOTHER camera in this process producing frames right now?
@@ -1617,6 +1668,26 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                               "" if rate_limited else f", reconnecting in {backoff}s")
                 wedged_for = (None if failing_since is None
                               else time.monotonic() - failing_since)
+                # The device-side fault (backlog E103): this camera negotiates
+                # and gets no media while a peer keeps delivering through the
+                # same process. Past NO_MEDIA_STATE_AFTER_S the state says so,
+                # instead of `reconnecting` forever, and -- only when the
+                # operator has opted in -- the device is kicked through its
+                # own settings API, once per cooldown. Read before the hatch
+                # below on purpose: the hatch asks "is this PROCESS wedged"
+                # and the peer answers no; this asks "is the DEVICE wedged".
+                if (wedged_for is not None
+                        and wedged_for >= c.NO_MEDIA_STATE_AFTER_S
+                        and _is_no_media_failure(exc)
+                        and _peer_still_delivering()):
+                    _update_status(state="no_media")
+                    if (kick_device is not None and c.DEVICE_KICK_ENABLED
+                            and wedged_for >= c.DEVICE_KICK_AFTER_S
+                            and (last_kick_at is None
+                                 or time.monotonic() - last_kick_at
+                                 >= c.DEVICE_KICK_COOLDOWN_S)):
+                        last_kick_at = time.monotonic()
+                        await _kick_device(wedged_for)
                 if (wedged_for is not None
                         and wedged_for >= c.SESSION_WEDGE_TIMEOUT_S
                         and _peer_still_delivering()):

@@ -598,25 +598,31 @@ sleeps for that stated wait via `config.rate_limit_sleep_s`, **not** the fixed
 `2/4/8/16/30s` backoff, because a short fixed schedule just re-enters the same
 rate-limit window instead of clearing it (this compounding is what turned one
 incident into a multi-hour outage). The sleep is clamped only by
-`RATE_LIMIT_RETRY_MAX_S` (2 h; it was 30 min until the edge answered
-`Retry-After: 1825` and the clamp quietly cut 25 s off it) as a guard against an
-absurd header value, plus a small margin. A rate-limit failure is also **not**
-counted toward the consecutive-failure escape hatch, since restarting the
-container only re-runs the login and re-triggers the window.
+`RATE_LIMIT_RETRY_MAX_S` (2 h) as a guard against an absurd header value, plus
+a small margin. The cap sits well above every real window seen (~101 s on the
+login gateway, 1825 s on the website API) on purpose: a cap under a real
+window has the bridge back before it was told, which re-opens the window. A
+rate-limit failure is also **not** counted toward the consecutive-failure
+escape hatch, since restarting the container only re-runs the login and
+re-triggers the window.
 
 ## The cloud hold (`cloud_hold.py`)
 
-The edge does not always say 429. On 2026-10-03 and 2026-10-05 it refused the
-account for its stated ~30 min with **`403 Forbidden` on ordinary website GETs
-while the SSO login kept succeeding**, which every caller read as an expired
-cookie: re-login, retry, 403 again, 502 to Home Assistant, and the next poll
-did it all over -- 168 re-login warnings in an hour, both camera streams down
-for the window because each session rotation needs one website call.
+The edge does not always say 429. It also refuses the account for its stated
+wait (~30 min observed) with **`403 Forbidden` on ordinary website GETs while
+the SSO login keeps succeeding**. Read as an expired cookie, that 403 produces
+the worst possible response: re-login, retry, 403 again, 502 to Home
+Assistant, and the next poll does it all over -- on the order of 170 re-login
+warnings an hour, and both camera streams down for the whole window because
+each session rotation needs one website call. The container stays `Up` with
+zero restarts throughout, so container state says nothing; the bridge log
+does.
 
 `cloud_hold.HOLD` is the one process-wide answer to "is the edge refusing us
 right now", and `cloud_hold.call_with_relogin` is the one path every website
 call takes (the control routes through `_fetch_with_relogin`, the camera
-loops through `main.get_video_source_with_relogin`, and the discovery poll):
+loops through `main.get_video_source_with_relogin`, the discovery poll, and
+the device kick below):
 
 - a 401/403 that a fresh login **fixes** costs what it always did -- one
   login, one retry, no hold;
@@ -637,6 +643,59 @@ branch instead of walking the 2/4/8/30 s schedule into the limiter. The hold
 only ever delays website calls; it never touches the login itself and an
 expired hold costs nothing. The mobile (MWS) session's reads are not routed
 through it -- they absorb a rate limit per read already. Backlog E104.
+
+The log says `Holding every TELUS website call for Ns: ...` once per hold and
+`cloud hold cleared` when a website call next succeeds; held control calls are
+logged at debug only, since a poller that has not yet read the `Retry-After`
+asks again every cycle.
+
+## Device-side escalation (`device_kick.py`)
+
+One fault the bridge can prove is not its own: a camera whose every session
+completes ICE and gets `webrtcup`, then delivers no media, **while another
+camera keeps streaming through the same process**. The peer's frames prove
+the process can still negotiate, decode, encode and publish; the completed
+ICE proves the cloud path is up; what is failing is the device's own publish
+leg, where no lever on this side -- reconnect, rotation, the restart hatch --
+reaches. A camera has been observed in that state for 22+ hours while
+answering every other cloud call normally (backlog E103).
+
+`camera_session.py` names it. Once a failure run has consisted of that
+signature (`_is_no_media_failure`: the first-frame wait expiring after
+`webrtcup`, or a running session going silent -- ICE never coming up is
+deliberately excluded, that is the network or the cloud) for
+`NO_MEDIA_STATE_AFTER_S` with a peer still fresh, the camera's
+`/control/status` state reads **`no_media`** instead of `reconnecting`, and
+stays there until a frame arrives. That is the state the Home Assistant stream
+sensor exposes for an automation to page on; it costs nothing and is always on.
+
+The kick is opt-in (`DEVICE_KICK_ENABLED`, default off). After
+`DEVICE_KICK_AFTER_S` in `no_media`, and at most once per
+`DEVICE_KICK_COOLDOWN_S` per camera, the loop calls
+`device_kick.cycle_live_resolution`: read the camera's video configuration,
+write the live-stream resolution to a different offered option, then write the
+original back -- an encoder reconfigure at the device, through the only path
+the cloud offers (the camera settings API; the mobile API exposes no reboot
+command). It runs through the cloud hold like every website call, so a held
+edge refuses it rather than the kick walking into a block.
+
+**What is known and what is not.** The write itself is the same
+read-modify-write the settings control route uses, and the restore of the
+original value is verified by test. **Whether the cycle clears the wedge is
+unverified**: the wedge has not recurred since the kick was written, so it has
+never been applied to a wedged device. That is why it is off by default, and
+why every attempt is recorded in `/control/status` (`device_kicks`,
+`last_device_kick_at`, `last_device_kick`) and logged at warning: the next
+occurrence is the live test, and the status fields are its record.
+
+Failure handling, because this writes to a device in someone's home: a camera
+that offers fewer than two resolution options, or whose document says the
+option is not settable, is never written (`DeviceKickUnsupported`); a failed
+first write changes nothing; a failed **restore** leaves the camera at the
+alternate resolution and says so at CRITICAL, in the exception, and in
+`last_device_kick` (`failed: ... camera LEFT at ...`), so a silently
+re-configured camera is impossible. A kick that fails never ends the camera
+loop; the loop records it and keeps reconnecting.
 
 ## Login serialization
 

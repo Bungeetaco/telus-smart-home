@@ -64,7 +64,10 @@ implementation of the SSO handoff:
   session code. All subsequent REST/websocket calls point at the TELUS host.
 - **Bridge:** `bridge/telus_auth.py` is a separate, dependency-free
   reimplementation of the same OAuth/cookie dance, holding its own `aiohttp`
-  session.
+  session. Every website call the bridge makes on that session goes through
+  `bridge/cloud_hold.py`, the one process-wide answer to "is the edge refusing
+  this account right now" (see
+  [camera-bridge.md](camera-bridge.md#the-cloud-hold-cloud_holdpy)).
 
 This backend serves **panel/lock/sensor state** (integration), the **live-video
 source descriptors** (Janus gateway URL, token, ICE servers) that the bridge

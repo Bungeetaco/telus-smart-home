@@ -5593,7 +5593,149 @@ async def test_audio_normalization_is_in_process_and_shapes_the_pcm():
     assert fs.build_audio_shaper(None) is None
 
 
+NO_MEDIA = RuntimeError("no frames received before timeout "
+                        "(waited 20.0s of 20.0s; webrtcup seen before the wait)")
+
+
+def _start_with_kick(ctx, kicks):
+    """Start the loop with a kick callback that records each call."""
+    async def kick(camera_id):
+        kicks.append((camera_id, time.monotonic()))
+        return {"restored": "1440x1440", "via": "480x480"}
+
+    ctx.task = asyncio.ensure_future(
+        cs.run_camera_forever(None, CAMERA, ctx.get_video_source, ctx.status,
+                              kick_device=kick))
+    return ctx.task
+
+
+async def test_a_long_no_media_run_with_a_healthy_peer_reads_no_media_and_kicks_once():
+    """The device-side fault (E103), made visible and acted on.
+
+    A camera that negotiates every session and delivers no media while a peer
+    keeps streaming through the same process is wedged at ITS end, and the
+    bridge sat on `reconnecting` for 22+ hours of that once. Past
+    NO_MEDIA_STATE_AFTER_S the state must say `no_media`, and with the kick
+    opted in it must be sent exactly once per DEVICE_KICK_COOLDOWN_S -- a kick
+    per failed session would be a settings write every few seconds against a
+    device in someone's home, and against a rate-limited account.
+    """
+    peer = "111937238-9999"
+    kicks = []
+    with scenario([Plan(connect_error=NO_MEDIA)] * 60,
+                  NO_MEDIA_STATE_AFTER_S=0.3, DEVICE_KICK_ENABLED=True,
+                  DEVICE_KICK_AFTER_S=0.3, DEVICE_KICK_COOLDOWN_S=999,
+                  SESSION_WEDGE_TIMEOUT_S=999, SESSION_WEDGE_PEER_FRESH_S=999) as ctx:
+        ctx.status[peer] = {"state": "streaming", "last_frame_at": time.time()}
+        _start_with_kick(ctx, kicks)
+        await run_until(ctx, lambda x: x.state.get("device_kicks", 0) >= 1
+                        and x.state.get("consecutive_failures", 0) >= 8,
+                        timeout=20.0, why="a long no-media run past the kick threshold")
+        state = dict(ctx.state)
+        await stop(ctx)
+
+    assert state["state"] == "no_media", (
+        f"a no-media run with a healthy peer must read no_media, not {state['state']!r}")
+    assert len(kicks) == 1 and kicks[0][0] == CAMERA["id"], (
+        f"exactly one kick inside the cooldown, got {len(kicks)}")
+    assert state["device_kicks"] == 1 and state["last_device_kick"].startswith("ok:"), state
+    assert state["last_device_kick_at"] is not None
+    print("  ok  no media + healthy peer: state no_media, one kick per cooldown, recorded")
+
+
+async def test_no_media_needs_a_healthy_peer_and_the_signature():
+    """Both halves of the discriminator, each on its own.
+
+    Without a peer the same run could be the process wedged or the cloud
+    down; it stays `reconnecting` and nothing is kicked (restarting a device
+    for a fault that is not its own is the wrong lever). And a run of failures
+    that are NOT the no-media signature -- ICE never coming up, a dead frame
+    stream -- is the network or the cloud, never the device, however long it
+    lasts beside a healthy peer.
+    """
+    kicks = []
+    with scenario([Plan(connect_error=NO_MEDIA)] * 60,
+                  NO_MEDIA_STATE_AFTER_S=0.3, DEVICE_KICK_ENABLED=True,
+                  DEVICE_KICK_AFTER_S=0.3, DEVICE_KICK_COOLDOWN_S=999,
+                  SESSION_WEDGE_TIMEOUT_S=999) as ctx:
+        _start_with_kick(ctx, kicks)   # no peer in ctx.status
+        await run_until(ctx, lambda x: x.state.get("consecutive_failures", 0) >= 8,
+                        timeout=20.0, why="a no-media run with no peer")
+        state = dict(ctx.state)
+        await stop(ctx)
+    assert state["state"] == "reconnecting", state["state"]
+    assert kicks == [] and state["device_kicks"] == 0, "no peer: no kick"
+
+    peer = "111937238-9999"
+    other = Plan(connect_error=RuntimeError("no frames received before timeout "
+                                            "(waited 20.0s of 20.0s; webrtcup NOT seen "
+                                            "before the wait)"))
+    with scenario([other] * 60,
+                  NO_MEDIA_STATE_AFTER_S=0.3, DEVICE_KICK_ENABLED=True,
+                  DEVICE_KICK_AFTER_S=0.3, DEVICE_KICK_COOLDOWN_S=999,
+                  SESSION_WEDGE_TIMEOUT_S=999, SESSION_WEDGE_PEER_FRESH_S=999) as ctx:
+        ctx.status[peer] = {"state": "streaming", "last_frame_at": time.time()}
+        _start_with_kick(ctx, kicks)
+        await run_until(ctx, lambda x: x.state.get("consecutive_failures", 0) >= 8,
+                        timeout=20.0, why="an ICE-never-up run beside a healthy peer")
+        state = dict(ctx.state)
+        await stop(ctx)
+    assert state["state"] == "reconnecting", (
+        f"ICE never coming up is not the device's fault: {state['state']!r}")
+    assert kicks == [], "not the signature: no kick"
+    print("  ok  no_media needs BOTH a healthy peer and the no-media signature")
+
+
+async def test_the_kick_is_off_by_default_and_its_failure_is_recorded():
+    """Inert unless opted in, and never able to take the loop down.
+
+    DEVICE_KICK_ENABLED defaults to false: the state still reads `no_media`
+    (that costs nothing and pages the operator) but no settings write is
+    made. And when a kick raises, the loop records the failure in the status
+    and keeps reconnecting: an escalation that crashed the camera loop would
+    be worse than the wedge.
+    """
+    peer = "111937238-9999"
+    kicks = []
+    with scenario([Plan(connect_error=NO_MEDIA)] * 60,
+                  NO_MEDIA_STATE_AFTER_S=0.3, DEVICE_KICK_ENABLED=False,
+                  DEVICE_KICK_AFTER_S=0.3, DEVICE_KICK_COOLDOWN_S=999,
+                  SESSION_WEDGE_TIMEOUT_S=999, SESSION_WEDGE_PEER_FRESH_S=999) as ctx:
+        ctx.status[peer] = {"state": "streaming", "last_frame_at": time.time()}
+        _start_with_kick(ctx, kicks)
+        await run_until(ctx, lambda x: x.state.get("consecutive_failures", 0) >= 8,
+                        timeout=20.0, why="a no-media run with the kick disabled")
+        state = dict(ctx.state)
+        await stop(ctx)
+    assert state["state"] == "no_media" and kicks == [] and state["device_kicks"] == 0, (
+        f"disabled: no_media is still reported, nothing is written: {state}")
+
+    async def failing_kick(camera_id):
+        raise RuntimeError("TELUS returned HTTP 500")
+
+    with scenario([Plan(connect_error=NO_MEDIA)] * 60,
+                  NO_MEDIA_STATE_AFTER_S=0.3, DEVICE_KICK_ENABLED=True,
+                  DEVICE_KICK_AFTER_S=0.3, DEVICE_KICK_COOLDOWN_S=999,
+                  SESSION_WEDGE_TIMEOUT_S=999, SESSION_WEDGE_PEER_FRESH_S=999) as ctx:
+        ctx.status[peer] = {"state": "streaming", "last_frame_at": time.time()}
+        ctx.task = asyncio.ensure_future(
+            cs.run_camera_forever(None, CAMERA, ctx.get_video_source, ctx.status,
+                                  kick_device=failing_kick))
+        await run_until(ctx, lambda x: x.state.get("device_kicks", 0) >= 1
+                        and x.state.get("consecutive_failures", 0) >= 8,
+                        timeout=20.0, why="a failing kick")
+        state = dict(ctx.state)
+        still_running = not ctx.task.done()
+        await stop(ctx)
+    assert still_running, "a failing kick must not end the camera loop"
+    assert state["device_kicks"] == 1 and state["last_device_kick"].startswith("failed:"), state
+    print("  ok  kick: off by default; a failing kick is recorded and the loop goes on")
+
+
 TESTS = [
+    test_a_long_no_media_run_with_a_healthy_peer_reads_no_media_and_kicks_once,
+    test_no_media_needs_a_healthy_peer_and_the_signature,
+    test_the_kick_is_off_by_default_and_its_failure_is_recorded,
     test_rotation_keeps_one_publisher,
     test_rotation_deadline_survives_total_frame_silence,
     test_silence_before_the_deadline_is_a_failure,
