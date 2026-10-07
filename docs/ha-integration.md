@@ -1332,7 +1332,11 @@ ffmpeg complains), `rate_pending` (a confirmed rate change waiting for the
 rotation that applies it), `duplicated_frame_warnings` (ffmpeg's own count of
 `frames duplicated` stderr warnings, the encoder-side corroboration of a
 too-high declaration), `consecutive_failures`, `last_error`, `last_frame_at`,
-and `raw_state`.
+the device-side escalation's record -- `device_kicks`, `last_device_kick_at`
+and `last_device_kick` (`ok: ...`, `failed: ...` or `not sent: ...`, the
+bridge's `/control/status` fields of the same names; an automation that
+triggers on `last_device_kick` changing is how a kick's outcome reaches a
+phone) -- and `raw_state`.
 
 **Dropped frames** counts frames discarded because the consumer fell behind the
 decoder: a sustained climb is a quietly-degrading stream that otherwise only

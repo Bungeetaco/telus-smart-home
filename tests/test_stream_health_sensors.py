@@ -227,9 +227,24 @@ def test_stream_state_maps_the_payload():
 
     poll(entity, coordinator, {CAMERA_ID: status(state="reconnecting",
                                                  consecutive_failures=2,
-                                                 last_error="ice failed")})
+                                                 last_error="ice failed",
+                                                 device_kicks=1,
+                                                 last_device_kick_at=1791219661,
+                                                 last_device_kick="ok: {'restored': '1440x1440'}")})
     assert entity.native_value == "reconnecting"
     attrs = entity.extra_state_attributes
+    # The device kick's record must ride along verbatim: an automation
+    # triggering on `last_device_kick` changing is the only way a kick's
+    # outcome reaches a phone, and a bridge that predates the field reads None
+    # rather than being fabricated as "no kick".
+    assert attrs["device_kicks"] == 1
+    assert attrs["last_device_kick_at"] == 1791219661
+    assert attrs["last_device_kick"] == "ok: {'restored': '1440x1440'}"
+    assert CameraStreamStateSensor(coordinator, CAMERA_ID).extra_state_attributes is not None
+    poll(entity, coordinator, {CAMERA_ID: {k: v for k, v in status().items()
+                                          if not k.startswith(("device_kick", "last_device_kick"))}})
+    assert entity.extra_state_attributes["last_device_kick"] is None, (
+        "a bridge without the field must read None, not a fabricated value")
     assert attrs["fps"] == 15
     assert attrs["measured_fps"] == 14, (
         "the DELIVERED rate must ride beside the declared one -- the gap "

@@ -658,6 +658,16 @@ class CameraStreamStateSensor(_StreamHealthEntity):
             "consecutive_failures": status.get("consecutive_failures"),
             "last_error": status.get("last_error"),
             "last_frame_at": status.get("last_frame_at"),
+            # The device-side escalation's record (bridge device_kick.py): how
+            # many kicks this bridge run has sent for the camera, when the last
+            # one was, and what it reported ("ok: ...", "failed: ...", "not
+            # sent: ..."). Attributes rather than entities because they only
+            # change on the rare no_media run, and an automation triggering on
+            # `last_device_kick` changing is the way the outcome reaches a
+            # phone. None on a bridge that predates them.
+            "device_kicks": status.get("device_kicks"),
+            "last_device_kick_at": status.get("last_device_kick_at"),
+            "last_device_kick": status.get("last_device_kick"),
             # The bridge's verbatim state, so a future value this build maps
             # to None is still visible rather than silently indistinguishable
             # from "no data".

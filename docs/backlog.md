@@ -406,7 +406,12 @@ and evidence. Grouped by whether anything can actually be done about them.
   against one; the next occurrence is the live test (enable the kick, watch
   `last_device_kick` and whether `last_frame_at` moves within the next
   rotation). Until then the kick stays off by default and this entry stays
-  partly done.
+  partly done. The Stream state sensor carries `device_kicks`,
+  `last_device_kick_at` and `last_device_kick` as attributes, so a phone
+  automation can trigger on the outcome; on the reference deployment the kick
+  is enabled and three automations push the no_media entry, each kick result
+  and the recovery to the phone under one notification tag, which is how the
+  next occurrence gets observed.
 
 - **E102** (open, small, ops) - the stack watcher fails a sample whenever the
   talkdown `failed` counter is NONZERO, but that counter is cumulative per
