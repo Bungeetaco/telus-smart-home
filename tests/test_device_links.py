@@ -23,11 +23,15 @@ noticed by someone looking for it.
 Pinned here: that `DeviceInfo` carries `via_device_id` (the partition's
 registry id, scoped to the owning config entry) and never the deprecated
 identifier form; that a device whose partition has no registry entry yet comes
-up UNLINKED rather than failing to build; that the partition device itself
-never links to itself; that a device with no partition carries no link; and the
-same resolution for a paired phone against the integration service device.
+up UNLINKED rather than failing to build, and that the warning for it is
+logged ONCE PER PARTITION per controller rather than once per entity (every
+sensor, lock and attribute entity behind the partition would otherwise emit
+its own line); that the partition device itself never links to itself; that a
+device with no partition carries no link; and the same resolution for a paired
+phone against the integration service device.
 """
 import asyncio
+import logging
 import pathlib
 import sys
 import types
@@ -53,7 +57,9 @@ def make_controller(entry, devices=()):
     hass.data["device_registry"] = FakeDeviceRegistry(list(devices))
     return types.SimpleNamespace(
         hass=hass, config_entry=entry,
-        update_coordinator=ha_stubs.DataUpdateCoordinator(hass))
+        update_coordinator=ha_stubs.DataUpdateCoordinator(hass),
+        # The real controller creates this set in __init__ (controller.py).
+        unlinked_partitions_warned=set())
 
 
 def lib_device(device_id, partition_id):
@@ -95,6 +101,51 @@ async def test_device_with_no_partition_entry_yet_comes_up_unlinked():
         f"device_info {dict(info)!r}: no partition device means no link, not a "
         "dangling one")
     assert info["identifiers"] == {(DOMAIN, SENSOR_ID)}
+
+
+class _Capture(logging.Handler):
+    """Collects the records the integration's base_device logger emits."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+async def test_missing_partition_is_warned_once_per_partition_not_per_entity():
+    """The by-design-unreachable path above, reached anyway: one WARNING per
+    missing partition per controller, not one per entity behind it. Nothing
+    about the extra lines errors; they just turn one unlinked partition into a
+    wall of identical warnings at setup."""
+    entry = FakeConfigEntry(entry_id="entryA")
+    controller = make_controller(entry, [])
+    logger = logging.getLogger("custom_components.telus_smarthome.base_device")
+    capture = _Capture()
+    logger.addHandler(capture)
+    try:
+        first = HardwareBaseDevice(controller, lib_device(SENSOR_ID, PARTITION_ID))
+        second = HardwareBaseDevice(controller, lib_device("123-457", PARTITION_ID))
+        # A different missing partition on the same controller is its own line.
+        other = HardwareBaseDevice(controller, lib_device("123-458", "123-2"))
+    finally:
+        logger.removeHandler(capture)
+
+    for entity in (first, second, other):
+        assert "via_device_id" not in entity._attr_device_info, (
+            f"device_info {dict(entity._attr_device_info)!r}: still unlinked, never a dangling link")
+
+    warnings = [r for r in capture.records if r.levelno >= logging.WARNING]
+    about_first = [r for r in warnings if PARTITION_ID in r.getMessage()]
+    assert len(about_first) == 1, (
+        f"two entities behind one missing partition must log ONE warning, got "
+        f"{len(about_first)}: {[r.getMessage() for r in about_first]}")
+    assert len(warnings) == 2, (
+        f"a second missing partition is a second warning, got {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]}")
+    assert controller.unlinked_partitions_warned == {PARTITION_ID, "123-2"}, (
+        "the dedupe lives on the controller, so a reload (a new controller) reports again")
 
 
 async def test_partition_never_links_to_itself_and_no_partition_means_no_link():
@@ -139,6 +190,7 @@ async def test_arming_device_links_to_the_service_device_by_registry_id():
 TESTS = (
     test_device_links_to_its_partition_by_registry_id,
     test_device_with_no_partition_entry_yet_comes_up_unlinked,
+    test_missing_partition_is_warned_once_per_partition_not_per_entity,
     test_partition_never_links_to_itself_and_no_partition_means_no_link,
     test_arming_device_links_to_the_service_device_by_registry_id,
 )

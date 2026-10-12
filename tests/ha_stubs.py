@@ -37,8 +37,9 @@ compatibility with Home Assistant. Two things narrow that gap deliberately:
 reads off it. `controller.py` is stubbed WHOLESALE, because importing it applies
 the websocket monkeypatch and drags the real library in; `sensor.py` uses it as
 a type annotation only, and the patch itself is already guarded at import time
-and exercised by CI's `check_patch.py` job. The one suite that pins the
-controller's own behaviour loads the real file through `load_real_controller()`.
+and exercised by CI's `check_patch.py` job. Two suites load a real file over
+those stubs: the controller's session suite through `load_real_controller()`,
+the login's 2FA-probe suite through `load_real_auth_patch()`.
 
 Usage, from a suite in this directory:
 
@@ -52,6 +53,8 @@ import asyncio
 import dataclasses
 import enum
 import importlib
+import importlib.util
+import logging
 import pathlib
 import sys
 import types
@@ -1074,6 +1077,69 @@ def load_real_controller() -> types.ModuleType:
     name = "custom_components.telus_smarthome.controller"
     sys.modules.pop(name, None)
     return importlib.import_module(name)
+
+
+def load_real_auth_patch() -> types.ModuleType:
+    """Load the real `telus_auth_patch.py` against the library stub.
+
+    `install()` stubs the three import-time patch modules because each one
+    patches the real pyalarmdotcomajax, which is not installed here. A suite
+    that pins the replacement login's OWN decisions (what it does with the
+    2FA-requirements probe's answer) needs the real file, so this gives the
+    library stub the names the module reads at import -- the class attributes
+    its compatibility guard checks, the two `const` values it rewrites, the
+    Skybell extension's `ENDPOINT`, `NotAuthorized` -- and loads the file by
+    path under its own name, leaving the stub in place for every other suite.
+    Same model as `load_real_controller()`.
+
+    The stand-in `AlarmController._async_handle_server_errors` reproduces the
+    one upstream behaviour the suite leans on and nothing else: a body with
+    `errors` is logged at ERROR with a traceback on the library's logger and
+    raised as `NotAuthorized` (upstream's "423" case, the one this
+    white-label answers on every login), and a body without errors returns.
+    Every call is RECORDED in `AlarmController.server_error_calls`, which is
+    what lets a suite assert that a body never reached it. The login itself
+    is the patch's; the stub's `async_login` only proves it was replaced.
+    Call after `install()`.
+    """
+    lib = sys.modules["pyalarmdotcomajax"]
+    exceptions = sys.modules["pyalarmdotcomajax.exceptions"]
+    if not hasattr(exceptions, "NotAuthorized"):
+        exceptions.NotAuthorized = type("NotAuthorized", (AlarmdotcomException,), {})
+    const = sys.modules["pyalarmdotcomajax.const"]
+    const.URL_BASE = "https://www.alarm.com/"
+    const.IDENTITIES_URL_TEMPLATE = "{}web/api/identities{}"
+    library_log = logging.getLogger("pyalarmdotcomajax")
+
+    class AlarmController:
+        SESSION_REFRESH_DEFAULT_INTERVAL_MS = 780000
+        KEEP_ALIVE_DEFAULT_URL = "{}web/KeepAlive.aspx"
+        LOGIN_2FA_DETAIL_URL_TEMPLATE = (
+            "{}web/api/engines/twoFactorAuthentication/twoFactorAuthentications/{}")
+        server_error_calls: list[tuple[Any, str]] = []
+
+        async def async_login(self) -> None:
+            raise AssertionError("the patch must have replaced AlarmController.async_login")
+
+        async def _async_handle_server_errors(self, json_rsp: Any, request_name: str,
+                                              retry_on_failure: bool = False) -> None:
+            type(self).server_error_calls.append((json_rsp, request_name))
+            if not json_rsp.get("errors", []):
+                return
+            library_log.exception(
+                "Got a processing error when trying to request %s.", request_name)
+            raise exceptions.NotAuthorized
+
+    lib.AlarmController = AlarmController
+    extensions = sys.modules["pyalarmdotcomajax.extensions"]
+    extensions.CameraSkybellControllerExtension.ENDPOINT = (
+        "https://www.alarm.com/web/api/settings/skybell")
+    spec = importlib.util.spec_from_file_location(
+        "telus_auth_patch_real",
+        REPO_ROOT / "custom_components" / "telus_smarthome" / "telus_auth_patch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # runs the module's compatibility guard
+    return mod
 
 
 def _module(name: str, **attrs: Any) -> types.ModuleType:

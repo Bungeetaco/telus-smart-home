@@ -90,7 +90,10 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
 
     def _partition_device_id(self, partition_id: str) -> str | None:
         """Registry id of this config entry's device for `partition_id`, or
-        None (logged) when it has not been registered."""
+        None when it has not been registered -- logged once per partition per
+        controller, not once per entity: every sensor, lock and attribute
+        entity behind the partition takes this path, and one unlinked
+        partition is one finding, not a wall of identical lines."""
         try:
             return dr.async_get_device_id_by_identifier(
                 self._controller.hass,
@@ -98,13 +101,17 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
                 config_entry_id=self._controller.config_entry.entry_id,
             )
         except ValueError:
-            LOGGER.warning(
-                "%s (%s): partition %s has no device in the registry yet; "
-                "the device is created without a 'connected via' link.",
-                self._device.name,
-                self._adc_id,
-                partition_id,
-            )
+            warned = self._controller.unlinked_partitions_warned
+            if partition_id not in warned:
+                warned.add(partition_id)
+                LOGGER.warning(
+                    "Partition %s has no device in the registry yet; its devices "
+                    "(first seen: %s (%s)) are created without a 'connected via' "
+                    "link. Reported once per partition.",
+                    partition_id,
+                    self._device.name,
+                    self._adc_id,
+                )
             return None
 
     @property

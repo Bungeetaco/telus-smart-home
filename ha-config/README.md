@@ -62,7 +62,9 @@ What it pushes, all under the tag `camera-no-media-<entity id>` so the phone
 shows one card per camera that updates rather than stacking: the camera
 entering `no_media` (after a minute there, on top of the bridge's own
 five-minute threshold); every change of `last_device_kick` (the kick's
-outcome, with the stream state at that moment); and the camera **leaving**
+outcome, with the stream state at that moment; the attribute reads use
+`.get()`, so an integration reload, which empties the sensor's attributes on
+its way through `unavailable`, is silent and is not a kick); and the camera **leaving**
 `no_media` for `reconnecting` or `streaming`. The recovery trigger lists both
 because the sensor passes through `reconnecting` on its way back to
 `streaming`, so a `no_media` to `streaming` trigger never fires; `unavailable`

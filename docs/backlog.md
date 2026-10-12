@@ -278,6 +278,48 @@ and evidence. Grouped by whether anything can actually be done about them.
   a reload: a container restart never logs the old process's shutdown, which is
   why it went unseen through earlier core upgrades.
 
+- **E109** (DONE, integration + ha-config) - three log-noise fixes, one of
+  which hid a real effect. (a) Every login and every reload wrote `ERROR
+  [pyalarmdotcomajax] Got a processing error when trying to request 2FA
+  requirements` followed by a `NoneType: None` traceback: the 2FA-requirements
+  probe answers a JSON:API error body (status `423`) on this white-label, the
+  library's `_async_handle_server_errors` logs such a body at ERROR before it
+  raises `NotAuthorized`, and the patch then caught that and skipped at INFO
+  (the skip line read `()`, the exception carrying no message). The patch now
+  recognises an error body itself (`_jsonapi_error_status`) and takes the INFO
+  skip path naming the status; the library only ever sees a body without
+  errors. That also closes a latent path: the handler's `409` branch raises
+  `AuthenticationFailed`, which the skip clause never caught and which would
+  have demanded a reauth. Pinned by `tests/test_login_2fa_probe.py`, loaded
+  through `ha_stubs.load_real_auth_patch()`; proven to fail against the
+  previous patch (the error body reached the handler) and against two
+  mutations (every body treated as an error body; the transport-failure
+  clauses removed). CI's `check_patch.py` passes against the pinned library.
+  (b) `base_device._partition_device_id` warned once per ENTITY when a
+  partition had no registry device, a by-design-unreachable path that would
+  have produced one line per sensor, lock and attribute entity behind the
+  partition; now once per partition per controller
+  (`unlinked_partitions_warned` on the controller, so a reload reports again).
+  Pinned in `tests/test_device_links.py`, proven to fail (two warnings) first.
+  (c) `ha-config/camera_no_media.yaml`: on an integration reload the
+  stream-state sensors pass through `unavailable` with no attributes, and the
+  kick-result condition's bare `trigger.to_state.attributes.last_device_kick`
+  logged `Template variable warning: ReadOnlyDict object has no attribute ...`
+  twice per reload -- and, because an undefined value `is not none`, the
+  condition PASSED and pushed an empty "Kick #: ." card to the phone on every
+  reload (confirmed in the log of the reload that surfaced the warning: the
+  automation ran its actions at the `unavailable` transition). The three reads
+  are now `.get()` with the same defaults, so a missing attribute is silent and
+  is no kick. Verified: `/api/template` renders the new forms on an
+  attribute-less state (`False`, `0 (none)`) and on the live sensors; the live
+  package copy is byte-identical, `check_config` valid, `automation.reload`
+  left all three automations on with no template warning in the log. What
+  remains: the kick-result push also re-sends the LAST kick's outcome when the
+  sensor comes back after a reload (the attribute trigger sees missing ->
+  value, and the value is a real kick record); a guard on
+  `trigger.from_state.state` being `unavailable` would close that and is not
+  done.
+
 - **E107** (open, device, doorbell) - the doorbell's own publish leg keeps
   wedging briefly: in the 48 h to 2026-10-05 the HA stream-state sensor
   recorded ~79 doorbell drops of 30-60 s, plus a 17 min run (01:43 UTC) and an
@@ -1169,32 +1211,41 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   **Not covered: see E66**, which carries the list rather than leaving it
   implied.
 
-- **E66 (open) The integration test harness covers two modules; the rest of the
-  integration is still unpinned.** E63 built the harness and used it on the two
-  places where a silent regression was already known to be expensive. It
-  deliberately stopped there rather than chasing coverage, so this entry records
-  what is NOT covered instead of leaving it implied:
+- **E66 (DONE, superseded by E87 and the later suites; kept as the record of
+  what remains unpinned) The integration test harness covers most of the
+  integration.** E63 built the harness on the two places where a silent
+  regression was already known to be expensive; E87 took it to eleven modules,
+  and the suites since (`test_bridge_hold.py`, `test_ws_backoff.py`,
+  `test_device_links.py`, `test_controller_session.py`,
+  `test_login_error_classification.py`, `test_login_2fa_probe.py`) cover the
+  rest of what this entry once listed as open: the config flow, the three
+  service handlers, the settings-backed `number.py` / `select.py` / `switch.py`,
+  `binary_sensor.py`, `clip_view.py`'s request handling (the status mapping, the
+  hygiene headers, the 401/410 split; only the link minting was covered at
+  first), `arming_devices_coordinator.py` on the HA side, and `__init__.py`'s
+  setup, migration and unload paths. `docs/development.md`'s suite table is the
+  per-suite record of what each one pins.
 
-  - `config_flow.py`: the config/reconfigure/reauth flows, including the OTP
-    branch. Pure-ish and testable with the same stub tree; the payoff is that a
-    broken flow is discovered at setup time by a user, not by CI.
-  - `speak_service.py`, `bypass_service.py`, `unpair_service.py`: the service
-    handlers. Their schemas and their error mapping (E51's 413/504/400 wording,
-    for one) are exactly the kind of thing that reads correct and is not.
-  - `switch.py`, `select.py`, `number.py`, `button.py`: the settings-backed
-    platforms. `camera_settings_coordinator.py`'s wire shape *is* covered on the
-    bridge side (`test_camera_settings.py`); what is unpinned here is the HA-side
-    capability gating and option-list handling.
-  - `binary_sensor.py`: including the bridge-connectivity entity that shares
-    `StreamHealthCoordinator` with the covered sensors.
-  - `clip_view.py` is now covered (`tests/test_clip_links.py`): the HMAC's
-    id-and-expiry binding, the 401/410 ordering, the log-injection and
-    non-ASCII-signature guards, and the bridge-failure status mapping, each
-    proven to fail against a deliberately broken view. What remains unpinned
-    there is only the aiohttp routing glue (the view registration itself).
-  - `arming_devices_coordinator.py`: again, covered bridge-side
-    (`test_arming_devices.py`), not HA-side.
-  - `__init__.py`: every setup, unload and reload path.
+  Still unpinned, recorded here so the gap stays explicit rather than implied;
+  each is verified by reading the code, compiling it and checking Home
+  Assistant's logs:
+
+  - the library-backed platforms `alarm_control_panel.py`, `lock.py`,
+    `light.py`, `cover.py` and `climate.py` (their entities are thin over
+    pyalarmdotcomajax device objects; a suite would need fake library devices
+    per platform);
+  - `camera.py`'s camera entity (only its loopback camera-list coordinator is
+    exercised, by `test_bridge_hold.py`) and `button.py`;
+  - `sensor.py` beyond the stream-health sensors: the auth-health,
+    activity-feed, talkdown-metrics and camera diagnostic sensors;
+  - `base_device.py` beyond the partition link and its once-per-partition
+    warning (E109), and `controller.py` beyond its session ownership (login,
+    reauth and the websocket monitor);
+  - `bridge_client.py`'s `bridge_get` and `read_control_secret` (only the hold
+    mixin is pinned), `diagnostics.py` and `device_type_langs.py`;
+  - the rest of `telus_auth_patch.py`'s SSO flow (the identity parse) and both
+    websocket patches, whose only check is CI's import-time guard
+    (`check_patch.py`); and `__init__.py`'s websocket monitor at runtime.
 
   There is also a **structural** gap that no amount of new suites in this shape
   closes, and it should not be papered over: the stubs assert nothing about Home

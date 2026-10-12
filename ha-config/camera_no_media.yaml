@@ -74,15 +74,21 @@ automation:
           - sensor.living_room_stream_state
         attribute: last_device_kick
     conditions:
+      # .get(): when the integration reloads, the sensor passes through
+      # `unavailable` with NO attributes, and a bare attribute read on that
+      # state logs a "Template variable warning" and renders as undefined --
+      # which `is not none` then treated as a kick, pushing an empty
+      # "Kick #: ." card on every reload. A missing attribute is silent here
+      # and is no kick.
       - condition: template
-        value_template: "{{ trigger.to_state.attributes.last_device_kick is not none }}"
+        value_template: "{{ trigger.to_state.attributes.get('last_device_kick') is not none }}"
     actions:
       - action: notify.mobile_app_cph2655
         data:
           title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}: device kick"
           message: >-
-            Kick #{{ trigger.to_state.attributes.device_kicks }}:
-            {{ trigger.to_state.attributes.last_device_kick }}. Stream state is
+            Kick #{{ trigger.to_state.attributes.get('device_kicks') }}:
+            {{ trigger.to_state.attributes.get('last_device_kick') }}. Stream state is
             now {{ trigger.to_state.state }}.
           data:
             channel: Home security
@@ -119,8 +125,8 @@ automation:
             {{ 'Streaming again' if trigger.to_state.state == 'streaming'
                else 'Out of no_media and negotiating a session again; streaming usually follows within a minute' }}.
             Device kicks sent this bridge run:
-            {{ trigger.to_state.attributes.device_kicks | default(0) }}
-            ({{ trigger.to_state.attributes.last_device_kick | default('none') }}).
+            {{ trigger.to_state.attributes.get('device_kicks', 0) }}
+            ({{ trigger.to_state.attributes.get('last_device_kick', 'none') }}).
           data:
             channel: Home security
             importance: default

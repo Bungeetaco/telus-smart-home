@@ -61,6 +61,10 @@ class AlarmIntegrationController:
         # The aiohttp session this controller created for the library (see
         # initialize_lite). Kept so stop() can release it without closing it.
         self._websession: aiohttp.ClientSession | None = None
+        # Partition ids already reported as having no registry device:
+        # base_device warns once per partition per controller, not once per
+        # entity behind it (a reload builds a new controller and reports again).
+        self.unlinked_partitions_warned: set[str] = set()
 
         self.options: MappingProxyType[str, Any]
 

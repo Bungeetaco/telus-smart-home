@@ -412,7 +412,10 @@ Alarm.com's; only the login handshake differs. The replacement
 6. Check whether OTP is required. This white-label deployment generally doesn't
    expose Alarm.com's native 2FA engine at this endpoint (auth already happened at
    TELUS's gateway), so any failure of the 2FA check is treated as "no 2FA
-   needed" rather than a fatal error.
+   needed" rather than a fatal error. An error body from that endpoint (this
+   deployment answers a JSON:API `423` on every login) is recognised by the patch
+   before the library's handler sees it, so it is one INFO line naming the
+   status, never the ERROR-with-traceback the library's handler would log first.
 
 Two important behaviors:
 
@@ -572,7 +575,8 @@ controller from `hass.data`, then creates one entity per matching device in
   (manufacturer `Alarm.com`, linked to its partition's device by registry id,
   `via_device_id`, looked up scoped to the config entry only when a real
   partition id exists and it is not the partition itself; a partition with no
-  registry device yet means no link, logged, never a failed platform), and
+  registry device yet means no link, logged once per partition per controller
+  rather than once per entity behind it, never a failed platform), and
   exposes battery-level, battery-alert, and malfunction helpers. It registers an external update callback and, on each
   coordinator update, re-fetches its device by id. If the device was removed from
   Alarm.com mid-session it catches `UnkonwnDevice`, marks the entity unavailable

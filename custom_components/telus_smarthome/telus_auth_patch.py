@@ -52,6 +52,22 @@ def _is_transient_login_status(status: int) -> bool:
 
 log = logging.getLogger(__name__)
 
+
+def _jsonapi_error_status(json_rsp: object) -> str | None:
+    """The `status` of the first JSON:API error in a response body, or None
+    when the body carries no `errors` (or is not a JSON object at all). The
+    2FA probe below decides on this BEFORE handing the body to the library,
+    whose handler logs an error body at ERROR with a traceback first."""
+    if not isinstance(json_rsp, dict):
+        return None
+    errors = json_rsp.get("errors")
+    if not errors:
+        return None
+    first = errors[0] if isinstance(errors, list) and errors else None
+    status = first.get("status") if isinstance(first, dict) else None
+    return str(status) if status is not None else "unknown"
+
+
 TELUS_BASE = "https://smarthome-security.telus.com/"
 AUTH_GATEWAY = "https://auth-gateway.telus.com"
 TELUS_CLIENT_ID = "167c1141-d72c-4d39-8c72-1cebd10e0109"
@@ -277,15 +293,32 @@ async def _telus_async_login(self: AlarmController) -> None:
             headers=self._ajax_headers,
         ) as resp:
             json_rsp = await resp.json()
+        if (error_status := _jsonapi_error_status(json_rsp)) is not None:
+            # This account answers the probe with a JSON:API error body (status
+            # "423") on EVERY login. The library's _async_handle_server_errors
+            # logs such a body at ERROR with a traceback before it raises, for a
+            # response the except clause below then skips at INFO -- an error
+            # line per login/reload for a non-error. Its "409" branch is worse:
+            # AuthenticationFailed, which nothing below catches and which would
+            # demand a needless reauth. So the decision is made here and the
+            # library only ever sees a body without errors.
+            log.info(
+                "2FA requirements check not available for this TELUS account (the "
+                "endpoint answered a JSON:API error, status %s) -- skipping.",
+                error_status,
+            )
+            return
         await self._async_handle_server_errors(json_rsp, "2FA requirements", False)
     except (
         aiohttp.ClientResponseError,
         NotAuthorized,
-        # _async_handle_server_errors raises UnexpectedResponse for a JSON:API error
-        # body, and a non-JSON body raises from resp.json() itself. Both are the
-        # normal shape of "this white-label doesn't expose alarm.com's 2FA engine",
-        # which the comment above says to treat as "no 2FA needed" -- but they
-        # escaped this handler and turned a perfectly good login into a hard failure.
+        # A non-JSON body raises from resp.json() itself (ValueError /
+        # ContentTypeError), and a transport failure is a ClientError; both are
+        # the normal shape of "this white-label doesn't expose alarm.com's 2FA
+        # engine", which the comment above says to treat as "no 2FA needed" --
+        # they used to escape this handler and turn a good login into a hard
+        # failure. NotAuthorized / UnexpectedResponse stay for whatever the
+        # library's handler may still raise on a body without errors.
         UnexpectedResponse,
         aiohttp.ClientError,
         ValueError,
