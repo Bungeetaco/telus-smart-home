@@ -130,6 +130,10 @@ async def async_setup_entry(
     async_add_entities([CameraBridgeConnectivitySensor(stream_health_coordinator, config_entry)])
 
 
+# BinarySensor._unmappable_state_logged while the raw state maps to on/off.
+_STATE_MAPPED: Final = object()
+
+
 class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore
     """Binary sensor device class."""
 
@@ -138,6 +142,15 @@ class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore
     def __init__(self, controller: AlarmIntegrationController, device: AllDevices_t) -> None:
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(controller, device)
+
+        # The raw state the unmappable-state INFO line was last written for,
+        # or _STATE_MAPPED while the state maps (a sentinel, not None: a raw
+        # state of None is itself unmappable and must be reported once). `is_on`
+        # runs at least twice per coordinator refresh (`available` reads it,
+        # then the state write does), so without this one zone sitting in
+        # UNKNOWN wrote the same line thousands of times a day. One INFO per
+        # episode; the repeats stay visible at DEBUG.
+        self._unmappable_state_logged: Any = _STATE_MAPPED
 
     @property
     def device_type_name(self) -> str:
@@ -221,15 +234,32 @@ class BinarySensor(HardwareBaseDevice, BinarySensorEntity):  # type: ignore
 
         match self._device.state:
             case libSensor.DeviceState.CLOSED | libSensor.DeviceState.IDLE | libWaterSensor.DeviceState.DRY:
+                self._unmappable_state_logged = _STATE_MAPPED
                 return False
             case libSensor.DeviceState.OPEN | libSensor.DeviceState.ACTIVE | libWaterSensor.DeviceState.WET:
+                self._unmappable_state_logged = _STATE_MAPPED
                 return True
 
-        LOGGER.info(
-            "Cannot determine binary sensor state for sensor %s. Found raw state of %s.",
-            self._attr_name,
-            self._device.state,
-        )
+        # Named by the device, which is what the entity displays as: under
+        # has_entity_name this entity's own name is None, and logging that read
+        # "sensor None" and said nothing about which zone.
+        raw_state = self._device.state
+        if raw_state != self._unmappable_state_logged:
+            self._unmappable_state_logged = raw_state
+            LOGGER.info(
+                "Cannot determine binary sensor state for %s (%s). Found raw state of %s; "
+                "the entity stays unavailable until the panel reports a known state.",
+                self._device.name,
+                self._adc_id,
+                raw_state,
+            )
+        else:
+            LOGGER.debug(
+                "Binary sensor %s (%s) still reports raw state %s.",
+                self._device.name,
+                self._adc_id,
+                raw_state,
+            )
         return None
 
 

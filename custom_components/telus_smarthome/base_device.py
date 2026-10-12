@@ -25,6 +25,7 @@ from pyalarmdotcomajax.extensions import ConfigurationOption as libConfiguration
 
 from . import const as c
 from .const import (
+    ALARM_COM_MANUFACTURER,
     ATTRIB_BATTERY_CRITICAL,
     ATTRIB_BATTERY_LOW,
     ATTRIB_BATTERY_NORMAL,
@@ -65,7 +66,7 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
         self._device_missing = False
 
         device_info: MutableMapping[str, Any] = {
-            "manufacturer": "Alarm.com",
+            "manufacturer": ALARM_COM_MANUFACTURER,
             "name": device.name,
             "identifiers": {(DOMAIN, self._adc_id)},
         }

@@ -144,12 +144,18 @@ class FakeDeviceEntry:
 
     def __init__(self, device_id: str, identifiers: set[tuple[str, Any]],
                  config_entries: set[str], name: str | None = None,
-                 via_device_id: str | None = None) -> None:
+                 via_device_id: str | None = None,
+                 manufacturer: str | None = None) -> None:
         self.id = device_id
         self.identifiers = identifiers
         self.config_entry_id = next(iter(config_entries), None)
         self.name = name
         self.via_device_id = via_device_id
+        # The stamp each registering module puts on its devices (upstream's
+        # `DeviceEntry.manufacturer`). Setup's prune pass reads it to tell a
+        # library-owned device from one of this fork's own, so the fake row
+        # has to carry it.
+        self.manufacturer = manufacturer
 
 
 class FakeDeviceRegistry:
@@ -203,10 +209,13 @@ class FakeDeviceRegistry:
             if device is not None:
                 if kwargs.get("name"):
                     device.name = kwargs["name"]
+                if kwargs.get("manufacturer"):
+                    device.manufacturer = kwargs["manufacturer"]
                 return device
         device = FakeDeviceEntry(f"fake-device-{len(self.devices) + 1}", set(identifiers),
                                  {config_entry_id}, kwargs.get("name"),
-                                 kwargs.get("via_device_id"))
+                                 kwargs.get("via_device_id"),
+                                 kwargs.get("manufacturer"))
         self.devices[device.id] = device
         return device
 

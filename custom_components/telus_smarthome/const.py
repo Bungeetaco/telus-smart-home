@@ -22,6 +22,21 @@ If you have any issues with this you need to open an issue here:
 
 STATE_MALFUNCTION = "Malfunction"
 
+# The manufacturer stamps on the devices the pyalarmdotcomajax library owns:
+# every entity built on base_device.py and the partition registration in
+# __init__.py stamp ALARM_COM_MANUFACTURER, the virtual device setup creates for
+# each library camera stamps SKYBELL_MANUFACTURER. Setup's prune pass removes a
+# device the library no longer reports ONLY if it carries one of these stamps,
+# because the id alone cannot tell the library's devices from this fork's own:
+# the bridge-served cameras (camera.py) and the paired Bluetooth arming phones
+# (arming_devices_coordinator.py) are registered under the account's Alarm.com
+# device id, in the same `<unit>-<n>` namespace as every sensor and partition,
+# and the library never lists them. Stamp and gate share these constants so
+# they cannot drift apart.
+ALARM_COM_MANUFACTURER = "Alarm.com"
+SKYBELL_MANUFACTURER = "Skybell"
+LIBRARY_DEVICE_MANUFACTURERS = frozenset({ALARM_COM_MANUFACTURER, SKYBELL_MANUFACTURER})
+
 DEBUG_REQ_EVENT = "telus_smarthome_debug_request"
 
 MIGRATE_MSG_ALERT = (

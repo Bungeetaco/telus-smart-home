@@ -26,8 +26,9 @@ their failure is invisible.
     while looking perfectly healthy.
 
 Pinned here: the is_on mapping across sensor and water-sensor states (with
-None for an undecodable state), the stale-state availability guard (both
-legs), the door/window name classification (multilingual, including that the
+None for an undecodable state), that an undecodable state is logged once per
+episode at INFO naming the device (not once per evaluation as "sensor None"),
+the stale-state availability guard (both legs), the door/window name classification (multilingual, including that the
 French needle requires its article) and the subtype-to-device-class table,
 and the connectivity sensor's three-state contract plus its service-device
 identity.
@@ -38,6 +39,7 @@ sensor.py has its own suite and the setup wiring is exercised there and by
 the other platforms' setup tests.
 """
 import asyncio
+import logging
 import pathlib
 import sys
 import types
@@ -229,8 +231,80 @@ async def test_attribute_sensor_reads_its_description_value_fn():
     assert entity.is_on is True, "a low battery must read on"
     print("  ok  attribute sensors report their description's value_fn verbatim")
 
+class _Capture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+async def test_unmappable_state_is_logged_once_per_episode_and_names_the_device():
+    """A zone whose library state maps to neither on nor off (UNKNOWN, as a
+    dropped-out zone reports) is logged at INFO ONCE and at DEBUG after that,
+    and the line names the device. Pinned because the line was emitted on
+    every evaluation of `is_on` -- which HA calls at least twice per
+    coordinator refresh (`available` and the state) -- so one zone sitting in
+    UNKNOWN produced thousands of identical INFO lines a day, and because it
+    named the entity by `_attr_name`, which is None under `has_entity_name`,
+    so every line read "sensor None" and said nothing about WHICH zone.
+    """
+    logger = logging.getLogger(binary_sensor.__name__)
+    saved_level = logger.level
+    capture = _Capture()
+    logger.addHandler(capture)
+    logger.setLevel(logging.DEBUG)
+    try:
+        entity, device, _ = make_sensor(name="Patio Door", state=State.UNKNOWN)
+        # Two refreshes, each evaluating `is_on` the way HA does: once for
+        # `available`, once for the state.
+        for _ in range(2):
+            assert not entity.available
+            assert entity.is_on is None, "an unmappable state stays unknown"
+
+        def lines(level):
+            return [r.getMessage() for r in capture.records if r.levelno == level]
+
+        info = lines(logging.INFO)
+        assert len(info) == 1, (
+            f"{len(info)} INFO lines for one UNKNOWN episode (four evaluations): "
+            f"{info!r} -- one zone in UNKNOWN for a day logged thousands")
+        assert "Patio Door" in info[0] and "None" not in info[0], (
+            f"{info[0]!r}: the line must name the device, never 'sensor None'")
+        assert "UNKNOWN" in info[0], f"{info[0]!r}: the raw state must be named"
+        assert len(lines(logging.DEBUG)) == 3, (
+            f"{lines(logging.DEBUG)!r}: the repeats are still visible at DEBUG")
+
+        # Back to a mappable state, then the SAME unmappable state again: a
+        # new episode, logged once more -- the zone dropping out twice is two
+        # findings. (Re-entering the same state is the ordering that proves
+        # the episode reset: a memo that is never cleared on a mapped state
+        # still logs a DIFFERENT state, so that step alone pins nothing.)
+        device.state = State.CLOSED
+        assert entity.is_on is False
+        device.state = State.UNKNOWN
+        assert entity.is_on is None
+        assert entity.is_on is None
+        assert len(lines(logging.INFO)) == 2, (
+            f"{lines(logging.INFO)!r}: re-entering UNKNOWN after a real state "
+            "is a new episode and is reported once")
+
+        # A different unmappable state is a new finding and logs again.
+        device.state = "DeviceState.OFFLINE"
+        assert entity.is_on is None
+        assert entity.is_on is None
+        info = lines(logging.INFO)
+        assert len(info) == 3 and "OFFLINE" in info[2], (
+            f"{info!r}: a change to another unmappable state must log once more")
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(saved_level)
+
+
 TESTS = (
     test_is_on_mapping,
+    test_unmappable_state_is_logged_once_per_episode_and_names_the_device,
     test_available_guards_against_stale_state,
     test_contact_sensor_door_window_classification,
     test_subtype_device_class_table,

@@ -30,6 +30,7 @@ from .unpair_service import async_register_unpair_service, async_remove_unpair_s
 from .camera import CameraBridgeCoordinator
 from .clip_view import TelusClipRedirectView
 from .const import (
+    ALARM_COM_MANUFACTURER,
     CONF_ARM_AWAY,
     CONF_ARM_HOME,
     CONF_ARM_NIGHT,
@@ -42,8 +43,10 @@ from .const import (
     DATA_CONTROLLER,
     DEBUG_REQ_EVENT,
     DOMAIN,
+    LIBRARY_DEVICE_MANUFACTURERS,
     PLATFORMS,
     SENSOR_SUBTYPE_BLACKLIST,
+    SKYBELL_MANUFACTURER,
     STARTUP_MESSAGE,
 )
 from .controller import AlarmIntegrationController
@@ -182,25 +185,49 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
     # Compare against device registry.
     #
-    # This pass previously decided removal *inside* the per-identifier loop, which
-    # made it wrong in three separate ways:
-    #   - Any device whose identifier isn't an Alarm.com "<digits>-<digits>" id was
-    #     deleted on EVERY setup. That is every device this fork adds itself: the
-    #     bridge-served cameras (keyed by TELUS camera UUID), the Activity feed
-    #     device, and the diagnostic "integration" device. They were recreated
-    #     immediately afterwards by their platforms, so the symptom wasn't missing
-    #     entities but silently discarded user customisations (renames, area
-    #     assignments, enabled/disabled state) on every restart.
+    # This pass has shipped four separate silent failures, and the shape below
+    # is the sum of their fixes:
+    #   - Removal was decided *inside* the per-identifier loop, so any device whose
+    #     identifier isn't an Alarm.com "<digits>-<digits>" id was deleted on
+    #     EVERY setup: the Activity feed device, the diagnostic "integration"
+    #     device, a camera keyed by anything but an Alarm.com id. Recreated
+    #     immediately afterwards by their platforms, so the symptom wasn't
+    #     missing entities but churn and misleading log lines on every restart.
     #   - A device with several identifiers was judged on whichever one came first
     #     out of an unordered set, so a still-present device could be removed
     #     depending on iteration order.
     #   - Removal ran once per non-matching identifier, and the second call for the
     #     same device raises KeyError, aborting setup entirely.
-    # It is now one decision per device, made after inspecting all its identifiers,
-    # and it only ever considers devices that look like Alarm.com devices.
+    #   - The id-shape test alone was not enough: the bridge-served cameras
+    #     (camera.py) and the paired Bluetooth arming phones
+    #     (arming_devices_coordinator.py) are registered under the account's
+    #     Alarm.com device id, in the SAME "<unit>-<n>" namespace as every
+    #     sensor and partition, and the library never lists them -- so every
+    #     boot and reload removed all of them as "no longer present on
+    #     Alarm.com" and their platforms restored them moments later (Home
+    #     Assistant restores a deleted device's id, area, labels and user name
+    #     from its deleted-device record, and each entity on it from the
+    #     entity registry's deleted-entity record, so what it cost was registry
+    #     churn, a remove-then-create of every entity on them, and four
+    #     misleading INFO lines per setup).
+    # It is now one decision per device, made after inspecting all its
+    # identifiers, and it only ever removes a device the library owns: one
+    # whose id looks like an Alarm.com id AND which carries one of the
+    # manufacturer stamps the library-backed registrations put on their
+    # devices (LIBRARY_DEVICE_MANUFACTURERS: base_device.py and the partition
+    # registration below stamp "Alarm.com", the Skybell virtual device
+    # "Skybell"). The id cannot tell the library's devices from this fork's
+    # own; the stamp is how each registering module declares whose device it
+    # is, and the gate reads the same constants the stamps are written from.
     for device_entry in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
         keep = False
         has_adc_identifier = False
+
+        if device_entry.manufacturer not in LIBRARY_DEVICE_MANUFACTURERS:
+            # Registered by camera.py, arming_devices_coordinator.py, event.py
+            # or a service-device platform, whatever its id looks like. The
+            # Alarm.com device list says nothing about whether it's still valid.
+            continue
 
         for identifier_domain, identifier_id in device_entry.identifiers:
             if identifier_domain != DOMAIN or identifier_id is None:
@@ -246,7 +273,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             identifiers={(DOMAIN, camera.id_)},
             name=camera.name,
             model="Skybell HD",
-            manufacturer="Skybell",
+            manufacturer=SKYBELL_MANUFACTURER,
         )
 
     # Register the two kinds of device every other device links to BEFORE the
@@ -262,7 +289,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             config_entry_id=config_entry.entry_id,
             identifiers={(DOMAIN, partition.id_)},
             name=partition.name,
-            manufacturer="Alarm.com",
+            manufacturer=ALARM_COM_MANUFACTURER,
         )
     device_registry.async_get_or_create(
         config_entry_id=config_entry.entry_id,

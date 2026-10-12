@@ -16,9 +16,11 @@ explicitly, because the harness deliberately seeds the package without
 executing its __init__ (see ha_stubs); importing it by name runs the real
 file with its relative imports intact.
 
-Why this file exists: setup's device-pruning pass has already shipped three
+Why this file exists: setup's device-pruning pass has already shipped four
 distinct silent failures (this fork's own bridge/service devices deleted and
-recreated on EVERY restart, discarding renames and area assignments; removal
+recreated on EVERY restart; then, after that was fixed by id shape, the
+bridge cameras and paired phones still deleted on every boot and reload
+because their ids share the library's `<unit>-<n>` namespace; removal
 decided on whichever identifier an unordered set yielded first; a KeyError on
 the second removal aborting setup entirely), and nothing pinned the fixed
 behaviour. The clip-link secret's generate-once rule and the bridge-down-at-
@@ -71,6 +73,7 @@ from homeassistant.exceptions import (  # noqa: E402
 from custom_components.telus_smarthome import camera as camera_module  # noqa: E402
 from custom_components.telus_smarthome import event as event_module  # noqa: E402
 from custom_components.telus_smarthome.const import (  # noqa: E402
+    ALARM_COM_MANUFACTURER,
     CONF_CLIP_LINK_SECRET,
     DATA_CONTROLLER,
     DOMAIN,
@@ -79,6 +82,7 @@ from custom_components.telus_smarthome.const import (  # noqa: E402
     SERVICE_SPEAK,
     SERVICE_STOP_SPEAKING,
     SERVICE_UNPAIR_ARMING_DEVICE,
+    SKYBELL_MANUFACTURER,
 )
 
 init_module = importlib.import_module("custom_components.telus_smarthome.__init__")
@@ -222,20 +226,61 @@ async def test_setup_succeeds_with_the_bridge_down_and_wires_everything():
 
 
 async def test_setup_prunes_only_absent_alarm_devices():
+    """Setup removes exactly the devices the pyalarmdotcomajax library used to
+    report and no longer does, and nothing else this integration registers.
+
+    Two shipped bugs are pinned here, one per kind of own device. First, the
+    devices whose ids are NOT shaped like an Alarm.com id (a camera keyed by a
+    UUID, the Integration service device) were deleted on every setup. Second,
+    and the one that survived that fix: the bridge-served cameras and the
+    paired Bluetooth arming phones carry ids from the SAME `<unit>-<n>`
+    namespace as every library device (camera.py and
+    arming_devices_coordinator.py register `(DOMAIN, <id>)` with the id the
+    bridge reports, and that id is the account's Alarm.com device id), so the
+    id-shape test alone judged them absent from the library's list and removed
+    all four on every boot and reload. Each was restored by its platform moments
+    later with its registry id, area, labels and user name intact (Home
+    Assistant restores a deleted device from its deleted-device record), so
+    the cost was registry churn, a removed-then-recreated entity per
+    entity on them, and four misleading "no longer present on Alarm.com" INFO
+    lines per setup. The library's devices are the ones registered under the
+    library's manufacturer stamps (`LIBRARY_DEVICE_MANUFACTURERS`: what
+    base_device.py, the partition registration and the Skybell virtual device
+    stamp); a device carrying any other stamp, or none, is never the library's
+    to prune.
+    """
     devices = [
         adc_device("123-456"),  # still on Alarm.com
     ]
     cameras = [adc_device("77-88", name="Skybell")]
     partitions = [adc_device("123-1", name="Main partition")]
     registry_devices = [
-        FakeDeviceEntry("keep-present", {(DOMAIN, "123-456")}, {"entryX"}),
-        FakeDeviceEntry("keep-attr", {(DOMAIN, "123-456_low_battery")}, {"entryX"}),
-        FakeDeviceEntry("remove-gone", {(DOMAIN, "123-999")}, {"entryX"}),
-        # This fork's own devices carry non-Alarm.com ids (TELUS camera UUIDs,
-        # the Integration service device). Deleting them on every setup
+        FakeDeviceEntry("keep-present", {(DOMAIN, "123-456")}, {"entryX"},
+                        manufacturer=ALARM_COM_MANUFACTURER),
+        FakeDeviceEntry("keep-attr", {(DOMAIN, "123-456_low_battery")}, {"entryX"},
+                        manufacturer=ALARM_COM_MANUFACTURER),
+        FakeDeviceEntry("remove-gone", {(DOMAIN, "123-999")}, {"entryX"},
+                        manufacturer=ALARM_COM_MANUFACTURER),
+        # A Skybell virtual device whose camera left the library: the library
+        # owns it (setup registers it from the library's camera list), so it
+        # goes too.
+        FakeDeviceEntry("remove-skybell-gone", {(DOMAIN, "77-99")}, {"entryX"},
+                        manufacturer=SKYBELL_MANUFACTURER),
+        # This fork's own devices. A camera keyed by a non-Alarm.com id, and
+        # the Integration service device: deleting them on every setup
         # silently discarded renames and area assignments -- a shipped bug.
-        FakeDeviceEntry("keep-bridge-cam", {(DOMAIN, "cam-uuid-abc")}, {"entryX"}),
-        FakeDeviceEntry("keep-service", {(DOMAIN, "entryX_integration")}, {"entryX"}),
+        FakeDeviceEntry("keep-bridge-cam-uuid", {(DOMAIN, "cam-uuid-abc")}, {"entryX"},
+                        manufacturer="TELUS Smart Home"),
+        FakeDeviceEntry("keep-service", {(DOMAIN, "entryX_integration")}, {"entryX"},
+                        manufacturer="TELUS"),
+        # A bridge-served camera and a paired phone, keyed by the account's
+        # Alarm.com device id (the shape the prune regex recognises) but
+        # registered by camera.py / arming_device_device_info, not by the
+        # library -- removed on every setup by the id-shape test alone.
+        FakeDeviceEntry("keep-bridge-cam", {(DOMAIN, "123-2048")}, {"entryX"},
+                        name="Living Room", manufacturer="TELUS Smart Home"),
+        FakeDeviceEntry("keep-arming-phone", {(DOMAIN, "123-5263")}, {"entryX"},
+                        name="Someone's phone", manufacturer=None),
         FakeDeviceEntry("keep-foreign", {("hue", "123-999")}, {"entryX"}),
     ]
     entry = FakeConfigEntry(entry_id="entryX")
@@ -250,10 +295,18 @@ async def test_setup_prunes_only_absent_alarm_devices():
     assert await run_setup(hass, entry, controller_cls)
 
     registry = hass.data["device_registry"]
-    assert registry.removed == ["remove-gone"], (
-        f"removed {registry.removed!r}: exactly the device Alarm.com no longer "
-        "has -- never this fork's own devices, never attribute-suffixed ids of "
-        "present devices, never another integration's, and never twice")
+    assert registry.removed == ["remove-gone", "remove-skybell-gone"], (
+        f"removed {registry.removed!r}: exactly the devices the library no "
+        "longer has -- never this fork's own devices (the bridge cameras and "
+        "the paired phones share the library's id namespace and are NOT the "
+        "library's to prune), never attribute-suffixed ids of present devices, "
+        "never another integration's, and never twice")
+    for own in ("keep-bridge-cam", "keep-arming-phone", "keep-bridge-cam-uuid",
+                "keep-service"):
+        assert own in registry.devices, (
+            f"{own} was pruned: its platform recreates it moments later, so "
+            "the symptom is registry churn plus a misleading 'no longer present "
+            "on Alarm.com' line on every boot and reload, not a missing device")
     created = {next(iter(call["identifiers"])) for call in registry.created}
     assert created == {(DOMAIN, "77-88"), (DOMAIN, "123-1"), (DOMAIN, "entryX_integration")}, (
         f"registered {sorted(created)!r}: the Skybell camera absent from the "

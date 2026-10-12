@@ -320,6 +320,58 @@ and evidence. Grouped by whether anything can actually be done about them.
   previous state to exist and not be `unavailable`/`unknown`, so only a change
   between two live states counts as a kick.
 
+- **E110** (DONE, integration) - two log-noise fixes, one of which was
+  registry churn. (a) Every config-entry setup (boot and reload) logged
+  `Removing device no longer present on Alarm.com` for the two bridge-served
+  cameras and the two paired Bluetooth arming phones, and removed them; the
+  camera and switch/select platforms re-registered them moments later. The
+  earlier prune fix (E87's lifecycle suite) kept this fork's own devices by
+  id SHAPE, on the assumption that they are keyed by something other than an
+  Alarm.com id -- the live registry shows they are not: `camera.py` and
+  `arming_device_device_info` register `(DOMAIN, <id>)` with the id the bridge
+  reports, which is the account's Alarm.com device id in the same `<unit>-<n>`
+  namespace as every sensor and partition, and the library never lists them.
+  The prune is now gated on the manufacturer stamps the library-backed
+  registrations put on their devices (`LIBRARY_DEVICE_MANUFACTURERS` in
+  `const.py`: `Alarm.com` from `base_device.py` and the partition
+  registration, `Skybell` from the virtual camera device; stamp and gate read
+  the same constants), on top of the id-shape test. What the churn cost,
+  verified against the installed `device_registry.py` / `entity_registry.py`
+  and the live registry: NOTHING user-set. `async_remove_device` files a
+  deleted-device record and `async_get_or_create` restores the device's id,
+  area, labels, user name, creation time and disabled state from it (the live
+  cameras kept their registry ids across five prunes in one day and their
+  original creation time; the registry held no deleted record afterwards
+  because the restore consumes it); the entity registry removes every entity
+  on the device and restores each from its deleted-entity record (entity id,
+  registry id, area, name, icon, labels, enabled/hidden state, options) when
+  its platform re-adds it. What it did cost: a registry save and a
+  remove-then-create of the device and every entity on it per setup (states
+  leaving and re-entering the state machine, with the registry events that
+  implies), `modified_at` bumped on every setup, and four misleading INFO
+  lines per boot and reload. Pinned in `test_init_lifecycle.py`'s
+  `test_setup_prunes_only_absent_alarm_devices` (the invariant extended, not
+  a parallel test): a registry seeded with an absent library device, an
+  absent Skybell virtual device, a bridge camera and a paired phone under
+  Alarm.com-shaped ids, a UUID-keyed camera and the service device removes
+  exactly the two library devices. Proven to fail first (four removed) and
+  against the gate widened to every stamp. (b) `binary_sensor.py` logged
+  `Cannot determine binary sensor state for sensor None. Found raw state of
+  DeviceState.UNKNOWN.` on EVERY evaluation of `is_on`, which Home Assistant
+  makes at least twice per coordinator refresh (`available` reads it, then
+  the state write does): 2,839 identical lines in fourteen hours from one
+  zone that sat in UNKNOWN, naming the entity by `_attr_name`, which is None
+  under `has_entity_name`. The line now names the device and its id, is
+  written once per episode (remembered per entity per raw state, cleared when
+  the state maps again, so a zone dropping out twice is two findings) and at
+  DEBUG thereafter; the entity still reads unknown and stays unavailable.
+  Pinned in `test_binary_sensors.py` with a logging capture; proven to fail
+  first (four INFO lines for one episode), against the name reverted to
+  `_attr_name`, and against the episode reset removed -- the last only once
+  the scenario re-entered the SAME state after a mappable one (a memo that is
+  never cleared still logs a different state, so that ordering pinned
+  nothing; recorded in the test).
+
 - **E107** (open, device, doorbell) - the doorbell's own publish leg keeps
   wedging briefly: in the 48 h to 2026-10-05 the HA stream-state sensor
   recorded ~79 doorbell drops of 30-60 s, plus a 17 min run (01:43 UTC) and an

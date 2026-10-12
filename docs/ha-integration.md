@@ -226,15 +226,34 @@ callers.
 
 ### Device pruning and virtual devices
 
-The device-reconciliation pass removes HA devices no longer present on
-Alarm.com. It makes **one decision per device, after inspecting all of its
-identifiers**, and only ever considers devices whose identifier looks like an
-Alarm.com id (`<digits>-<digits>`, with optional `_debug`/`_malfunction` style
-suffixes stripped by regex). Devices this fork creates itself (bridge-served
-cameras (keyed by TELUS camera UUID), the Activity device, the diagnostic
-"integration" device) are never Alarm.com ids and are always kept. This guards
-against silently discarding user customizations (renames, area assignments,
-enable/disable state) on every restart.
+The device-reconciliation pass removes HA devices that the pyalarmdotcomajax
+library no longer reports. It makes **one decision per device, after
+inspecting all of its identifiers**, and only ever removes a device the
+library owns: one whose identifier looks like an Alarm.com id
+(`<unit>-<n>`, with optional `_debug`/`_malfunction` style suffixes stripped
+by regex) **and** which carries one of the manufacturer stamps the
+library-backed registrations put on their devices (`Alarm.com` from
+`base_device.py` and the partition registration, `Skybell` from the virtual
+camera device; `LIBRARY_DEVICE_MANUFACTURERS` in `const.py`, shared by the
+stamps and the gate). The id alone cannot tell the library's devices apart
+from this fork's own: the bridge-served cameras (`camera.py`) and the paired
+Bluetooth arming phones (`arming_devices_coordinator.py`) are registered
+under the account's Alarm.com device id, in the same `<unit>-<n>` namespace
+as every sensor and partition, and the library never lists them. Every device
+this fork registers itself (those cameras and phones, the Activity device, the
+"integration" service device) carries another stamp or none and is always
+kept, whatever its id looks like.
+
+What a wrongly pruned device costs, for the record: its platform re-registers
+it moments later and Home Assistant restores the device's registry id, area,
+labels, user-given name, creation time and disabled state from the
+deleted-device record, and restores each entity on it (entity id, registry
+id, area, name, icon, labels, enabled/hidden state, options) from the entity
+registry's deleted-entity record. Nothing user-set is lost. What happens is a
+registry save per setup, a remove-then-create of the device and of every
+entity on it (their states leave and re-enter the state machine, with the
+registry events that implies), and one misleading "no longer present on
+Alarm.com" INFO line per device per boot and reload.
 
 The registry's deleted-device records are left alone: they are an internal
 container of the registry with no public API, and Home Assistant restores a
