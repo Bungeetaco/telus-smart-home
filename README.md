@@ -3,7 +3,7 @@
 **Brings a TELUS Smart Home system (which is really a white-labeled Alarm.com account) into Home Assistant: the alarm panel, locks, sensors, live camera video, and two-way audio through the doorbell.**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.11.0%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.8.0%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
 [![Docker](https://img.shields.io/badge/camera%20bridge-Docker-2496ED?logo=docker&logoColor=white)](camera-bridge)
 ![Status](https://img.shields.io/badge/status-unofficial%20%26%20reverse--engineered-yellow)
 

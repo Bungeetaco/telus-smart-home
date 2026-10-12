@@ -283,6 +283,13 @@ class EventDeviceClass(enum.StrEnum):
     MOTION = "motion"
 
 
+class DoorbellEventType(enum.StrEnum):
+    """Stand-in for `homeassistant.components.event.DoorbellEventType`: the one
+    standard type a `doorbell`-class event entity must declare and fire."""
+
+    RING = "ring"
+
+
 class EntityCategory(enum.StrEnum):
     CONFIG = "config"
     DIAGNOSTIC = "diagnostic"
@@ -857,11 +864,26 @@ def dr_async_get(hass: Any) -> Any:
 
 
 def dr_async_entries_for_config_entry(registry: Any, config_entry_id: str) -> list[Any]:
-    """Upstream-exact: the devices whose config_entries contain the entry id."""
+    """Upstream-exact: the devices owned by the config entry (a device belongs
+    to exactly one)."""
     return [
         device for device in registry.devices.values()
-        if config_entry_id in device.config_entries
+        if device.config_entry_id == config_entry_id
     ]
+
+
+def dr_async_get_device_id_by_identifier(hass: Any, identifier: tuple[str, Any], *,
+                                         config_entry_id: str) -> str:
+    """Upstream-exact (`device_registry.async_get_device_id_by_identifier`): the
+    id of the device carrying `identifier` within `config_entry_id`, or
+    ValueError when no such device exists. The ValueError is the behaviour the
+    integration has to handle -- an entity created before its via device
+    exists must fall back to no link rather than fail to set up."""
+    device = dr_async_get(hass).async_get_device_by_identifier(identifier, config_entry_id)
+    if device is None:
+        raise ValueError(
+            f"There is no device with identifier {identifier} in config entry {config_entry_id}")
+    return device.id
 
 
 def async_call_later(hass: Any, delay: Any, action: Any) -> Any:
@@ -1113,7 +1135,7 @@ def install() -> None:
     _module("homeassistant.components.sensor", SensorEntity=SensorEntity,
             SensorDeviceClass=SensorDeviceClass, SensorStateClass=SensorStateClass)
     _module("homeassistant.components.event", EventEntity=EventEntity,
-            EventDeviceClass=EventDeviceClass)
+            EventDeviceClass=EventDeviceClass, DoorbellEventType=DoorbellEventType)
     _module("homeassistant.components.camera", Camera=Camera,
             CameraEntityFeature=CameraEntityFeature)
     _module("homeassistant.components.http", HomeAssistantView=HomeAssistantView)
@@ -1142,6 +1164,7 @@ def install() -> None:
         CONNECTION_NETWORK_MAC="mac",
         async_get=dr_async_get,
         async_entries_for_config_entry=dr_async_entries_for_config_entry,
+        async_get_device_id_by_identifier=dr_async_get_device_id_by_identifier,
     )
     _module("homeassistant.helpers", device_registry=device_registry)
     _module("homeassistant.helpers.entity", Entity=Entity, DeviceInfo=DeviceInfo,

@@ -135,25 +135,45 @@ class FakeEntityRegistry:
 
 
 class FakeDeviceEntry:
-    """One device-registry row: identifiers, config entry links, and a name."""
+    """One device-registry row: identifiers, its owning config entry, and a name.
+
+    A device belongs to exactly one config entry upstream (`config_entry_id`);
+    `config_entries` is accepted for the suites that still build rows with a
+    set and is reduced to its single member.
+    """
 
     def __init__(self, device_id: str, identifiers: set[tuple[str, Any]],
-                 config_entries: set[str], name: str | None = None) -> None:
+                 config_entries: set[str], name: str | None = None,
+                 via_device_id: str | None = None) -> None:
         self.id = device_id
         self.identifiers = identifiers
-        self.config_entries = set(config_entries)
+        self.config_entry_id = next(iter(config_entries), None)
         self.name = name
+        self.via_device_id = via_device_id
 
 
 class FakeDeviceRegistry:
-    """The registry surface dr.async_get(hass) hands back."""
+    """The registry surface dr.async_get(hass) hands back.
 
-    def __init__(self, devices: list[FakeDeviceEntry] | None = None,
-                 deleted: list[FakeDeviceEntry] | None = None) -> None:
+    Reproduces the upstream behaviour the integration leans on and nothing
+    else: a scoped lookup by one identifier plus the owning config entry,
+    get-or-create that returns the entry (new or existing) so its `.id` can be
+    read back, and removal that raises on a second call. `deleted_devices` is
+    an internal implementation detail of the real registry and raises here
+    the way core callers raise upstream, so an integration that so much as
+    reads it fails the suite instead of logging a warning nobody sees.
+    """
+
+    def __init__(self, devices: list[FakeDeviceEntry] | None = None) -> None:
         self.devices: dict[str, FakeDeviceEntry] = {d.id: d for d in devices or []}
-        self.deleted_devices: dict[str, FakeDeviceEntry] = {d.id: d for d in deleted or []}
         self.removed: list[str] = []
         self.created: list[dict[str, Any]] = []
+
+    @property
+    def deleted_devices(self) -> Any:
+        raise RuntimeError(
+            "deleted_devices is an internal implementation detail of the device "
+            "registry with no supported public use")
 
     def async_remove_device(self, device_id: str) -> None:
         # Upstream raises on a second removal of the same id; reproducing that
@@ -162,8 +182,33 @@ class FakeDeviceRegistry:
         del self.devices[device_id]
         self.removed.append(device_id)
 
-    def async_get_or_create(self, **kwargs: Any) -> None:
-        self.created.append(kwargs)
+    def async_get_device_by_identifier(self, identifier: tuple[str, Any],
+                                       config_entry_id: str) -> FakeDeviceEntry | None:
+        """Upstream-exact: one identifier, scoped to the owning config entry."""
+        for device in self.devices.values():
+            if device.config_entry_id == config_entry_id and identifier in device.identifiers:
+                return device
+        return None
+
+    def async_get_or_create(self, *, config_entry_id: str, identifiers: set[tuple[str, Any]],
+                            **kwargs: Any) -> FakeDeviceEntry:
+        """Return the existing device matching any identifier within the config
+        entry, else register a new one. Every call is recorded in `created`
+        with its keyword arguments, new or not, so a suite can assert exactly
+        what setup registered."""
+        self.created.append({"config_entry_id": config_entry_id,
+                             "identifiers": identifiers, **kwargs})
+        for identifier in identifiers:
+            device = self.async_get_device_by_identifier(identifier, config_entry_id)
+            if device is not None:
+                if kwargs.get("name"):
+                    device.name = kwargs["name"]
+                return device
+        device = FakeDeviceEntry(f"fake-device-{len(self.devices) + 1}", set(identifiers),
+                                 {config_entry_id}, kwargs.get("name"),
+                                 kwargs.get("via_device_id"))
+        self.devices[device.id] = device
+        return device
 
 
 class FakeConfigEntry:

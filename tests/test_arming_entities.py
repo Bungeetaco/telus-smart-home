@@ -52,6 +52,8 @@ import aiohttp  # noqa: E402
 import fakes  # noqa: E402
 from fakes import (  # noqa: E402
     FakeConfigEntry,
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
     FakeHass,
     FakeResponse,
     FakeSession,
@@ -266,9 +268,19 @@ async def test_apply_device_guards():
     assert coordinator.data["ad42"]["disarming_enabled"] is False
 
 
+def with_service_device(hass, entry):
+    """A phone's device links to the integration service device by registry
+    id, so the registry (which setup fills before any platform runs) has to
+    hold that device for the entity to build its DeviceInfo."""
+    hass.data["device_registry"] = FakeDeviceRegistry([FakeDeviceEntry(
+        "service-dev", {(adc.DOMAIN, f"{entry.entry_id}_integration")}, {entry.entry_id})])
+    return hass
+
+
 def disarming_switch(record=PHONE, coordinator=None):
     hass = FakeHass()
     entry = FakeConfigEntry()
+    with_service_device(hass, entry)
     coordinator = coordinator or adc.ArmingDevicesCoordinator(hass, entry)
     coordinator.data = {record["id"]: dict(record)} if record else {}
     entity = switch.ArmingDeviceDisarmingSwitch(coordinator, entry, "ad42")
@@ -390,6 +402,7 @@ async def test_panel_coordinator_and_pairing_switch():
 async def test_switch_platform_setup_gates_arming_and_panel_entities():
     hass = FakeHass()
     entry = FakeConfigEntry()
+    with_service_device(hass, entry)
     controller = types.SimpleNamespace(
         api=types.SimpleNamespace(devices=types.SimpleNamespace(cameras={})))
     hass.data["telus_smarthome"] = {entry.entry_id: {

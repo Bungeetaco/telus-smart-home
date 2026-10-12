@@ -45,8 +45,11 @@ Pinned here:
   3. `_is_doorbell`-- any one of the three chime capabilities is enough.
   4. doorbell      -- the enum matcher (locale-proof, description-proof), the
                       device correlation, restart safety, sibling timestamps,
-                      oldest-first firing with one state write per press, and
-                      an empty page never clearing the baseline.
+                      oldest-first firing with one state write per press, an
+                      empty page never clearing the baseline, and that the
+                      entity declares and fires only Home Assistant's standard
+                      `ring` type (a doorbell-class entity without it is
+                      refused from 2027.4).
   5. activity      -- the baseline, and the single extra fire an entry gets when
                       TELUS attaches its clip a poll or two after the entry.
 """
@@ -241,7 +244,10 @@ def test_doorbell_fires_on_a_french_described_press():
                                press(id="OLD", event_type_name="AccessControlUnlocked")])
     assert fired_ids(entity) == ["P1"]
     kind, attrs = entity.triggered_events[0]
-    assert kind == "press"
+    assert kind == ha_stubs.DoorbellEventType.RING, (
+        f"fired {kind!r}: a doorbell-class entity fires the standard `ring` "
+        "type, the one generic doorbell automations and Home Assistant's own "
+        "doorbell handling key on")
     assert attrs["camera_id"] == CAMERA_ID
     assert attrs["description"] == PRESS_DESCRIPTION_FR
     assert attrs["event_type_name"] == DOORBELL_PRESS_EVENT_TYPE_NAME
@@ -364,10 +370,18 @@ def test_doorbell_empty_page_is_a_failed_poll_not_a_baseline():
 
 
 def test_doorbell_declares_the_only_type_it_fires():
-    assert DOORBELL_EVENT_TYPES == ["press"]
+    """`EventDeviceClass.DOORBELL` carries a vocabulary: the entity must declare
+    `DoorbellEventType.RING` or Home Assistant refuses the entity outright
+    from 2027.4 (a deprecation warning until then). And RING is the ONLY type:
+    TELUS reports one press event with no long/double-press distinction, and a
+    second type fired for the same press would be a second state write and a
+    second automation run per ring."""
+    assert DOORBELL_EVENT_TYPES == [ha_stubs.DoorbellEventType.RING], (
+        f"declares {DOORBELL_EVENT_TYPES!r}")
+    assert DOORBELL_EVENT_TYPES[0] == "ring", "the standard type's wire value"
     assert TelusDoorbellEvent._attr_event_types == DOORBELL_EVENT_TYPES
     assert TelusDoorbellEvent._attr_device_class == ha_stubs.EventDeviceClass.DOORBELL
-    print("  ok  doorbell: declares device class doorbell and the single 'press' type")
+    print("  ok  doorbell: declares device class doorbell and only the standard 'ring' type")
 
 
 def test_doorbell_clip_link_is_signed_when_a_secret_exists():

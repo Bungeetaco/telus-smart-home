@@ -247,7 +247,7 @@
                 "state_attributes": {
                     "event_type": {
                         "state": {
-                            "press": "已按下"
+                            "ring": "已按下"
                         }
                     }
                 }

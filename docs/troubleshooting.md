@@ -435,7 +435,9 @@ link produces (30-60 s, self-healing) never reach it. With
 setting once per `DEVICE_KICK_COOLDOWN_S` to force an encoder reconfigure, and
 records each attempt in the `device_kick*` status fields; see
 [camera-bridge.md](camera-bridge.md#device-side-escalation-device_kickpy)
-for what the kick writes and for its unverified status. Backlog E103.
+for what the kick writes and for the limit of what is known about its effect
+(one live occurrence, recovery seven minutes after the kick, no proof of
+cause). Backlog E103.
 
 **Fix.** Confirm live view also fails in the vendor's own app, which isolates
 the device/cloud from this stack; then power-cycle the camera. If the opt-in

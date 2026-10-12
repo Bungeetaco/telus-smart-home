@@ -247,7 +247,7 @@
                 "state_attributes": {
                     "event_type": {
                         "state": {
-                            "press": "চাপা হয়েছে"
+                            "ring": "চাপা হয়েছে"
                         }
                     }
                 }

@@ -9,6 +9,7 @@ from typing import Any, Final
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory, EntityDescription
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -69,18 +70,42 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
             "identifiers": {(DOMAIN, self._adc_id)},
         }
 
-        # Only link via_device when it points at a partition device that is
-        # actually created elsewhere (the AlarmControlPanel entity's device,
-        # identified by partition_id). The partition/panel device itself has
-        # no partition_id (it IS the partition), so it must not reference
-        # itself via a dangling (DOMAIN, None) identifier -- doing so is a
-        # deprecated, non-existent via_device link per HA's device registry
-        # rules and logs a warning that will become a hard failure in a
-        # future core release.
+        # Link to the partition's device (the AlarmControlPanel entity's,
+        # identified by partition_id) by REGISTRY ID, never by identifier
+        # tuple: identifiers are only unique per config entry, so HA deprecated
+        # `via_device` and refuses it from 2027.8. The partition/panel device
+        # itself has no partition_id (it IS the partition) and may not be its
+        # own via device (HomeAssistantError upstream), hence the self check.
+        # The lookup is scoped to this config entry and raises ValueError when
+        # no partition device exists yet; __init__.py registers every partition
+        # before it forwards the platforms precisely so that never happens, but
+        # a missing link is the honest fallback, not a platform that fails to
+        # set up.
         if self._device.partition_id and self._device.partition_id != self._adc_id:
-            device_info["via_device"] = (DOMAIN, self._device.partition_id)
+            via_device_id = self._partition_device_id(self._device.partition_id)
+            if via_device_id is not None:
+                device_info["via_device_id"] = via_device_id
 
         self._attr_device_info = DeviceInfo(device_info)
+
+    def _partition_device_id(self, partition_id: str) -> str | None:
+        """Registry id of this config entry's device for `partition_id`, or
+        None (logged) when it has not been registered."""
+        try:
+            return dr.async_get_device_id_by_identifier(
+                self._controller.hass,
+                (DOMAIN, partition_id),
+                config_entry_id=self._controller.config_entry.entry_id,
+            )
+        except ValueError:
+            LOGGER.warning(
+                "%s (%s): partition %s has no device in the registry yet; "
+                "the device is created without a 'connected via' link.",
+                self._device.name,
+                self._adc_id,
+                partition_id,
+            )
+            return None
 
     @property
     def device_type_name(self) -> str:

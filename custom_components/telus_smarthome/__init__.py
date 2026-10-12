@@ -167,12 +167,15 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         if device.device_subtype not in SENSOR_SUBTYPE_BLACKLIST and device.has_state:
             device_ids_via_adc.add(device.id_)
 
-    # Purge deleted devices from Home Assistant
-    for deleted_device in list(device_registry.deleted_devices.values()):
-        for identifier in deleted_device.identifiers:
-            if identifier[0] == DOMAIN:
-                LOGGER.info("Removing orphaned device from Home Assistant: %s", deleted_device.identifiers)
-                del device_registry.deleted_devices[deleted_device.id]
+    # The registry's deleted-device records are deliberately left alone. An
+    # earlier pass purged this domain's records out of `deleted_devices`, which
+    # is an internal container of the registry with no public replacement
+    # (deprecated for any access, removed in 2027.9). Nothing is lost by not
+    # purging: Home Assistant itself restores a deleted device's id, area,
+    # labels and name when a device with the same identifiers is registered
+    # again (a sensor removed from Alarm.com and re-added gets its
+    # customisations back), and expires records orphaned by a removed config
+    # entry on its own schedule.
 
     # Will be used during virtual device creation.
     device_ids_via_hass: set[str] = set()
@@ -245,6 +248,29 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             model="Skybell HD",
             manufacturer="Skybell",
         )
+
+    # Register the two kinds of device every other device links to BEFORE the
+    # platforms are set up. Links are by registry id (`via_device_id`), which
+    # base_device.py and arming_devices_coordinator.py look up scoped to this
+    # entry when an entity is built; the platforms are set up concurrently, so
+    # without this the first platform's entities would find no partition
+    # device and silently come up unlinked. Registering by identifier here and
+    # again from each platform's DeviceInfo lands on the same device (same
+    # identifier, same config entry) and merges the rest of its details.
+    for partition in controller.api.devices.partitions.values():
+        device_registry.async_get_or_create(
+            config_entry_id=config_entry.entry_id,
+            identifiers={(DOMAIN, partition.id_)},
+            name=partition.name,
+            manufacturer="Alarm.com",
+        )
+    device_registry.async_get_or_create(
+        config_entry_id=config_entry.entry_id,
+        identifiers={(DOMAIN, f"{config_entry.entry_id}_integration")},
+        name="TELUS Smart Home Integration",
+        manufacturer="TELUS",
+        entry_type=dr.DeviceEntryType.SERVICE,
+    )
 
     # Create real devices
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)

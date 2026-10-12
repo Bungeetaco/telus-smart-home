@@ -26,7 +26,7 @@ from typing import Any
 
 import aiohttp
 from homeassistant import core
-from homeassistant.components.event import EventDeviceClass, EventEntity
+from homeassistant.components.event import DoorbellEventType, EventDeviceClass, EventEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, DiscoveryInfoType
@@ -76,10 +76,13 @@ EVENT_TYPES = ["person", "vehicle", "animal", "other"]
 # event_type_name is an enum and is not translated.
 DOORBELL_PRESS_EVENT_TYPE_NAME = "DoorbellButtonPress"
 
-# The one event type the doorbell entity fires. EventDeviceClass.DOORBELL
-# imposes no vocabulary of its own, so this is ours; a single member because
-# TELUS's feed reports one press event with no long/double-press distinction.
-DOORBELL_EVENT_TYPES = ["press"]
+# The one event type the doorbell entity fires: Home Assistant's standard
+# `ring` for the doorbell device class, which every doorbell-class entity must
+# declare (a deprecation warning now, refused from 2027.4) and which generic
+# doorbell automations key on. A single member because TELUS's feed reports one
+# press event with no long/double-press distinction; a second type fired for
+# the same press would be a second state write and a second automation run.
+DOORBELL_EVENT_TYPES = [DoorbellEventType.RING]
 
 
 def _clip_link_for(config_entry: ConfigEntry, video_event_id: str | None) -> str | None:

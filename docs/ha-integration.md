@@ -236,10 +236,27 @@ cameras (keyed by TELUS camera UUID), the Activity device, the diagnostic
 against silently discarding user customizations (renames, area assignments,
 enable/disable state) on every restart.
 
+The registry's deleted-device records are left alone: they are an internal
+container of the registry with no public API, and Home Assistant restores a
+deleted device's id, area, labels and name itself when a device with the same
+identifiers is registered again (a sensor removed from Alarm.com and re-added
+gets its customisations back), then expires records orphaned by a removed
+config entry on its own schedule.
+
 Skybell cameras are created as **virtual devices** in the registry (model
 `Skybell HD`, manufacturer `Skybell`). These represent the *configuration*
 surface (the switch/select/number config entities); live video for cameras is
 handled by the camera bridge, not by these virtual devices.
+
+Setup then registers, before it forwards the platforms, every **partition's
+device** (name from the account, manufacturer `Alarm.com`) and the **"TELUS
+Smart Home Integration" service device**. Every other device links to one of
+those two by registry id (`via_device_id`: Alarm.com devices to their
+partition, paired phones to the service device), the id is looked up when the
+entity is built, and the platforms are set up concurrently -- so the anchors
+have to exist first or the first platform's devices would come up unlinked.
+Each platform's own `DeviceInfo` for the same identifier lands on the same
+device and merges its details.
 
 ### `async_unload_entry`
 
@@ -548,9 +565,11 @@ controller from `hass.data`, then creates one entity per matching device in
 `base_device.py` provides the shared `CoordinatorEntity` subclasses:
 
 - **`BaseDevice`**: holds the library device reference, builds `DeviceInfo`
-  (manufacturer `Alarm.com`, linking to a partition device via `via_device` only
-  when a real partition id exists), and exposes battery-level, battery-alert, and
-  malfunction helpers. It registers an external update callback and, on each
+  (manufacturer `Alarm.com`, linked to its partition's device by registry id,
+  `via_device_id`, looked up scoped to the config entry only when a real
+  partition id exists and it is not the partition itself; a partition with no
+  registry device yet means no link, logged, never a failed platform), and
+  exposes battery-level, battery-alert, and malfunction helpers. It registers an external update callback and, on each
   coordinator update, re-fetches its device by id. If the device was removed from
   Alarm.com mid-session it catches `UnkonwnDevice`, marks the entity unavailable
   (`_device_missing`, since `available` is a property and the `_attr_` shorthand
@@ -770,8 +789,10 @@ to decide *which* cameras get a doorbell entity; see below.
   key off something the account's language does not change.
 - **`TelusDoorbellEvent`**: one `EventEntity` per doorbell, device class
   **`doorbell`**, attached to that camera's existing device. Fires the single
-  event type `press`. This is what a ring-triggered automation should trigger
-  on; see [Triggering on a doorbell press](#triggering-on-a-doorbell-press)
+  event type `ring` (`DoorbellEventType.RING`, the standard type every
+  doorbell-class entity must declare; TELUS reports no long/double press, so
+  there is no second type). This is what a ring-triggered automation should
+  trigger on; see [Triggering on a doorbell press](#triggering-on-a-doorbell-press)
   below for the mechanics and the rationale.
 - All three entity kinds attach a durable, signed **`clip_link`** (via
   `_clip_link_for` → `clip_view.py`) alongside the raw `download_url`. The raw

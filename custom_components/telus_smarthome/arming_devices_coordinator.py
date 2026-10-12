@@ -68,6 +68,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -486,9 +487,12 @@ def arming_device_device_info(
     Home Integration" entry and read as "<the integration> <someone>'s iPhone",
     which says nothing about whose phone opens the house.
 
-    `via_device` points at that service device, which sensor.py's auth health
-    sensor creates unconditionally at setup -- so unlike the dangling link
-    base_device.py warns about, it always resolves.
+    `via_device_id` is the registry id of that service device, looked up
+    scoped to this config entry (the identifier-tuple form, `via_device`, is
+    deprecated upstream and refused from 2027.8). __init__.py registers the
+    service device before it forwards the platforms, so the lookup resolves;
+    should it ever not, the phone's device is created without the link rather
+    than the platform failing to set up.
 
     `name` is the phone's description exactly as the account holder typed it,
     passed straight through: it may contain a curly apostrophe (U+2019) and it is
@@ -501,12 +505,24 @@ def arming_device_device_info(
     device properly. Two copies would be two chances for one of them to register
     a nameless device.
     """
-    return DeviceInfo(
+    info = DeviceInfo(
         identifiers={(DOMAIN, device_id)},
         name=(coordinator.data or {}).get(device_id, {}).get("description") or device_id,
         model="Bluetooth arming device",
-        via_device=(DOMAIN, f"{config_entry.entry_id}_integration"),
     )
+    service_identifier = (DOMAIN, f"{config_entry.entry_id}_integration")
+    try:
+        info["via_device_id"] = dr.async_get_device_id_by_identifier(
+            coordinator.hass, service_identifier, config_entry_id=config_entry.entry_id
+        )
+    except ValueError:
+        LOGGER.warning(
+            "Arming device %s: the integration service device %s is not in the "
+            "registry; the device is created without a 'connected via' link.",
+            device_id,
+            service_identifier,
+        )
+    return info
 
 
 async def _async_bridge_write(

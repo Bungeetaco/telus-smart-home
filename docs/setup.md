@@ -36,7 +36,7 @@ credential-sync internals), see [configuration.md](configuration.md).
 
 | Requirement | Detail |
 | --- | --- |
-| **Home Assistant** | 2024.11.0 or newer, running in a **container** that uses `--network host` (see below). The integration installs into HA's `custom_components/` directory. |
+| **Home Assistant** | 2026.8.0 or newer, running in a **container** that uses `--network host` (see below). The integration installs into HA's `custom_components/` directory. |
 | **Docker + Compose plugin** | The camera bridge is a Docker container built and run with `docker compose`. The host needs Docker with the `compose` plugin (`docker compose`, not the legacy `docker-compose`). |
 | **A GPU render node (recommended)** | The bridge encodes H.264 in hardware by default. On Intel (QuickSync) / AMD hosts this is VAAPI via `/dev/dri/renderD128`; the container's non-root user needs membership in the host `render` group. NVIDIA is supported via `nvidia-container-toolkit` but is unverified against real NVIDIA hardware. With no usable GPU the bridge automatically falls back to software `libx264`: it still works, just at higher CPU cost. See [configuration.md](configuration.md) for `ENCODE_BACKEND`, `VAAPI_DEVICE`, and `RENDER_GID`. |
 | **A TELUS Smart Home account** | Username/password. Note the bridge's login is username/password **only**: it has no MFA/2FA support (the HA integration does). If MFA is enabled on the account, camera streaming breaks independently of the panel/sensor entities. |

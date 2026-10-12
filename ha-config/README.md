@@ -10,6 +10,7 @@ id needs re-checking first.
 | --- | --- |
 | `telus_doorbell.yaml` | A Home Assistant **package**: the actionable-notification doorbell intercom (press + no-press visitor + still-waiting follow-up, three tap-to-speak quick replies), its mute toggle, and the Frigate-fed "person at door" sensor it needs |
 | `doorbell-dashboard.yaml` | A Lovelace **view** modelled on the TELUS Android app's doorbell panel: live view, tap-to-speak buttons, chime/audio settings, activity, stream-health diagnostics |
+| `camera_no_media.yaml` | A Home Assistant **package**: the camera "no media" watch. Three automations push a camera's entry into the bridge's `no_media` stream state, each device-kick outcome, and the recovery to the phone under one notification tag per camera (see [Installing the no-media watch](#installing-the-no-media-watch)) |
 
 ## The one rule everything here honours
 
@@ -46,6 +47,29 @@ The package's `automation:`, `input_boolean:` and `template:` lists merge
 with the existing ones; nothing in the live configuration is overridden
 (every id here is namespaced `telus_doorbell_`).
 
+## Installing the no-media watch
+
+`camera_no_media.yaml` needs the packages wiring above and the integration's
+Stream state sensors (`sensor.doorbell_stream_state`,
+`sensor.living_room_stream_state`) with the device-kick attributes
+(`device_kicks`, `last_device_kick`, integration v1.30.1 or later). It
+contains only `automation:` entries, so after copying it into
+`/config/packages/` the config check plus an **automation reload** is enough;
+no restart. The notify target is the same phone service as the doorbell
+package.
+
+What it pushes, all under the tag `camera-no-media-<entity id>` so the phone
+shows one card per camera that updates rather than stacking: the camera
+entering `no_media` (after a minute there, on top of the bridge's own
+five-minute threshold); every change of `last_device_kick` (the kick's
+outcome, with the stream state at that moment); and the camera **leaving**
+`no_media` for `reconnecting` or `streaming`. The recovery trigger lists both
+because the sensor passes through `reconnecting` on its way back to
+`streaming`, so a `no_media` to `streaming` trigger never fires; `unavailable`
+and `unknown` are deliberately not recoveries. The recovery message says which
+of the two it was and how many kicks the bridge has sent this run, which is
+the evidence backlog E103 collects per occurrence.
+
 ## Installing the dashboard view
 
 `doorbell-dashboard.yaml` is one **view**, not a whole dashboard. Add it to
@@ -68,7 +92,7 @@ Every entity id below was read out of the running system on 2026-08-25
 live `configuration.yaml`, `automations.yaml`, Frigate's `config.yml` and the
 Lovelace resource list). None are guesses.
 
-- `camera.doorbell`, `event.doorbell_button_press` (event type `press`),
+- `camera.doorbell`, `event.doorbell_button_press` (event type `ring`),
   `event.doorbell_recent_activity`
 - `notify.mobile_app_cph2655` (the service the deployment's existing phone
   notifications already use), `tts.home_assistant_cloud`,

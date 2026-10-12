@@ -212,7 +212,7 @@ crash-restart guard.
 | `CLOUD_HOLD_INITIAL_S` | `60` (env-overridable) | How long every TELUS website call is held after a 401/403 that **survives a fresh login** -- the edge refusing the account rather than an expired cookie (backlog E104; see [camera-bridge.md](camera-bridge.md#the-cloud-hold-cloud_holdpy)). Doubles per consecutive strike; the first call after a hold expires is the probe. An explicit `Retry-After` is honoured as-is instead. |
 | `CLOUD_HOLD_MAX_S` | `30 * 60` (env-overridable) | Ceiling on that doubling: the observed block is ~30 min, and a longer hold would only delay the probe. |
 | `NO_MEDIA_STATE_AFTER_S` | `300` (env-overridable) | How long a camera's failure run must consist of negotiated-but-silent sessions (`webrtcup`, then no frame) **while another camera keeps delivering through the same process** before its `/control/status` state reads `no_media` instead of `reconnecting` (backlog E103; see [camera-bridge.md](camera-bridge.md#device-side-escalation-device_kickpy)). Long enough that a doorbell's ordinary 30-60 s blips of the same signature, which self-heal, never reach it. |
-| `DEVICE_KICK_ENABLED` | `false` (env-overridable) | Whether a camera that has been in `no_media` for `DEVICE_KICK_AFTER_S` gets its live-resolution setting cycled through the settings API to force an encoder reconfigure. Off by default: the kick writes to a device in someone's home and whether it clears the wedge is unverified. |
+| `DEVICE_KICK_ENABLED` | `false` (env-overridable) | Whether a camera that has been in `no_media` for `DEVICE_KICK_AFTER_S` gets its live-resolution setting cycled through the settings API to force an encoder reconfigure. Off by default: the kick writes to a device in someone's home, and whether it clears the wedge rests on one live occurrence (recovery seven minutes after the kick, which that camera's ordinary reconnects could also explain; backlog E103). |
 | `DEVICE_KICK_AFTER_S` | `600` (env-overridable) | How long in `no_media` before the first kick. |
 | `DEVICE_KICK_COOLDOWN_S` | `1800` (env-overridable) | Minimum time between kicks on one camera, measured from the last kick, whether it succeeded or failed. |
 | `VOIPMS_SIP_SERVER` / `VOIPMS_SIP_ACCOUNT` / `VOIPMS_SIP_PASSWORD` | (empty) | The VoIP.ms POP hostname and SIP sub-account for the outbound call leg. All three empty by default, which disables `POST /control/call/test` entirely; the deployment opts in via its env file. The password is used for digest computation only and never appears in a SIP message or a log. |
@@ -353,7 +353,7 @@ Assistant UI. There are no YAML settings.
 | --- | --- | --- |
 | `name` | `TELUS Smart Home` | Display name in HACS. |
 | `render_readme` | `true` | Render the repo README as the HACS info page. |
-| `homeassistant` | `2024.11.0` | Minimum Home Assistant version. |
+| `homeassistant` | `2026.8.0` | Minimum Home Assistant version. The integration links devices by registry id (`via_device_id`) and looks that id up with `async_get_device_id_by_identifier`, both of which exist from 2026.8; the doorbell entity's standard `ring` type needs 2026.4. |
 | `zip_release` | `false` | Install from the repo tree, not a packaged zip release. |
 
 `manifest.json` (how Home Assistant loads the integration):

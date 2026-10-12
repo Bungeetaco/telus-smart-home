@@ -1,0 +1,128 @@
+# Camera "no media" watch.
+#
+# The camera bridge reports `no_media` on a camera's Stream state sensor when
+# that camera keeps negotiating sessions and delivering no frames for five
+# minutes while the other camera streams through the same bridge: a fault at
+# the device's own publish leg (telus-smart-home backlog E103), which has
+# previously sat on `reconnecting` for 22+ hours unnoticed. With
+# DEVICE_KICK_ENABLED on the bridge, ten minutes into that state the bridge
+# cycles the camera's live-resolution setting and records the outcome on the
+# same sensor (`last_device_kick` attribute, integration v1.30.1 or later).
+# The kick has run against one live wedge so far: the camera was streaming
+# again about seven minutes after it, which one sample cannot separate from
+# the wedge clearing on its own. These pushes are how each occurrence gets
+# recorded with its kick count instead of missed.
+#
+# Design: one Android tag per camera, so the outage, each kick outcome and the
+# recovery update ONE notification rather than stacking. Normal priority on the
+# "Home security" channel - a camera outage is a degradation, not an emergency.
+# A minute of `for:` is enough since the bridge's own five-minute threshold
+# already filters the doorbell's 30-60 s Wi-Fi blips.
+#
+# The recovery trigger fires on LEAVING no_media for `reconnecting` OR
+# `streaming`: the sensor always passes through `reconnecting` on its way back
+# to `streaming`, so a `no_media` -> `streaming` trigger never fires (it did
+# not, on the first occurrence). `unavailable` and `unknown` are not
+# recoveries and are deliberately not listed.
+
+automation:
+  - id: camera_no_media_push
+    alias: Camera no media - push to phone
+    description: >-
+      A camera has been in the bridge's no_media state for a minute: it
+      negotiates sessions but delivers no frames while the other camera
+      streams. The bridge will cycle its live resolution after ten minutes in
+      this state (device kick); the outcome arrives as an update to this same
+      notification.
+    mode: parallel
+    triggers:
+      - trigger: state
+        entity_id:
+          - sensor.doorbell_stream_state
+          - sensor.living_room_stream_state
+        to: no_media
+        for: "00:01:00"
+    conditions: []
+    actions:
+      - action: notify.mobile_app_cph2655
+        data:
+          title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}: no media"
+          message: >-
+            Sessions negotiate but no frames arrive while the other camera
+            streams: the camera's own publish leg is wedged. The bridge sends a
+            device kick (live-resolution cycle) after 10 minutes in this state;
+            this notification updates with the result. If it stays stuck,
+            power-cycle the camera.
+          data:
+            channel: Home security
+            importance: high
+            tag: "camera-no-media-{{ trigger.entity_id }}"
+            notification_icon: mdi:cctv-off
+
+  - id: camera_device_kick_result_push
+    alias: Camera device kick result - push to phone
+    description: >-
+      The bridge recorded a device kick outcome (ok / failed / not sent) for a
+      camera. Updates the camera's no-media notification with it. A
+      "failed: ... camera LEFT at ..." value means the restore write failed and
+      the live resolution must be set back by hand.
+    mode: parallel
+    triggers:
+      - trigger: state
+        entity_id:
+          - sensor.doorbell_stream_state
+          - sensor.living_room_stream_state
+        attribute: last_device_kick
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.to_state.attributes.last_device_kick is not none }}"
+    actions:
+      - action: notify.mobile_app_cph2655
+        data:
+          title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}: device kick"
+          message: >-
+            Kick #{{ trigger.to_state.attributes.device_kicks }}:
+            {{ trigger.to_state.attributes.last_device_kick }}. Stream state is
+            now {{ trigger.to_state.state }}.
+          data:
+            channel: Home security
+            importance: high
+            tag: "camera-no-media-{{ trigger.entity_id }}"
+            notification_icon: mdi:cctv
+
+  - id: camera_no_media_recovered_push
+    alias: Camera no media recovered - push to phone
+    description: >-
+      The camera left no_media, for reconnecting (sessions negotiating again)
+      or straight to streaming. Updates the same notification so the phone
+      shows the outage ended, and says how many kicks the bridge has sent
+      this run, which is the per-occurrence evidence E103 collects.
+    mode: parallel
+    triggers:
+      - trigger: state
+        entity_id:
+          - sensor.doorbell_stream_state
+          - sensor.living_room_stream_state
+        from: no_media
+        to:
+          - reconnecting
+          - streaming
+    conditions: []
+    actions:
+      - action: notify.mobile_app_cph2655
+        data:
+          title: >-
+            {{ state_attr(trigger.entity_id, 'friendly_name') }}:
+            {{ 'streaming again' if trigger.to_state.state == 'streaming'
+               else 'left no_media, reconnecting' }}
+          message: >-
+            {{ 'Streaming again' if trigger.to_state.state == 'streaming'
+               else 'Out of no_media and negotiating a session again; streaming usually follows within a minute' }}.
+            Device kicks sent this bridge run:
+            {{ trigger.to_state.attributes.device_kicks | default(0) }}
+            ({{ trigger.to_state.attributes.last_device_kick | default('none') }}).
+          data:
+            channel: Home security
+            importance: default
+            tag: "camera-no-media-{{ trigger.entity_id }}"
+            notification_icon: mdi:cctv

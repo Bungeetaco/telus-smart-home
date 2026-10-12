@@ -352,7 +352,8 @@ and evidence. Grouped by whether anything can actually be done about them.
   E104-E106 land is the thing to watch.
 
 - **E103** (PARTLY DONE: the `no_media` state and the opt-in kick are
-  shipped; the kick's effect on a wedged device is unverified; robustness) - a
+  shipped; the kick has run once against a live wedge and the camera recovered
+  seven minutes later, one sample, cause not established; robustness) - a
   camera whose cloud publish leg wedges is
   unreachable by every recovery lever the bridge has, and the bridge retries
   forever with nothing escalating to the device. Observed live for 22+ hours
@@ -400,18 +401,41 @@ and evidence. Grouped by whether anything can actually be done about them.
   signature; exactly one kick per cooldown; off by default; a failing kick is
   recorded and never ends the loop), and `tests/test_stream_health_sensors.py`
   for the sensor vocabulary. (3) A device reboot command: still none in
-  pyalarmdotcomajax 0.5.13 and not surveyed on the portal. **What stays
-  open:** whether the resolution cycle actually clears a wedged publisher.
-  The wedge has not recurred since the kick was written, so it has never run
-  against one; the next occurrence is the live test (enable the kick, watch
-  `last_device_kick` and whether `last_frame_at` moves within the next
-  rotation). Until then the kick stays off by default and this entry stays
-  partly done. The Stream state sensor carries `device_kicks`,
-  `last_device_kick_at` and `last_device_kick` as attributes, so a phone
-  automation can trigger on the outcome; on the reference deployment the kick
-  is enabled and three automations push the no_media entry, each kick result
-  and the recovery to the phone under one notification tag, which is how the
-  next occurrence gets observed.
+  pyalarmdotcomajax 0.5.13 and not surveyed on the portal. The Stream state
+  sensor carries `device_kicks`, `last_device_kick_at` and `last_device_kick`
+  as attributes, so a phone automation can trigger on the outcome; on the
+  reference deployment the kick is enabled and the three automations in
+  `ha-config/camera_no_media.yaml` push the no_media entry, each kick result
+  and the recovery to the phone under one notification tag.
+
+  **First observed occurrence, with the kick enabled** (2026-10-08 UTC,
+  doorbell camera, read back from HA's recorder history of the Stream state
+  sensor and its kick attributes; the bridge log had rotated past it by the
+  time it was examined, so the sensor record is the only bridge-side
+  evidence): 04:02:28 `reconnecting`, 04:03:28 `streaming`, 04:04:58
+  `reconnecting`, 04:10:28 `no_media`, kick sent 04:15:15
+  (`last_device_kick = "ok: {'restored': '1440x1440', 'via': '960x960'}"`,
+  `device_kicks = 1`, the restore write succeeded), 04:21:58 `reconnecting`,
+  04:22:28 `streaming`. About 11.5 minutes in `no_media` in all; streaming
+  again about seven minutes after the kick. The living-room camera streamed
+  throughout, and has had no `no_media` episode since the watch went live.
+  The phone got the no_media push at 04:11:28 and the kick-result push at
+  04:15:28; the recovery push never fired, because its trigger waited for
+  `no_media` to go straight to `streaming` while the sensor always passes
+  through `reconnecting` first (fixed in the package: it now fires on leaving
+  `no_media` for either state, and the copy in `ha-config/` is the tracked
+  one).
+
+  **Limit of the evidence, and what stays open:** one sample. The kick
+  correlates with the recovery but does not prove it: this camera's ordinary
+  reconnects of the same signature also resolve, usually within a minute, and
+  this run had sat for five-plus minutes before the kick, so a recovery
+  seven minutes later is consistent with the kick working and with the wedge
+  clearing on its own. `DEVICE_KICK_ENABLED` therefore stays off by default,
+  and the entry stays partly done until enough occurrences separate the two
+  (the recovery push now records the kick count on each one). Also still
+  open: whether a kick sent EARLIER (a shorter `DEVICE_KICK_AFTER_S`) shortens
+  the outage, which one occurrence cannot say.
 
 - **E102** (open, small, ops) - the stack watcher fails a sample whenever the
   talkdown `failed` counter is NONZERO, but that counter is cumulative per

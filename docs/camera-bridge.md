@@ -682,11 +682,14 @@ edge refuses it rather than the kick walking into a block.
 **What is known and what is not.** The write itself is the same
 read-modify-write the settings control route uses, and the restore of the
 original value is verified by test. **Whether the cycle clears the wedge is
-unverified**: the wedge has not recurred since the kick was written, so it has
-never been applied to a wedged device. That is why it is off by default, and
-why every attempt is recorded in `/control/status` (`device_kicks`,
-`last_device_kick_at`, `last_device_kick`) and logged at warning: the next
-occurrence is the live test, and the status fields are its record.
+not established**: the kick has been applied to a wedged camera exactly once
+(backlog E103 has the timeline), the restore succeeded, and the camera was
+streaming again about seven minutes later -- but that camera's ordinary
+reconnects also resolve on their own, so one sample shows correlation, not
+cause. That is why it stays off by default, and why every attempt is recorded
+in `/control/status` (`device_kicks`, `last_device_kick_at`,
+`last_device_kick`) and logged at warning: each further occurrence is another
+sample, and the status fields are its record.
 
 Failure handling, because this writes to a device in someone's home: a camera
 that offers fewer than two resolution options, or whose document says the

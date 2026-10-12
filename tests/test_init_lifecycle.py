@@ -29,8 +29,10 @@ ever) surfaces days later.
 Pinned here: the auth/transport exception mapping at setup, the clip secret's
 generate-once-never-rotate rule, the view's once-per-HA-run registration, the
 bridge-down-at-startup tolerance (setup completes, coordinators empty), the
-whole device-pruning matrix, Skybell virtual-device creation, platform
-forwarding, service registration, the v1-to-v4 options migrations, and
+whole device-pruning matrix (and that setup never touches the registry's
+internal deleted-device container), Skybell virtual-device creation, the
+partition and service devices registered ahead of the platforms so every
+`via_device_id` lookup resolves, platform forwarding, service registration, the v1-to-v4 options migrations, and
 unload's pop/stop/unregister ordering including the services-outlive-the-
 first-entry rule and the clip_view sentinel exclusion.
 
@@ -86,7 +88,7 @@ async def _absent_bridge(hass, url, params=None, timeout=None):
     return None  # no control secret yet: the bridge is down at HA startup
 
 
-def scripted_controller(initialize_outcome=None, devices=(), cameras=()):
+def scripted_controller(initialize_outcome=None, devices=(), cameras=(), partitions=()):
     class _Controller:
         instances = []
 
@@ -95,8 +97,9 @@ def scripted_controller(initialize_outcome=None, devices=(), cameras=()):
             self.config_entry = config_entry
             self.stopped = 0
             self.api = types.SimpleNamespace(devices=types.SimpleNamespace(
-                all={d.id_: d for d in devices},
+                all={d.id_: d for d in (*devices, *partitions)},
                 cameras={c.id_: c for c in cameras},
+                partitions={p.id_: p for p in partitions},
             ))
             _Controller.instances.append(self)
 
@@ -119,11 +122,16 @@ def adc_device(device_id, subtype=None, has_state=True, name="Zone"):
                                  mac_address="aa:bb:cc:dd:ee:ff")
 
 
-def make_hass(entry, devices=(), deleted=()):
+def make_hass(entry, devices=()):
     hass = FakeHass()
     hass.config_entries = FakeConfigEntries([entry])
-    hass.data["device_registry"] = FakeDeviceRegistry(list(devices), list(deleted))
+    hass.data["device_registry"] = FakeDeviceRegistry(list(devices))
     return hass
+
+
+def registered_identifiers(registry):
+    return {identifier for device in registry.devices.values()
+            for identifier in device.identifiers}
 
 
 async def run_setup(hass, entry, controller_cls):
@@ -218,6 +226,7 @@ async def test_setup_prunes_only_absent_alarm_devices():
         adc_device("123-456"),  # still on Alarm.com
     ]
     cameras = [adc_device("77-88", name="Skybell")]
+    partitions = [adc_device("123-1", name="Main partition")]
     registry_devices = [
         FakeDeviceEntry("keep-present", {(DOMAIN, "123-456")}, {"entryX"}),
         FakeDeviceEntry("keep-attr", {(DOMAIN, "123-456_low_battery")}, {"entryX"}),
@@ -229,10 +238,15 @@ async def test_setup_prunes_only_absent_alarm_devices():
         FakeDeviceEntry("keep-service", {(DOMAIN, "entryX_integration")}, {"entryX"}),
         FakeDeviceEntry("keep-foreign", {("hue", "123-999")}, {"entryX"}),
     ]
-    deleted = [FakeDeviceEntry("stale-deleted", {(DOMAIN, "123-000")}, {"entryX"})]
     entry = FakeConfigEntry(entry_id="entryX")
-    hass = make_hass(entry, registry_devices, deleted)
-    controller_cls = scripted_controller(devices=devices, cameras=cameras)
+    hass = make_hass(entry, registry_devices)
+    controller_cls = scripted_controller(devices=devices, cameras=cameras,
+                                         partitions=partitions)
+    # The fake registry's `deleted_devices` raises on any access, the way the
+    # real one does for core callers: setup must never touch that container.
+    # The purge it used to run there has no public replacement, and Home
+    # Assistant restores a deleted device's id/area/name itself when the
+    # device comes back, then expires orphaned records on its own clock.
     assert await run_setup(hass, entry, controller_cls)
 
     registry = hass.data["device_registry"]
@@ -240,12 +254,53 @@ async def test_setup_prunes_only_absent_alarm_devices():
         f"removed {registry.removed!r}: exactly the device Alarm.com no longer "
         "has -- never this fork's own devices, never attribute-suffixed ids of "
         "present devices, never another integration's, and never twice")
-    assert registry.deleted_devices == {}, (
-        "orphaned deleted-device records must be purged")
-    created = registry.created
-    assert len(created) == 1 and created[0]["identifiers"] == {(DOMAIN, "77-88")}, (
-        f"created {created!r}: the Skybell camera absent from the registry "
-        "gets its virtual device, and nothing else is re-created")
+    created = {next(iter(call["identifiers"])) for call in registry.created}
+    assert created == {(DOMAIN, "77-88"), (DOMAIN, "123-1"), (DOMAIN, "entryX_integration")}, (
+        f"registered {sorted(created)!r}: the Skybell camera absent from the "
+        "registry gets its virtual device, each partition and the integration "
+        "service device are registered ahead of the platforms (they are the "
+        "via devices every other device links to by registry id), and nothing "
+        "else is re-created")
+    assert registry.devices["keep-service"].name == "TELUS Smart Home Integration", (
+        "the service device registration must land on the EXISTING service "
+        "device (same identifier, same config entry), not fork a second one")
+
+
+async def test_setup_registers_the_via_devices_before_forwarding_platforms():
+    """Every Alarm.com device links to its partition's device, and every paired
+    phone to the integration service device, by registry id (`via_device_id`).
+    The id is looked up when the entity is built, and the platforms are set up
+    concurrently -- so unless setup registers both anchors BEFORE it forwards
+    the platforms, whichever platform's entities are built first find no
+    partition device and silently come up unlinked."""
+    entry = FakeConfigEntry(entry_id="entryY")
+    hass = make_hass(entry)
+    partitions = [adc_device("55-1", name="Upstairs"), adc_device("55-2", name="Garage")]
+    seen_at_forward = []
+    forward = hass.config_entries.async_forward_entry_setups
+
+    async def snapshotting_forward(config_entry, platforms):
+        seen_at_forward.append(registered_identifiers(hass.data["device_registry"]))
+        await forward(config_entry, platforms)
+
+    hass.config_entries.async_forward_entry_setups = snapshotting_forward
+    assert await run_setup(hass, entry, scripted_controller(partitions=partitions))
+
+    assert seen_at_forward, "platforms were never forwarded"
+    expected = {(DOMAIN, "55-1"), (DOMAIN, "55-2"), (DOMAIN, "entryY_integration")}
+    assert expected <= seen_at_forward[0], (
+        f"registered before the platforms: {sorted(seen_at_forward[0])!r} -- "
+        f"missing {sorted(expected - seen_at_forward[0])!r}")
+    registry = hass.data["device_registry"]
+    partition = registry.async_get_device_by_identifier((DOMAIN, "55-1"), "entryY")
+    assert partition is not None and partition.name == "Upstairs"
+    service = registry.async_get_device_by_identifier((DOMAIN, "entryY_integration"), "entryY")
+    assert service is not None and service.name == "TELUS Smart Home Integration"
+    assert all(call.get("entry_type") == ha_stubs.DeviceEntryType.SERVICE
+               for call in registry.created
+               if (DOMAIN, "entryY_integration") in call["identifiers"]), (
+        "the service device must be registered as a SERVICE entry, matching "
+        "what every platform's DeviceInfo for it declares")
 
 
 async def test_migrations_v1_to_v4():
@@ -334,6 +389,7 @@ TESTS = (
     test_setup_maps_auth_and_transport_failures,
     test_setup_succeeds_with_the_bridge_down_and_wires_everything,
     test_setup_prunes_only_absent_alarm_devices,
+    test_setup_registers_the_via_devices_before_forwarding_platforms,
     test_migrations_v1_to_v4,
     test_unload_stops_the_controller_and_keeps_shared_services_until_last,
 )

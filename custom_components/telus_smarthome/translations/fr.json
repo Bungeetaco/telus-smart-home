@@ -247,7 +247,7 @@
                 "state_attributes": {
                     "event_type": {
                         "state": {
-                            "press": "Appuyé"
+                            "ring": "Appuyé"
                         }
                     }
                 }

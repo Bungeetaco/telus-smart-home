@@ -51,6 +51,8 @@ ha_stubs.install()
 import fakes  # noqa: E402
 from fakes import (  # noqa: E402
     FakeConfigEntry,
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
     FakeHass,
     FakeResponse,
     FakeSession,
@@ -268,9 +270,19 @@ PHONE_RECORD = {
 }
 
 
+def with_service_device(hass, entry):
+    """A phone's device links to the integration service device by registry
+    id, so the registry (which setup fills before any platform runs) has to
+    hold that device for the entity to build its DeviceInfo."""
+    hass.data["device_registry"] = FakeDeviceRegistry([FakeDeviceEntry(
+        "service-dev", {(DOMAIN, f"{entry.entry_id}_integration")}, {entry.entry_id})])
+    return hass
+
+
 def partition_select(record=PHONE_RECORD):
     hass = FakeHass()
     entry = FakeConfigEntry()
+    with_service_device(hass, entry)
     coordinator = adc.ArmingDevicesCoordinator(hass, entry)
     coordinator.data = {record["id"]: dict(record)} if record else {}
     entity = select.ArmingDeviceEnrolledPartitionSelect(coordinator, entry, "ad42")
@@ -396,6 +408,7 @@ async def test_panel_timeout_select_unit_labels_and_write():
 async def test_select_platform_setup_gating():
     hass = FakeHass()
     entry = FakeConfigEntry()
+    with_service_device(hass, entry)
     controller = types.SimpleNamespace(
         api=types.SimpleNamespace(devices=types.SimpleNamespace(cameras={})))
     hass.data[DOMAIN] = {entry.entry_id: {
