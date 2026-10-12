@@ -219,15 +219,15 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # "Skybell"). The id cannot tell the library's devices from this fork's
     # own; the stamp is how each registering module declares whose device it
     # is, and the gate reads the same constants the stamps are written from.
+    # The stamp is checked at the removal decision, NOT as an early skip
+    # before the identifier loop: the loop also fills device_ids_via_hass,
+    # which the Skybell pass below reads, and a camera the library and the
+    # bridge both report shares one <unit>-<n> id whose stamp depends on which
+    # platform registered it first -- skipping it here would re-create its
+    # virtual device on every setup.
     for device_entry in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
         keep = False
         has_adc_identifier = False
-
-        if device_entry.manufacturer not in LIBRARY_DEVICE_MANUFACTURERS:
-            # Registered by camera.py, arming_devices_coordinator.py, event.py
-            # or a service-device platform, whatever its id looks like. The
-            # Alarm.com device list says nothing about whether it's still valid.
-            continue
 
         for identifier_domain, identifier_id in device_entry.identifiers:
             if identifier_domain != DOMAIN or identifier_id is None:
@@ -248,7 +248,14 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 keep = True
                 break
 
-        if keep or not has_adc_identifier:
+        if (
+            keep
+            or not has_adc_identifier
+            # Registered by camera.py, arming_devices_coordinator.py, event.py
+            # or a service-device platform, whatever its id looks like: the
+            # Alarm.com device list says nothing about whether it's still valid.
+            or device_entry.manufacturer not in LIBRARY_DEVICE_MANUFACTURERS
+        ):
             continue
 
         LOGGER.info(

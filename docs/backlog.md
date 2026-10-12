@@ -353,9 +353,18 @@ and evidence. Grouped by whether anything can actually be done about them.
   `test_setup_prunes_only_absent_alarm_devices` (the invariant extended, not
   a parallel test): a registry seeded with an absent library device, an
   absent Skybell virtual device, a bridge camera and a paired phone under
-  Alarm.com-shaped ids, a UUID-keyed camera and the service device removes
-  exactly the two library devices. Proven to fail first (four removed) and
-  against the gate widened to every stamp. (b) `binary_sensor.py` logged
+  Alarm.com-shaped ids, a UUID-keyed camera, the service device, a camera
+  the library and the bridge both report, and two library-stamped rows that
+  only the identifier loop's own keep branches protect (another
+  integration's identifier; an unshaped id of this domain) removes exactly
+  the two library devices and registers no virtual device for the shared
+  camera. The stamp is checked at the removal decision, not as an early skip
+  before the identifier loop: review found the skip left both keep branches
+  unreachable by any seed and starved the set the Skybell pass reads.
+  Proven to fail first (four removed), against the gate widened to every
+  stamp and removed from the decision (the same four), against either keep
+  branch deleted, and against the stamp check moved to an early skip (a
+  second device registered for the shared camera). (b) `binary_sensor.py` logged
   `Cannot determine binary sensor state for sensor None. Found raw state of
   DeviceState.UNKNOWN.` on EVERY evaluation of `is_on`, which Home Assistant
   makes at least twice per coordinator refresh (`available` reads it, then

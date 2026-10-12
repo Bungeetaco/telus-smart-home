@@ -247,12 +247,34 @@ async def test_setup_prunes_only_absent_alarm_devices():
     library's manufacturer stamps (`LIBRARY_DEVICE_MANUFACTURERS`: what
     base_device.py, the partition registration and the Skybell virtual device
     stamp); a device carrying any other stamp, or none, is never the library's
-    to prune.
+    to prune. The stamp is checked at the removal decision rather than as an
+    early skip before the identifier loop, so the loop's own keep branches
+    (another integration's identifier; an id of this domain the regex does
+    not match) and its population of the set the Skybell pass reads still
+    run for every device of the entry.
+
+    Proven to fail against: the pre-fix code (four removed); the stamp gate
+    widened to every stamp, and removed from the decision (the same four);
+    the foreign-identifier keep branch deleted (keep-foreign removed); the
+    unshaped-id keep branch deleted (the regex match is dereferenced as
+    None); and the stamp check moved to an early skip before the identifier
+    loop (a second, virtual device is registered for the shared camera). The
+    two keep-branch seeds carry the library's stamp on purpose: unstamped,
+    an early skip would protect them and deleting either branch would stay
+    green.
     """
+    # A camera the library AND the bridge both report (the library lists it
+    # in `all` and `cameras`; its registry row was registered by camera.py
+    # first and carries the bridge's stamp). It must be neither pruned nor
+    # given a second, virtual Skybell device: the identifier loop has to run
+    # for it so its id lands in the set the Skybell pass reads, which is why
+    # the stamp is checked at the removal decision and not before the loop.
+    shared_camera = adc_device("77-89", name="Shared camera")
     devices = [
         adc_device("123-456"),  # still on Alarm.com
+        shared_camera,
     ]
-    cameras = [adc_device("77-88", name="Skybell")]
+    cameras = [adc_device("77-88", name="Skybell"), shared_camera]
     partitions = [adc_device("123-1", name="Main partition")]
     registry_devices = [
         FakeDeviceEntry("keep-present", {(DOMAIN, "123-456")}, {"entryX"},
@@ -279,9 +301,19 @@ async def test_setup_prunes_only_absent_alarm_devices():
         # library -- removed on every setup by the id-shape test alone.
         FakeDeviceEntry("keep-bridge-cam", {(DOMAIN, "123-2048")}, {"entryX"},
                         name="Living Room", manufacturer="TELUS Smart Home"),
+        FakeDeviceEntry("keep-shared-cam", {(DOMAIN, "77-89")}, {"entryX"},
+                        name="Shared camera", manufacturer="TELUS Smart Home"),
         FakeDeviceEntry("keep-arming-phone", {(DOMAIN, "123-5263")}, {"entryX"},
                         name="Someone's phone", manufacturer=None),
-        FakeDeviceEntry("keep-foreign", {("hue", "123-999")}, {"entryX"}),
+        # Both stamped as the library's so that ONLY the identifier loop's own
+        # keep branches protect them: another integration's identifier, and
+        # an id of this domain that is not shaped like an Alarm.com id (the
+        # regex yields no match, and the branch that keeps it is also what
+        # stops the match being dereferenced).
+        FakeDeviceEntry("keep-foreign", {("hue", "123-999")}, {"entryX"},
+                        manufacturer=ALARM_COM_MANUFACTURER),
+        FakeDeviceEntry("keep-unshaped", {(DOMAIN, "not-an-adc-id")}, {"entryX"},
+                        manufacturer=ALARM_COM_MANUFACTURER),
     ]
     entry = FakeConfigEntry(entry_id="entryX")
     hass = make_hass(entry, registry_devices)
@@ -302,7 +334,7 @@ async def test_setup_prunes_only_absent_alarm_devices():
         "library's to prune), never attribute-suffixed ids of present devices, "
         "never another integration's, and never twice")
     for own in ("keep-bridge-cam", "keep-arming-phone", "keep-bridge-cam-uuid",
-                "keep-service"):
+                "keep-service", "keep-foreign", "keep-unshaped", "keep-shared-cam"):
         assert own in registry.devices, (
             f"{own} was pruned: its platform recreates it moments later, so "
             "the symptom is registry churn plus a misleading 'no longer present "
@@ -313,7 +345,9 @@ async def test_setup_prunes_only_absent_alarm_devices():
         "registry gets its virtual device, each partition and the integration "
         "service device are registered ahead of the platforms (they are the "
         "via devices every other device links to by registry id), and nothing "
-        "else is re-created")
+        "else is re-created -- in particular no virtual device for the camera "
+        "the bridge already registered (a stamp check that skips it before the "
+        "identifier loop leaves it out of the set the Skybell pass reads)")
     assert registry.devices["keep-service"].name == "TELUS Smart Home Integration", (
         "the service device registration must land on the EXISTING service "
         "device (same identifier, same config entry), not fork a second one")

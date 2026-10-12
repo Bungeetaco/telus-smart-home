@@ -242,7 +242,11 @@ under the account's Alarm.com device id, in the same `<unit>-<n>` namespace
 as every sensor and partition, and the library never lists them. Every device
 this fork registers itself (those cameras and phones, the Activity device, the
 "integration" service device) carries another stamp or none and is always
-kept, whatever its id looks like.
+kept, whatever its id looks like. The stamp is checked at the removal
+decision, after the identifier loop has run for every device of the entry:
+that loop also records which library ids already have a device, which the
+Skybell pass below reads, so a camera the library and the bridge both report
+keeps its one device instead of gaining a virtual one on every setup.
 
 What a wrongly pruned device costs, for the record: its platform re-registers
 it moments later and Home Assistant restores the device's registry id, area,
