@@ -58,6 +58,9 @@ class AlarmIntegrationController:
 
         self.update_coordinator: DataUpdateCoordinator
         self.api: libAlarmController
+        # The aiohttp session this controller created for the library (see
+        # initialize_lite). Kept so stop() can release it without closing it.
+        self._websession: aiohttp.ClientSession | None = None
 
         self.options: MappingProxyType[str, Any]
 
@@ -149,7 +152,24 @@ class AlarmIntegrationController:
         self.stop_keep_alive()
         self.api.stop_websocket()
 
-        await self.api.close_websession()
+        self.release_websession()
+
+    def release_websession(self) -> None:
+        """Release the session initialize_lite created, without closing it.
+
+        Home Assistant builds every session it hands out on ONE shared connector
+        and wraps `close()` to warn when an integration calls it (backlog E108):
+        closing the session would close that connector for every integration
+        in the process. `detach()` is the documented release for a session made
+        with `auto_cleanup=False`: it drops the connector reference and marks
+        the session closed, so a reload leaves no session behind and the
+        connector keeps serving everyone else. Safe to call more than once --
+        the HA-stop listener and async_unload_entry can both reach it.
+        """
+
+        if self._websession is not None:
+            self._websession.detach()
+            self._websession = None
 
     def stop_keep_alive(self) -> None:
         """Stop keep-alive task."""
@@ -162,11 +182,16 @@ class AlarmIntegrationController:
     async def initialize_lite(self, username: str, password: str, twofactorcookie: str | None) -> None:
         """Initialize connection to Alarm.com for config entry flow."""
 
+        # Own session (the SSO handshake needs an isolated cookie jar), with
+        # auto_cleanup off because this controller releases it itself in
+        # release_websession(); with auto_cleanup on, HA would also hold it
+        # until shutdown, one per reload.
+        self._websession = async_create_clientsession(self.hass, auto_cleanup=False)
         self.api = libAlarmController(
             username=username,
             password=password,
             twofactorcookie=twofactorcookie,
-            websession=async_create_clientsession(self.hass),
+            websession=self._websession,
         )
 
         try:

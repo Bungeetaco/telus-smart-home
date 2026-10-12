@@ -261,9 +261,13 @@ device and merges its details.
 ### `async_unload_entry`
 
 1. Pop the controller from `hass.data` and `await controller.stop()`.
-   `controller.stop()` stops the keepalive, stops the websocket, **and closes the
-   aiohttp session** (`close_websession()`). Closing the session on unload
-   prevents one leaked session/connector/sockets per reload.
+   `controller.stop()` stops the keepalive, stops the websocket, **and releases
+   the aiohttp session** (`release_websession()`, which calls `detach()`).
+   The controller creates that session itself with `auto_cleanup=False`, so
+   releasing it on unload leaves no session behind per reload. It is released,
+   never closed: Home Assistant builds every session on one process-wide
+   connector and warns when an integration closes one, because that would
+   close the connector for every integration (backlog E108).
 2. `async_unload_platforms(config_entry, PLATFORMS)`.
 3. If no config entries remain (excluding the `clip_view_registered` sentinel),
    remove all three shared services: `speak`/`stop_speaking`, `bypass_sensors`,

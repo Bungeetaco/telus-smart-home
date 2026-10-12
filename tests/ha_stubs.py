@@ -37,7 +37,8 @@ compatibility with Home Assistant. Two things narrow that gap deliberately:
 reads off it. `controller.py` is stubbed WHOLESALE, because importing it applies
 the websocket monkeypatch and drags the real library in; `sensor.py` uses it as
 a type annotation only, and the patch itself is already guarded at import time
-and exercised by CI's `check_patch.py` job.
+and exercised by CI's `check_patch.py` job. The one suite that pins the
+controller's own behaviour loads the real file through `load_real_controller()`.
 
 Usage, from a suite in this directory:
 
@@ -50,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import enum
+import importlib
 import pathlib
 import sys
 import types
@@ -1049,6 +1051,30 @@ class LibCameraSkybellControllerExtension:
 # --------------------------------------------------------------------------
 # Installation
 # --------------------------------------------------------------------------
+
+def load_real_controller() -> types.ModuleType:
+    """Swap the wholesale controller stub for the real `controller.py`.
+
+    `install()` stubs `custom_components.telus_smarthome.controller` because
+    importing it pulls the real library in through the websocket patch. A suite
+    that pins the controller's OWN behaviour (its session lifetime, E108) needs
+    the real module, so this gives the library stub the three names
+    `controller.py` imports at module level and loads the real file in place
+    of the stub. The library class is a bare placeholder: a suite that reaches
+    it has left the controller's own code, which is the fiction these stubs
+    refuse to exercise silently -- replace it per test with `fakes.patch`.
+    Call after `install()`; the package `__init__` keeps the class it bound
+    from the stub, which only `sensor.py` names in an annotation.
+    """
+    lib = sys.modules["pyalarmdotcomajax"]
+    lib.AlarmController = type("AlarmController", (), {})
+    lib.WebSocketState = enum.Enum("WebSocketState", "STOPPED RUNNING DISCONNECTED")
+    exceptions = sys.modules["pyalarmdotcomajax.exceptions"]
+    exceptions.NotAuthorized = type("NotAuthorized", (AlarmdotcomException,), {})
+    name = "custom_components.telus_smarthome.controller"
+    sys.modules.pop(name, None)
+    return importlib.import_module(name)
+
 
 def _module(name: str, **attrs: Any) -> types.ModuleType:
     mod = types.ModuleType(name)

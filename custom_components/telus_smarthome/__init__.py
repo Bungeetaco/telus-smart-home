@@ -441,10 +441,10 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
 
     controller: AlarmIntegrationController = hass.data[DOMAIN].pop(config_entry.entry_id)[DATA_CONTROLLER]
 
-    # controller.stop() also closes the aiohttp ClientSession (close_websession()) --
-    # calling only stop_websocket()/stop_keep_alive() here previously skipped that,
-    # leaking one session (and its connector/sockets) per reload (every options-flow
-    # save, reauth, or reconfigure).
+    # controller.stop() also releases the controller's aiohttp ClientSession
+    # (release_websession()) -- calling only stop_websocket()/stop_keep_alive()
+    # here previously skipped that, leaking one session per reload (every
+    # options-flow save, reauth, or reconfigure).
     await controller.stop()
 
     unload_ok: bool = await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)

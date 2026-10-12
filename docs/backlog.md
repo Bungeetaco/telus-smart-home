@@ -260,6 +260,24 @@ and evidence. Grouped by whether anything can actually be done about them.
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
 
+- **E108** (DONE 2026-10-12, integration) - every unload and every Home
+  Assistant stop logged `Detected that custom integration 'telus_smarthome'
+  closes the Home Assistant aiohttp session` from `controller.stop()`, which
+  ended with the library's `close_websession()`. Home Assistant builds every
+  session it hands out on one connector shared by the whole process and wraps
+  the session's `close()` to report exactly this: closing the session closes
+  that connector for every integration. The call was there for a real reason
+  (a session per reload was otherwise left behind), so the fix keeps the
+  lifetime and changes the release: `initialize_lite` creates its session with
+  `auto_cleanup=False` (the controller owns it; HA no longer also holds it
+  until shutdown), keeps the reference, and `stop()` and the config flow's
+  throwaway-controller cleanup call the new `release_websession()`, which
+  `detach()`es the session -- the documented release for an `auto_cleanup=False`
+  session: connector untouched, session marked closed, idempotent. Pinned by
+  `tests/test_controller_session.py`. Visible only on an in-process restart or
+  a reload: a container restart never logs the old process's shutdown, which is
+  why it went unseen through earlier core upgrades.
+
 - **E107** (open, device, doorbell) - the doorbell's own publish leg keeps
   wedging briefly: in the 48 h to 2026-10-05 the HA stream-state sensor
   recorded ~79 doorbell drops of 30-60 s, plus a 17 min run (01:43 UTC) and an

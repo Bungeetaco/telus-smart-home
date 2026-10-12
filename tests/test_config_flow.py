@@ -100,9 +100,6 @@ def controller_factory(login_outcomes, user_email=EMAIL, otp_outcome="tf-cookie"
             self._controller = controller
             self.two_factor_cookie = None
 
-        async def close_websession(self):
-            self._controller.closed += 1
-
         async def async_request_otp(self, method):
             self._controller.otp_requests.append(method)
 
@@ -124,6 +121,9 @@ def controller_factory(login_outcomes, user_email=EMAIL, otp_outcome="tf-cookie"
             self.user_email = user_email
             self.api = _Api(self)
             created.append(self)
+
+        def release_websession(self):
+            self.closed += 1
 
         async def initialize_lite(self, *, username, password, twofactorcookie):
             self.login_calls.append((username, password, twofactorcookie))
@@ -178,7 +178,7 @@ async def test_user_step_success_creates_entry():
         "unique_id must be the account email -- it is the duplicate-account "
         "and cross-account guard")
     assert flow._test_created[-1].closed == 1, (
-        "the flow's own controller session must be closed before the entry is "
+        "the flow's own controller session must be released before the entry is "
         "created; async_setup_entry builds its own")
 
 
@@ -239,7 +239,7 @@ async def test_each_retry_closes_the_previous_controllers_session():
     assert len(created) == 3
     assert created[0].closed == 1 and created[1].closed == 1, (
         "each retyped password must close the previous attempt's session -- "
-        "unclosed ones leak a connector per retry for the life of HA")
+        "unreleased ones outlive the flow, one per retry, for the life of HA")
 
 
 async def test_otp_app_only_skips_method_selection():

@@ -407,17 +407,19 @@ class ADCFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore
 
         Every login attempt builds a throwaway AlarmIntegrationController, and
         initialize_lite gives each one its own aiohttp session (correctly -- the SSO
-        handshake needs an isolated cookie jar). Those sessions are only closed when
-        Home Assistant itself shuts down, so without this each retyped password, each
-        reauth and each reconfigure left one behind, along with its connector and
-        sockets. The controller that actually serves the entry is a different one,
-        created later by async_setup_entry, so closing this one is always safe.
+        handshake needs an isolated cookie jar). Without this each retyped password,
+        each reauth and each reconfigure left one behind. The controller that
+        actually serves the entry is a different one, created later by
+        async_setup_entry, so releasing this one is always safe. It is released
+        (`detach()`), not closed: the session sits on Home Assistant's shared
+        connector, and closing it would close that connector for everyone
+        (backlog E108).
         """
         controller = getattr(self, "_controller", None)
         if controller is None:
             return
         with contextlib.suppress(Exception):
-            await controller.api.close_websession()
+            controller.release_websession()
         self._controller = None  # type: ignore[assignment]
 
     @staticmethod
