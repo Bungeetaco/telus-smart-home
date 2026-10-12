@@ -313,12 +313,12 @@ and evidence. Grouped by whether anything can actually be done about them.
   is no kick. Verified: `/api/template` renders the new forms on an
   attribute-less state (`False`, `0 (none)`) and on the live sensors; the live
   package copy is byte-identical, `check_config` valid, `automation.reload`
-  left all three automations on with no template warning in the log. What
-  remains: the kick-result push also re-sends the LAST kick's outcome when the
-  sensor comes back after a reload (the attribute trigger sees missing ->
-  value, and the value is a real kick record); a guard on
-  `trigger.from_state.state` being `unavailable` would close that and is not
-  done.
+  left all three automations on with no template warning in the log. The
+  kick-result push also used to re-send the LAST kick's outcome when the sensor
+  came back after a reload (the attribute trigger sees missing -> value, and
+  the value is a real kick record): a second condition now requires the
+  previous state to exist and not be `unavailable`/`unknown`, so only a change
+  between two live states counts as a kick.
 
 - **E107** (open, device, doorbell) - the doorbell's own publish leg keeps
   wedging briefly: in the 48 h to 2026-10-05 the HA stream-state sensor

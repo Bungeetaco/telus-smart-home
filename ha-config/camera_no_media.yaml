@@ -82,6 +82,14 @@ automation:
       # and is no kick.
       - condition: template
         value_template: "{{ trigger.to_state.attributes.get('last_device_kick') is not none }}"
+      # A kick is a change between two LIVE states. When the sensor comes back
+      # after a reload, the attribute trigger sees missing -> value, and the
+      # value is the last real kick record, so without this the phone got the
+      # previous outcome re-sent on every reload.
+      - condition: template
+        value_template: >-
+          {{ trigger.from_state is not none
+             and trigger.from_state.state not in ['unavailable', 'unknown'] }}
     actions:
       - action: notify.mobile_app_cph2655
         data:
