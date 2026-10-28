@@ -50,13 +50,13 @@ import ha_stubs  # noqa: E402
 
 ha_stubs.install()
 
-from custom_components.telus_smarthome import arming_devices_coordinator as adc  # noqa: E402
-from custom_components.telus_smarthome import bridge_client  # noqa: E402
-from custom_components.telus_smarthome import camera as camera_module  # noqa: E402
-from custom_components.telus_smarthome import camera_settings_coordinator as csc  # noqa: E402
-from custom_components.telus_smarthome import event as event_module  # noqa: E402
-from custom_components.telus_smarthome import switch as switch_module  # noqa: E402
-from custom_components.telus_smarthome.bridge_client import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import arming_devices_coordinator as adc  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import bridge_client  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import camera as camera_module  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import camera_settings_coordinator as csc  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import event as event_module  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import switch as switch_module  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.bridge_client import (  # noqa: E402
     RETRY_AFTER_DEFAULT_SECONDS,
     RETRY_AFTER_MAX_SECONDS,
     RateLimitHoldMixin,

@@ -1,6 +1,6 @@
 """Minimal stand-ins for the Home Assistant APIs the integration imports.
 
-`custom_components/telus_smarthome/` imports `homeassistant.*` at module scope,
+`custom_components/telus_smarthome_alarmdotcom/` imports `homeassistant.*` at module scope,
 so nothing in it can be imported -- let alone exercised -- without something
 answering to that name. This module is that something: it registers a small
 package tree in `sys.modules` before the integration is imported, so the REAL
@@ -45,7 +45,7 @@ Usage, from a suite in this directory:
 
     import ha_stubs
     ha_stubs.install()
-    from custom_components.telus_smarthome import sensor
+    from custom_components.telus_smarthome_alarmdotcom import sensor
 """
 from __future__ import annotations
 
@@ -1058,7 +1058,7 @@ class LibCameraSkybellControllerExtension:
 def load_real_controller() -> types.ModuleType:
     """Swap the wholesale controller stub for the real `controller.py`.
 
-    `install()` stubs `custom_components.telus_smarthome.controller` because
+    `install()` stubs `custom_components.telus_smarthome_alarmdotcom.controller` because
     importing it pulls the real library in through the websocket patch. A suite
     that pins the controller's OWN behaviour (its session lifetime, E108) needs
     the real module, so this gives the library stub the three names
@@ -1074,7 +1074,7 @@ def load_real_controller() -> types.ModuleType:
     lib.WebSocketState = enum.Enum("WebSocketState", "STOPPED RUNNING DISCONNECTED")
     exceptions = sys.modules["pyalarmdotcomajax.exceptions"]
     exceptions.NotAuthorized = type("NotAuthorized", (AlarmdotcomException,), {})
-    name = "custom_components.telus_smarthome.controller"
+    name = "custom_components.telus_smarthome_alarmdotcom.controller"
     sys.modules.pop(name, None)
     return importlib.import_module(name)
 
@@ -1136,7 +1136,7 @@ def load_real_auth_patch() -> types.ModuleType:
         "https://www.alarm.com/web/api/settings/skybell")
     spec = importlib.util.spec_from_file_location(
         "telus_auth_patch_real",
-        REPO_ROOT / "custom_components" / "telus_smarthome" / "telus_auth_patch.py")
+        REPO_ROOT / "custom_components" / "telus_smarthome_alarmdotcom" / "telus_auth_patch.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)  # runs the module's compatibility guard
     return mod
@@ -1181,15 +1181,15 @@ def install() -> None:
 
     # The integration package is seeded by hand, with `__path__` pointing at the
     # real directory: submodules below it are then found and imported for real,
-    # but `custom_components/telus_smarthome/__init__.py` never runs. That file
+    # but `custom_components/telus_smarthome_alarmdotcom/__init__.py` never runs. That file
     # applies all three pyalarmdotcomajax monkeypatches on import and needs the
     # real library present to do it -- work that belongs to CI's check_patch.py
     # job, and that would otherwise have to succeed before a single pure
     # derivation could be tested.
     _package("custom_components", REPO_ROOT / "custom_components")
     _package(
-        "custom_components.telus_smarthome",
-        REPO_ROOT / "custom_components" / "telus_smarthome",
+        "custom_components.telus_smarthome_alarmdotcom",
+        REPO_ROOT / "custom_components" / "telus_smarthome_alarmdotcom",
     )
 
     core = _module(
@@ -1318,7 +1318,7 @@ def install() -> None:
 
     # controller.py applies the websocket monkeypatch at import and needs the
     # real library to do it. sensor.py only names the class in an annotation.
-    _module("custom_components.telus_smarthome.controller",
+    _module("custom_components.telus_smarthome_alarmdotcom.controller",
             AlarmIntegrationController=type("AlarmIntegrationController", (), {}))
 
     # The three import-time monkeypatch modules are stubbed for the same reason
@@ -1326,8 +1326,8 @@ def install() -> None:
     # which is not installed here. CI's check_patch.py job imports the real ones
     # against the real library and fails loudly if a patch no longer applies.
     for patch_module in (
-        "custom_components.telus_smarthome.telus_auth_patch",
-        "custom_components.telus_smarthome.telus_ws_heartbeat_patch",
-        "custom_components.telus_smarthome.telus_ws_push_patch",
+        "custom_components.telus_smarthome_alarmdotcom.telus_auth_patch",
+        "custom_components.telus_smarthome_alarmdotcom.telus_ws_heartbeat_patch",
+        "custom_components.telus_smarthome_alarmdotcom.telus_ws_push_patch",
     ):
         _module(patch_module)

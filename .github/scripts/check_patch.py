@@ -22,7 +22,7 @@ import importlib.util
 import pathlib
 import sys
 
-BASE = pathlib.Path("custom_components/telus_smarthome")
+BASE = pathlib.Path("custom_components/telus_smarthome_alarmdotcom")
 MODULES = (
     "telus_auth_patch",
     "telus_ws_heartbeat_patch",

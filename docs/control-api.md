@@ -575,7 +575,7 @@ curl -s -X POST \
 
 A `404 no_talk_in_progress` is informational, not a failure: callers may fire this
 unconditionally (e.g. on a door-open event) without first checking whether a clip
-is playing. The Home Assistant service `telus_smarthome.stop_speaking` wraps this
+is playing. The Home Assistant service `telus_smarthome_alarmdotcom.stop_speaking` wraps this
 and treats that case as a no-op.
 
 
@@ -2297,7 +2297,7 @@ curl -s -X POST -H "Authorization: Bearer $SECRET" \
 ## Home Assistant client
 
 The HA integration talks to this API through
-`custom_components/telus_smarthome/bridge_client.py`, used throughout the
+`custom_components/telus_smarthome_alarmdotcom/bridge_client.py`, used throughout the
 integration: `camera.py`, `event.py`, `switch.py`, `sensor.py`, the
 settings and arming-device coordinators, and the speak/clip/bypass/unpair
 services. Two helpers matter:

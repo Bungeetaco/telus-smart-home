@@ -1,4 +1,4 @@
-"""telus_smarthome.bypass_sensors -- manually bypass (or un-bypass) individual
+"""telus_smarthome_alarmdotcom.bypass_sensors -- manually bypass (or un-bypass) individual
 alarm sensors on the security panel.
 
 **A bypassed zone does not trigger the alarm until it is un-bypassed.** That
@@ -92,7 +92,7 @@ _GET_TIMEOUT_S = 15
 
 
 def async_register_bypass_service(hass: HomeAssistant) -> None:
-    """Register telus_smarthome.bypass_sensors once.
+    """Register telus_smarthome_alarmdotcom.bypass_sensors once.
 
     Idempotent (guarded by has_service), matching async_register_speak_service --
     reloads land in __init__.py again and must not re-register."""

@@ -1,4 +1,4 @@
-"""The `telus_smarthome.unpair_arming_device` service.
+"""The `telus_smarthome_alarmdotcom.unpair_arming_device` service.
 
 Unpairs a phone from the alarm panel's Bluetooth disarming, so it can no longer
 disarm the alarm on approach.

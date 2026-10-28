@@ -7,7 +7,7 @@ the project:
   re-publishes it as RTSP, and exposes a local control API. Configured through
   environment variables (files `.env` and `secrets.env`), with the authoritative
   defaults living in `bridge/config.py`.
-- The **Home Assistant integration** (`custom_components/telus_smarthome`): a
+- The **Home Assistant integration** (`custom_components/telus_smarthome_alarmdotcom`): a
   HACS-installable custom component. Configured through the UI (config flow and
   options flow); a few build-time constants live in `hacs.json` and
   `manifest.json`.
@@ -360,7 +360,7 @@ Assistant UI. There are no YAML settings.
 
 | Key | Value | Meaning |
 | --- | --- | --- |
-| `domain` | `telus_smarthome` | Integration domain. |
+| `domain` | `telus_smarthome_alarmdotcom` | Integration domain. |
 | `name` | `TELUS Smart Home` | Display name. |
 | `config_flow` | `true` | Configured through the UI, not YAML. |
 | `integration_type` | `hub` | Presented as a hub integration. |

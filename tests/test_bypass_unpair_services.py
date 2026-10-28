@@ -1,4 +1,4 @@
-"""Tests for `telus_smarthome.bypass_sensors` and `.unpair_arming_device`
+"""Tests for `telus_smarthome_alarmdotcom.bypass_sensors` and `.unpair_arming_device`
 (`bypass_service.py` / `unpair_service.py`, backlog E66).
 
 Run from the repository root:
@@ -58,8 +58,8 @@ from fakes import (  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from pyalarmdotcomajax.devices.partition import Partition as libPartition  # noqa: E402
 
-from custom_components.telus_smarthome import bypass_service, unpair_service  # noqa: E402
-from custom_components.telus_smarthome.const import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import bypass_service, unpair_service  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import (  # noqa: E402
     DATA_CONTROLLER,
     DOMAIN,
     SERVICE_BYPASS_SENSORS,

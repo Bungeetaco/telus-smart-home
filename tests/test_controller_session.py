@@ -96,9 +96,25 @@ async def test_initialize_lite_owns_its_session_and_hands_it_to_the_library():
     finally:
         restore(controller_module, saved)
 
-    assert created == [{"auto_cleanup": False}], (
+    assert len(created) == 1, f"expected exactly one session creation; got {created}"
+    kw = created[0]
+    assert kw.get("auto_cleanup") is False, (
         f"the controller must create its session with auto_cleanup=False, so it "
         f"owns the lifetime instead of HA also holding it until shutdown; got {created}")
+    # E106: the session must bound the push websocket's TCP+TLS connect phase so a
+    # stalled connect to webskt.alarm.com fails fast (sock_connect) instead of
+    # burning aiohttp's 30 s default and driving the reconnect backoff to its cap,
+    # while keeping the overall response budget (total) explicit.
+    timeout = kw.get("timeout")
+    assert timeout is not None, (
+        f"the controller must bound the session's connect phase (E106); got {created}")
+    assert timeout.sock_connect == controller_module.WEBSOCKET_CONNECT_TIMEOUT_SECONDS, (
+        f"sock_connect must bound the connect phase to "
+        f"{controller_module.WEBSOCKET_CONNECT_TIMEOUT_SECONDS}s (E106); "
+        f"got {timeout.sock_connect}")
+    assert timeout.total == controller_module.WEBSOCKET_SESSION_TOTAL_TIMEOUT_SECONDS, (
+        f"total must stay at the explicit response budget "
+        f"{controller_module.WEBSOCKET_SESSION_TOTAL_TIMEOUT_SECONDS}s; got {timeout.total}")
     assert built[0]["websession"] is session, (
         "the library must be handed the very session the controller created")
     assert ctrl._websession is session, (

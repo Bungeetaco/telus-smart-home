@@ -248,7 +248,7 @@ curl -s -X POST http://127.0.0.1:8199/control/cameras/<unit-id>-<did>/talk \
 # -> {"path":"full_duplex","chunks":N,"bytes":M}
 ```
 
-Or via the HA service `telus_smarthome.speak` (TTS or a media URL). See
+Or via the HA service `telus_smarthome_alarmdotcom.speak` (TTS or a media URL). See
 `docs/talkdown-DEPLOY.md`.
 
 ## Provenance (how this was recovered, for auditing the claims)

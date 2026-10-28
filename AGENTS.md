@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository. Read this before editi
 
 Two independent pieces that bring a TELUS Smart Home account (a white-labeled Alarm.com deployment, no official API) into Home Assistant:
 
-- `custom_components/telus_smarthome/`: the Home Assistant integration (forked from `pyalarmdotcom/alarmdotcom`, with TELUS SSO login monkeypatched in at import time). Panel, lock, sensor, camera, and event entities; the `telus_smarthome.speak` service; a GUI config/reconfigure flow.
+- `custom_components/telus_smarthome_alarmdotcom/`: the Home Assistant integration (forked from `pyalarmdotcom/alarmdotcom`, with TELUS SSO login monkeypatched in at import time). Panel, lock, sensor, camera, and event entities; the `telus_smarthome_alarmdotcom.speak` service; a GUI config/reconfigure flow.
 - `camera-bridge/`: a standalone Docker service that logs in to TELUS, pulls WebRTC camera video, and republishes it as local RTSP, plus a loopback HTTP control API. Independent codebase; it re-implements TELUS auth from scratch (no shared dependency with the integration).
 
 They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and a shared directory (credential fallback + secrets). Everything is reverse-engineered from real browser/app traffic; there is no upstream spec.
@@ -15,7 +15,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 
 | Path | What it is |
 | --- | --- |
-| `custom_components/telus_smarthome/` | HA integration. Entry: `__init__.py`. Auth patch: `telus_auth_patch.py`. Platforms: `alarm_control_panel.py`, `binary_sensor.py`, `lock.py`, `camera.py`, `event.py`, etc. Bridge client + the coordinators' rate-limit hold: `bridge_client.py`. Websocket reconnect back-off: `ws_backoff.py`. Talk service: `speak_service.py`. |
+| `custom_components/telus_smarthome_alarmdotcom/` | HA integration. Entry: `__init__.py`. Auth patch: `telus_auth_patch.py`. Platforms: `alarm_control_panel.py`, `binary_sensor.py`, `lock.py`, `camera.py`, `event.py`, etc. Bridge client + the coordinators' rate-limit hold: `bridge_client.py`. Websocket reconnect back-off: `ws_backoff.py`. Talk service: `speak_service.py`. |
 | `camera-bridge/bridge/` | Bridge app. Entry: `main.py`. Video: `camera_session.py`, `janus_client.py`, `ffmpeg_sink.py`. aiortc patch: `aiortc_opus_patch.py`. Auth/API: `telus_auth.py`, `telus_rest.py`, `mobile_auth.py`, `mws_client.py`. The process-wide hold every website call goes through: `cloud_hold.py`. Device-side escalation for a wedged camera (opt-in): `device_kick.py`. Talkdown: `talk.py`, `talk_fullduplex.py`. Outbound call leg: `sip_call.py`. Direct-LAN call listen: `rtsp_listen.py`. Call audio shaping: `call_shape.py`. Call orchestration: `call_bridge.py`. Control API: `control_server.py`. Config: `config.py`. Rotation-window instrumentation (off by default): `handover_trace.py`. Container-memory instrumentation (off by default): `memory_trace.py`. |
 | `camera-bridge/{Dockerfile,docker-compose.yml,mediamtx.yml,entrypoint.sh}` | Build + runtime. |
 | `tests/` (repo root) | Integration regression suites + `ha_stubs.py`, the `homeassistant.*` stand-in tree that lets them run without Home Assistant installed. |
@@ -25,7 +25,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
 ## Build, run, verify
 
 - **Bridge:** `cd camera-bridge && docker compose up -d --build`. Code is baked into the image, so **any code change needs a rebuild** (`--build`), not just a restart. Health check: `curl -s http://127.0.0.1:8199/control/health` → `{"status":"ok"}`. Requires `--network host` and (for hardware encode) a GPU render node.
-- **Integration:** copy `custom_components/telus_smarthome/` into HA's `config/custom_components/`; **integration code changes require a full Home Assistant restart** to load (a config-entry reload does not re-import modules).
+- **Integration:** copy `custom_components/telus_smarthome_alarmdotcom/` into HA's `config/custom_components/`; **integration code changes require a full Home Assistant restart** to load (a config-entry reload does not re-import modules).
 - **Syntax check** Python before proposing changes: `python3 -m py_compile <file>`.
 - **CI** (`.github/workflows/ci.yml`) runs on PRs: it imports `telus_auth_patch.py` to prove the pyalarmdotcomajax monkeypatch still applies (a compatibility guard fails loudly if an upstream internal moved), installs the bridge deps wheels-only, and runs **every** `camera-bridge/tests/test_*.py` and **every** `tests/test_*.py`.
 - **Tests** use local fakes only (no network, no account, no hardware) so run them before proposing a change: `cd camera-bridge && TELUS_EMAIL=x TELUS_PASSWORD=y python3 tests/test_camera_session.py` for the bridge, and `python3 tests/test_stream_health_sensors.py` from the repo root for the integration (each file is a script and ends in `RESULT: PASS`). The integration suites stub `homeassistant.*` rather than installing Home Assistant; see `tests/ha_stubs.py` for why and for the limits of that. `docs/development.md`'s suite table says what each one pins and lists the modules that remain unpinned (the library-backed platforms among them); those are still verified by reading the code, compiling, and checking HA logs. New behaviour in a covered module gets a test in the same change, and a new test is not trusted until it has been proven to fail against deliberately broken source: the suites exist for failures that are otherwise silent. See `docs/development.md`.
@@ -111,7 +111,7 @@ They communicate over a loopback control endpoint (`http://127.0.0.1:8199`) and 
   suites additionally **stub `homeassistant.*` rather than installing Home
   Assistant**: `tests/ha_stubs.py` carries the reasoning and the rule that
   nothing in that tree may be auto-magic.
-- **Versioning:** the version lives only in `custom_components/telus_smarthome/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes**: fixes, tuning, tests, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes**: a new capability, a changed default, anything a user would notice or react to. Bias towards patch. **Documentation-only commits do not bump or tag at all**: they ride untagged on master and ship with the next code release. Details in `docs/development.md`.
+- **Versioning:** the version lives only in `custom_components/telus_smarthome_alarmdotcom/manifest.json`, with a matching `git tag vX.Y.Z`. **Bump the PATCH position (`x.y.Z`) for minor changes**: fixes, tuning, tests, internal cleanup. **Bump MINOR (`x.Y.0`) only for major changes**: a new capability, a changed default, anything a user would notice or react to. Bias towards patch. **Documentation-only commits do not bump or tag at all**: they ride untagged on master and ship with the next code release. Details in `docs/development.md`.
 
 ## Operational cautions (this talks to a LIVE account)
 
@@ -271,7 +271,7 @@ have prevented it:
 
 ## Where to read more
 
-Start at [`docs/README.md`](docs/README.md). For a change in a given area: `docs/ha-integration.md`, `docs/camera-bridge.md`, `docs/control-api.md`, `docs/alarm-com-api.md`, `docs/configuration.md`, `docs/troubleshooting.md`. Each component also has its own README (`custom_components/telus_smarthome/README.md`, `camera-bridge/README.md`).
+Start at [`docs/README.md`](docs/README.md). For a change in a given area: `docs/ha-integration.md`, `docs/camera-bridge.md`, `docs/control-api.md`, `docs/alarm-com-api.md`, `docs/configuration.md`, `docs/troubleshooting.md`. Each component also has its own README (`custom_components/telus_smarthome_alarmdotcom/README.md`, `camera-bridge/README.md`).
 
 ## If TELUS/Alarm.com breaks it
 

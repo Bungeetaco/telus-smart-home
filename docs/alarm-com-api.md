@@ -27,7 +27,7 @@ servlet to mint an MWS `SessionToken` without re-entering credentials.
 Relevant modules:
 
 - Website session/login: `camera-bridge/bridge/telus_auth.py`, and the Home Assistant
-  integration's `custom_components/telus_smarthome/telus_auth_patch.py` (same flow,
+  integration's `custom_components/telus_smarthome_alarmdotcom/telus_auth_patch.py` (same flow,
   monkeypatched into `pyalarmdotcomajax`).
 - Website video/events/rules calls: `camera-bridge/bridge/telus_rest.py`.
 - Janus streaming (downstream video): `camera-bridge/bridge/janus_client.py`.

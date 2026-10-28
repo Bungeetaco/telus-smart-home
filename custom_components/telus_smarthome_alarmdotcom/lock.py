@@ -44,7 +44,7 @@ async def async_setup_platform(
         hass,
         MIGRATE_MSG_ALERT,
         title="Alarm.com Updated",
-        notification_id="telus_smarthome_migration",
+        notification_id="telus_smarthome_alarmdotcom_migration",
     )
 
 

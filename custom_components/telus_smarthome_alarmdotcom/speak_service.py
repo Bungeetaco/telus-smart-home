@@ -1,4 +1,4 @@
-"""telus_smarthome.speak -- speak a phrase (or play an audio clip) through a
+"""telus_smarthome_alarmdotcom.speak -- speak a phrase (or play an audio clip) through a
 TELUS camera's speaker via the camera bridge's two-way-audio (talkdown) endpoint.
 
 The service renders `message` to a media URL using HA's own TTS (or takes a
@@ -77,7 +77,7 @@ _STOP_SCHEMA = vol.Schema({vol.Optional("entity_id"): cv.entity_ids})
 
 
 def async_register_speak_service(hass: HomeAssistant) -> None:
-    """Register telus_smarthome.speak + .stop_speaking once.
+    """Register telus_smarthome_alarmdotcom.speak + .stop_speaking once.
 
     Idempotent (guarded by has_service)."""
     if hass.services.has_service(DOMAIN, SERVICE_SPEAK):

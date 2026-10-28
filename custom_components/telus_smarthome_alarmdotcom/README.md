@@ -1,4 +1,4 @@
-# TELUS Smart Home (custom_components/telus_smarthome)
+# TELUS Smart Home (custom_components/telus_smarthome_alarmdotcom)
 
 **This is a permanent, hand-maintained fork, not tracked against the
 upstream `alarmdotcom` project it started from.** It's installable via HACS
@@ -15,7 +15,7 @@ way this fork itself was built.
 A fork of the community `alarmdotcom` Home Assistant integration
 (`pyalarmdotcomajax`), patched to work with **TELUS Smart Home**, which is a
 white-labeled Alarm.com system that uses its own SSO handoff instead of
-Alarm.com's normal login flow. The domain is `telus_smarthome`.
+Alarm.com's normal login flow. The domain is `telus_smarthome_alarmdotcom`.
 
 - `telus_auth_patch.py`: monkeypatches `pyalarmdotcomajax` at import time
   (imported for its side effect from `__init__.py` and `config_flow.py`) to

@@ -1,6 +1,6 @@
 # Home Assistant Integration Reference
 
-The `telus_smarthome` custom integration is a Home Assistant **hub** integration
+The `telus_smarthome_alarmdotcom` custom integration is a Home Assistant **hub** integration
 that brings a TELUS Smart Home (white-labeled Alarm.com) account into Home
 Assistant. It is a fork of the community `alarmdotcom` integration, re-pointed at
 TELUS's SSO login and extended with a set of camera/video features served by a
@@ -18,7 +18,7 @@ of it:
   bridge over loopback HTTP.
 
 This document is the reference for the integration package itself
-(`custom_components/telus_smarthome/`). For the standalone container it depends
+(`custom_components/telus_smarthome_alarmdotcom/`). For the standalone container it depends
 on, see [camera-bridge.md](camera-bridge.md); for the two-way-audio "talkdown"
 service, see [talkdown-DEPLOY.md](talkdown-DEPLOY.md) and
 [talkdown-fullduplex-protocol.md](talkdown-fullduplex-protocol.md).
@@ -31,7 +31,7 @@ From `manifest.json`:
 
 | Field | Value |
 | --- | --- |
-| `domain` | `telus_smarthome` |
+| `domain` | `telus_smarthome_alarmdotcom` |
 | `integration_type` | `hub` |
 | `iot_class` | `cloud_polling` |
 | `config_flow` | `true` |
@@ -144,8 +144,8 @@ These are covered in detail under [The update model](#the-update-model) and
     (config-only; video is handled by the bridge, not here).
 11. **Forward platforms.** `async_forward_entry_setups(config_entry, PLATFORMS)`
     sets up all 13 entity platforms.
-12. **Speak services.** Register the `telus_smarthome.speak` talkdown service
-    (and its companion `telus_smarthome.stop_speaking`, which ends whatever is
+12. **Speak services.** Register the `telus_smarthome_alarmdotcom.speak` talkdown service
+    (and its companion `telus_smarthome_alarmdotcom.stop_speaking`, which ends whatever is
     currently playing; stopping when nothing is playing is a no-op, so it is
     safe to call unconditionally from an automation)
     (see [talkdown-DEPLOY.md](talkdown-DEPLOY.md)), guarded so reloads are a
@@ -166,7 +166,7 @@ These are covered in detail under [The update model](#the-update-model) and
     and code reading only: it has not been fired against a live doorbell, and
     `speak_service.py` is outside what the integration's test suites cover
     (see [development.md](development.md#the-integration-suites)).
-13. **Bypass service.** Register `telus_smarthome.bypass_sensors`, which bypasses
+13. **Bypass service.** Register `telus_smarthome_alarmdotcom.bypass_sensors`, which bypasses
     or un-bypasses named sensors on the alarm partition. **A bypassed zone does
     not trigger the alarm until it is put back**, which is why this is a service
     rather than a switch on every sensor row: a stray tap should not be able to
@@ -181,7 +181,7 @@ These are covered in detail under [The update model](#the-update-model) and
     **ten seconds** to reach the sensor, so the post-write refresh is delayed
     past that window rather than firing immediately and reading the old state.
 
-14. **Unpair service.** Register `telus_smarthome.unpair_arming_device`, which
+14. **Unpair service.** Register `telus_smarthome_alarmdotcom.unpair_arming_device`, which
     removes one phone from the panel's Bluetooth disarming so it can no longer
     disarm on approach. **It cannot be undone from Home Assistant**: re-pairing
     needs physical access to both the phone and the panel, which is the whole

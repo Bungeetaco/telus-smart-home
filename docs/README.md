@@ -5,7 +5,7 @@ deployment) into **Home Assistant**. TELUS ships no official API, so the project
 is built by reverse-engineering the browser and mobile-app traffic of a real
 account. It has two independent halves:
 
-- a Home Assistant **custom integration** (`telus_smarthome`) for panel, lock,
+- a Home Assistant **custom integration** (`telus_smarthome_alarmdotcom`) for panel, lock,
   sensor, event, and camera entities, and
 - a standalone **camera bridge** container that republishes Alarm.com's WebRTC
   video as plain RTSP and exposes a small loopback control API.
@@ -25,7 +25,7 @@ own deployment.
 
 | Doc | What it covers |
 | --- | --- |
-| [ha-integration.md](ha-integration.md) | The `telus_smarthome` Home Assistant hub integration: entities, services, coordinators, and how it consumes the bridge. |
+| [ha-integration.md](ha-integration.md) | The `telus_smarthome_alarmdotcom` Home Assistant hub integration: entities, services, coordinators, and how it consumes the bridge. |
 | [camera-bridge.md](camera-bridge.md) | The standalone Docker service that pulls WebRTC video and republishes it as local RTSP. |
 | [control-api.md](control-api.md) | The bridge's loopback HTTP control server: state polling, snapshots, clips, talkdown, camera settings/diagnostics/siren/privacy, and the credential handoff. |
 

@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Known issues, gotchas, and how to diagnose them across the two components of
-this project: the **Home Assistant integration** (`custom_components/telus_smarthome`)
+this project: the **Home Assistant integration** (`custom_components/telus_smarthome_alarmdotcom`)
 and the **camera bridge** (`camera-bridge/`). Each entry is written as
 **symptom → cause → fix**. Everything here is about the software's behavior
 against the white-labeled Alarm.com cloud; none of it depends on a specific
@@ -1181,7 +1181,7 @@ playing.
 Also note **400**: the endpoint rejects a `codec` other than `mulaw` on this
 doorbell model (see next entry), and rejects malformed request bodies.
 
-Triggered through `telus_smarthome.speak` rather than curl, these failures
+Triggered through `telus_smarthome_alarmdotcom.speak` rather than curl, these failures
 arrive as `HomeAssistantError` messages naming the camera entity instead of raw
 statuses, including **413** (the clip exceeds the bridge's size cap,
 `TALK_MEDIA_MAX_BYTES`), **504** (the talk timed out on the bridge before the
@@ -1221,7 +1221,7 @@ lo-fi, or, if you tried to raise quality, pure noise.
   speaker. Leave it on unless you have a reason not to.
 - **Per-request overrides:** send `"conditioning": false` to disable the
   default chain for one clip, or `"audio_filter": "<ffmpeg -af string>"` to
-  replace it. The `telus_smarthome.speak` service takes the same two optional
+  replace it. The `telus_smarthome_alarmdotcom.speak` service takes the same two optional
   fields and forwards them to the bridge, so the override works from a Home
   Assistant automation as well as from curl. To disable conditioning globally,
   set the bridge's audio-filter config to empty.
@@ -1386,7 +1386,7 @@ Nothing polls a write route: if a setting changed, something asked it to.
 
 Symptom: after a restart there is no speaker-volume slider, no signal-strength
 sensor and no privacy switch for **any** camera, and
-`custom_components.telus_smarthome.camera_settings_coordinator` logs
+`custom_components.telus_smarthome_alarmdotcom.camera_settings_coordinator` logs
 `Could not reach camera bridge` even though the bridge answers fine by hand.
 
 These entities are created from the **first successful poll**: the bridge is the
@@ -1437,7 +1437,7 @@ siren-capable devices gets none. See "A camera control is missing" above.
 
 ## A bypass appears to do nothing
 
-Symptom: `telus_smarthome.bypass_sensors` returns without error, but the sensors
+Symptom: `telus_smarthome_alarmdotcom.bypass_sensors` returns without error, but the sensors
 look unchanged.
 
 **Give it ten seconds.** The write reaches the panel asynchronously: a bypass

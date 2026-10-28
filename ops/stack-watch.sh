@@ -89,7 +89,7 @@ log.close()
 fi
 
 # --- Home Assistant: integration errors and unavailable entities ------------
-ERRS=$(sudo -n docker logs homeassistant --since 5m 2>&1 | grep -ci "telus_smarthome.*\(error\|traceback\|exception\)" || true)
+ERRS=$(sudo -n docker logs homeassistant --since 5m 2>&1 | grep -ci "telus_smarthome_alarmdotcom.*\(error\|traceback\|exception\)" || true)
 [ "${ERRS:-0}" -gt 0 ] && emit "FAIL ha-integration-errors count=$ERRS (docker logs homeassistant --since 10m | grep -i telus)"
 
 # Name the entities that matter rather than counting: this account has ~15

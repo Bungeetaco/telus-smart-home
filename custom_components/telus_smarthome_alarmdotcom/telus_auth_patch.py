@@ -12,7 +12,7 @@ a HAR capture of a real browser login:
      redirect chain lands on smarthome-security.telus.com/web/api/TokenSso.ashx
      which sets the real dealer-portal session cookie.
 
-This file is imported by custom_components/telus_smarthome/__init__.py before the
+This file is imported by custom_components/telus_smarthome_alarmdotcom/__init__.py before the
 integration constructs any AlarmController, so the patch is in place first.
 
 CAVEAT: this only patches the *library* (pyalarmdotcomajax) at Python-import

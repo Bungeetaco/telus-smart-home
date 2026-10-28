@@ -10,7 +10,7 @@ batched videoEvents enrichment) from captured, anonymized page shapes.
 
 **The invisible failure this exists to catch: a doorbell press that silently
 stops being a doorbell press.** Home Assistant's doorbell event entity
-(`custom_components/telus_smarthome/event.py`) decides that a press happened by
+(`custom_components/telus_smarthome_alarmdotcom/event.py`) decides that a press happened by
 matching `event_type_name == "DoorbellButtonPress"` and attributes it to a
 camera by matching `device_id` against the camera id. Both keys are renamed here
 from alarm.com's own spellings (`eventTypeName`, `globalDeviceId`). If either

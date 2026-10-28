@@ -12,7 +12,7 @@ speak:
       required: false
       selector:
         entity:
-          integration: telus_smarthome
+          integration: telus_smarthome_alarmdotcom
           domain: camera
     message:
       name: Message
@@ -92,7 +92,7 @@ bypass_sensors:
       selector:
         entity:
           multiple: true
-          integration: telus_smarthome
+          integration: telus_smarthome_alarmdotcom
           domain: binary_sensor
     unbypass:
       name: Un-bypass
@@ -103,7 +103,7 @@ bypass_sensors:
       selector:
         entity:
           multiple: true
-          integration: telus_smarthome
+          integration: telus_smarthome_alarmdotcom
           domain: binary_sensor
 
 stop_speaking:
@@ -119,7 +119,7 @@ stop_speaking:
       required: false
       selector:
         entity:
-          integration: telus_smarthome
+          integration: telus_smarthome_alarmdotcom
           domain: camera
 
 unpair_arming_device:
@@ -138,5 +138,5 @@ unpair_arming_device:
       example: switch.someones_phone_disarm_alarm_on_arrival
       selector:
         entity:
-          integration: telus_smarthome
+          integration: telus_smarthome_alarmdotcom
           domain: switch

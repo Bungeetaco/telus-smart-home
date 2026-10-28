@@ -34,7 +34,7 @@ cards:
       - entity: binary_sensor.telus_smart_home_integration_camera_bridge
 
   # The intercom: the same three canned phrases the phone notification
-  # offers, plus a stop button. telus_smarthome.speak opens a real talkdown
+  # offers, plus a stop button. telus_smarthome_alarmdotcom.speak opens a real talkdown
   # session on the doorbell; stop_speaking is safe to call when nothing is
   # playing, so the stop button needs no guard.
   - type: horizontal-stack
@@ -44,7 +44,7 @@ cards:
         icon: mdi:run-fast
         tap_action:
           action: perform-action
-          perform_action: telus_smarthome.speak
+          perform_action: telus_smarthome_alarmdotcom.speak
           data:
             entity_id: camera.doorbell
             message: Hi! I'll be right with you, just give me a moment.
@@ -54,7 +54,7 @@ cards:
         icon: mdi:package-variant-closed
         tap_action:
           action: perform-action
-          perform_action: telus_smarthome.speak
+          perform_action: telus_smarthome_alarmdotcom.speak
           data:
             entity_id: camera.doorbell
             message: Please leave it at the door. Thank you!
@@ -64,7 +64,7 @@ cards:
         icon: mdi:door-closed
         tap_action:
           action: perform-action
-          perform_action: telus_smarthome.speak
+          perform_action: telus_smarthome_alarmdotcom.speak
           data:
             entity_id: camera.doorbell
             message: >-
@@ -76,7 +76,7 @@ cards:
         icon: mdi:stop-circle-outline
         tap_action:
           action: perform-action
-          perform_action: telus_smarthome.stop_speaking
+          perform_action: telus_smarthome_alarmdotcom.stop_speaking
           data:
             entity_id: camera.doorbell
 

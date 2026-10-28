@@ -61,10 +61,10 @@ from fakes import (  # noqa: E402
 
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 
-from custom_components.telus_smarthome import arming_devices_coordinator as adc  # noqa: E402
-from custom_components.telus_smarthome import camera_settings_coordinator as csc  # noqa: E402
-from custom_components.telus_smarthome import select  # noqa: E402
-from custom_components.telus_smarthome.const import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import arming_devices_coordinator as adc  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import camera_settings_coordinator as csc  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import select  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import (  # noqa: E402
     DATA_ARMING_DEVICES_COORDINATOR,
     DATA_CAMERA_COORDINATOR,
     DATA_CAMERA_SETTINGS_COORDINATOR,

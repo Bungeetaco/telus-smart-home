@@ -72,8 +72,8 @@ from pyalarmdotcomajax.exceptions import (  # noqa: E402
     UnexpectedResponse,
 )
 
-from custom_components.telus_smarthome import config_flow  # noqa: E402
-from custom_components.telus_smarthome.const import (
+from custom_components.telus_smarthome_alarmdotcom import config_flow  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import (
     CONF_CALL_ENABLED,  # noqa: E402
     CONF_2FA_COOKIE,
     CONF_ARM_CODE,

@@ -9,7 +9,7 @@ from pyalarmdotcomajax import const as libConst
 from pyalarmdotcomajax.devices.sensor import Sensor as libSensor
 
 INTEGRATION_NAME = "Alarm.com"
-DOMAIN = "telus_smarthome"
+DOMAIN = "telus_smarthome_alarmdotcom"
 ISSUE_URL = "https://github.com/pyalarmdotcom/alarmdotcom/issues"
 STARTUP_MESSAGE = f"""
 ===================================================================
@@ -37,7 +37,7 @@ ALARM_COM_MANUFACTURER = "Alarm.com"
 SKYBELL_MANUFACTURER = "Skybell"
 LIBRARY_DEVICE_MANUFACTURERS = frozenset({ALARM_COM_MANUFACTURER, SKYBELL_MANUFACTURER})
 
-DEBUG_REQ_EVENT = "telus_smarthome_debug_request"
+DEBUG_REQ_EVENT = "telus_smarthome_alarmdotcom_debug_request"
 
 MIGRATE_MSG_ALERT = (
     "The Alarm.com integration is now configured exclusively via Home Assistant's"
@@ -67,6 +67,31 @@ CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT = 30  # seconds
 # healthy socket (docs/troubleshooting.md) is NOT a failure and keeps the
 # fast fixed delay, so push stays up as much as it did.
 WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS = 300
+
+# Bound on the push websocket's TCP+TLS connect phase (backlog E106). The
+# library opens the socket with ws_connect(..., timeout=30), but in aiohttp a
+# float `timeout` on ws_connect sets ONLY the close handshake
+# (ClientWSTimeout.ws_close), never the connect; the connect is governed by the
+# session's ClientTimeout, whose aiohttp default is sock_connect=30. So a
+# stalled connect to webskt.alarm.com -- which happens intermittently and in
+# streaks even while a by-hand connect from the same host is sub-second --
+# burned a full 30 s before failing, turning a brief upstream hiccup into a 30 s
+# blind window and feeding the reconnect backoff up to its 300 s cap (the
+# clustered ConnectionTimeoutErrors E106 recorded, each landing on the same
+# sub-second offset: the 30 s ceiling firing, not jittery latency). A healthy
+# connect is sub-second, so 10 s fails a stall fast and lets a FRESH retry land
+# on a healthy edge within seconds, while staying wide enough not to abandon a
+# merely-slow connect and spend a needless websocket-token fetch (every attempt
+# costs one REST token fetch against the rate-limited edge). Only the connect
+# phase is bounded: a running socket (kept alive by the heartbeat patch) and
+# slow REST responses (the session's unchanged total budget) are unaffected.
+# controller.initialize_lite builds the session's ClientTimeout with this.
+WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 10
+# The session's overall response budget, aiohttp's own default, kept explicit so
+# setting sock_connect above does not drop it to ClientTimeout's unbounded
+# default. Bounds the websocket HANDSHAKE and each REST round trip, not the
+# long-lived running socket (its reads return per message / heartbeat).
+WEBSOCKET_SESSION_TOTAL_TIMEOUT_SECONDS = 300
 
 LOGGER = logging.getLogger(__package__)
 
@@ -253,7 +278,7 @@ CAMERA_BRIDGE_PARTITIONS_URL = "http://127.0.0.1:8199/control/partitions"
 #
 # This changes what a LIVE alarm panel will and will not trigger on: a bypassed
 # zone does not sound the alarm until it is un-bypassed. Only ever call it from
-# the explicit telus_smarthome.bypass_sensors service, never from a poll, an arm
+# the explicit telus_smarthome_alarmdotcom.bypass_sensors service, never from a poll, an arm
 # path, or any automatic reaction to state. The separate CONF_FORCE_BYPASS arm
 # flag above is a different mechanism and does not go through here.
 #
@@ -327,7 +352,7 @@ CAMERA_BRIDGE_ARMING_DEVICE_PARTITION_URL_TEMPLATE = (
 CAMERA_BRIDGE_BLUETOOTH_DISARMING_URL = (
     "http://127.0.0.1:8199/control/bluetooth-disarming")
 
-# telus_smarthome service names (registered in __init__.py via speak_service.py
+# telus_smarthome_alarmdotcom service names (registered in __init__.py via speak_service.py
 # and bypass_service.py).
 SERVICE_SPEAK = "speak"
 SERVICE_STOP_SPEAKING = "stop_speaking"

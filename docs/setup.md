@@ -4,7 +4,7 @@ This guide walks through deploying TELUS Smart Home for Home Assistant from
 nothing to working panel, lock, sensor, and live-camera entities. There are two
 pieces to install:
 
-1. **The Home Assistant integration** (`custom_components/telus_smarthome/`):
+1. **The Home Assistant integration** (`custom_components/telus_smarthome_alarmdotcom/`):
    provides the alarm panel, lock, sensors, camera entities, and the config-flow
    UI. Runs inside Home Assistant.
 2. **The camera bridge** (`camera-bridge/`): a standalone Docker container that
@@ -93,7 +93,7 @@ own git tags. Note this integration is a permanent hand-maintained fork: it is
 Copy the integration directory into your HA config's `custom_components/`:
 
 ```bash
-cp -r <repo>/custom_components/telus_smarthome \
+cp -r <repo>/custom_components/telus_smarthome_alarmdotcom \
       <ha-config-dir>/custom_components/
 ```
 
@@ -306,8 +306,8 @@ directory and how to rotate these secrets.
 ## Optional: Talkdown (two-way / speak-to-camera audio)
 
 The bridge can push audio *down* to a doorbell-class camera's speaker
-(talkdown), exposed in Home Assistant as the `telus_smarthome.speak` service,
-with `telus_smarthome.stop_speaking` to end a clip early. It is **enabled by
+(talkdown), exposed in Home Assistant as the `telus_smarthome_alarmdotcom.speak` service,
+with `telus_smarthome_alarmdotcom.stop_speaking` to end a clip early. It is **enabled by
 default**: nothing ever speaks on its own, the endpoint only plays what a caller
 asks it to. Only doorbell-class cameras with an upstream-audio path support it.
 
@@ -326,14 +326,14 @@ asks it to. Only doorbell-class cameras with an upstream-audio path support it.
    ```
 
 3. **Call the service from Home Assistant**: e.g. from Developer Tools →
-   Actions, or an automation. The integration registers `telus_smarthome.speak`
+   Actions, or an automation. The integration registers `telus_smarthome_alarmdotcom.speak`
    once per HA run. Provide either `message` (rendered by HA's TTS engine) *or*
    `media_content_id` (a media-source URI or direct URL); they are mutually
    exclusive. `entity_id` targets a specific TELUS camera; if omitted, the
    doorbell is used.
 
    ```yaml
-   action: telus_smarthome.speak
+   action: telus_smarthome_alarmdotcom.speak
    data:
      entity_id: camera.<doorbell-entity>   # optional; defaults to the doorbell
      message: "Hi, you are being recorded."
@@ -344,7 +344,7 @@ asks it to. Only doorbell-class cameras with an upstream-audio path support it.
    Or play a clip / prerendered TTS instead of `message`:
 
    ```yaml
-   action: telus_smarthome.speak
+   action: telus_smarthome_alarmdotcom.speak
    data:
      media_content_id: "media-source://tts/google_translate?message=Hello"
    ```
@@ -414,7 +414,7 @@ Work through these in order: each depends on the one before it.
    `credentials.json` in the shared directory has a fresh `updated_at`.
 
 8. **Talkdown (if enabled).**
-   Call `telus_smarthome.speak` and confirm audio reaches the camera.
+   Call `telus_smarthome_alarmdotcom.speak` and confirm audio reaches the camera.
 
 ## The all-in-one installer (`install.sh`)
 
@@ -434,7 +434,7 @@ alone rather than overwritten. Its five steps map directly onto this guide:
 | Step | What it does | Manual equivalent |
 | --- | --- | --- |
 | 1 | Finds the HA container and checks it runs `--network host`; stops if not. | [Network requirement](#the---network-host-requirement-and-why) |
-| 2 | Optionally copies `custom_components/telus_smarthome/` into your HA config dir (skip if using HACS). | [Step 1, Method B](#method-b-manual-copy) |
+| 2 | Optionally copies `custom_components/telus_smarthome_alarmdotcom/` into your HA config dir (skip if using HACS). | [Step 1, Method B](#method-b-manual-copy) |
 | 3 | Prompts for TELUS email/password, `$`-escapes them, writes `secrets.env` mode `0600`. | [Step 3.2–3.4](#step-3-deploy-the-camera-bridge) |
 | 4 | Creates and `chown`s the shared directory (UID 1500), records `HOST_SHARED_DIR` in `.env`, and warns if the HA container doesn't mount it. | [Step 3.6](#step-3-deploy-the-camera-bridge) + [Step 4](#step-4-confirm-the-shared-directory-is-mounted-by-both-containers) |
 | 5 | Runs `sudo docker compose up -d --build`. | [Step 3.7](#step-3-deploy-the-camera-bridge) |

@@ -62,9 +62,9 @@ import ha_stubs  # noqa: E402
 
 ha_stubs.install()
 
-from custom_components.telus_smarthome import event as event_module  # noqa: E402
-from custom_components.telus_smarthome.const import CONF_CLIP_LINK_SECRET  # noqa: E402
-from custom_components.telus_smarthome.event import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import event as event_module  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import CONF_CLIP_LINK_SECRET  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.event import (  # noqa: E402
     DOORBELL_EVENT_TYPES,
     DOORBELL_PRESS_EVENT_TYPE_NAME,
     EVENT_TYPES,

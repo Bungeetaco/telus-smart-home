@@ -44,9 +44,9 @@ ha_stubs.install()
 
 from fakes import FakeConfigEntry, FakeDeviceEntry, FakeDeviceRegistry, FakeHass  # noqa: E402
 
-from custom_components.telus_smarthome import arming_devices_coordinator as adc  # noqa: E402
-from custom_components.telus_smarthome.base_device import HardwareBaseDevice  # noqa: E402
-from custom_components.telus_smarthome.const import DOMAIN  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import arming_devices_coordinator as adc  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.base_device import HardwareBaseDevice  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import DOMAIN  # noqa: E402
 
 PARTITION_ID = "123-1"
 SENSOR_ID = "123-456"
@@ -121,7 +121,7 @@ async def test_missing_partition_is_warned_once_per_partition_not_per_entity():
     wall of identical warnings at setup."""
     entry = FakeConfigEntry(entry_id="entryA")
     controller = make_controller(entry, [])
-    logger = logging.getLogger("custom_components.telus_smarthome.base_device")
+    logger = logging.getLogger("custom_components.telus_smarthome_alarmdotcom.base_device")
     capture = _Capture()
     logger.addHandler(capture)
     try:

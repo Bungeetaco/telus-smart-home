@@ -105,7 +105,7 @@ ASP.NET web-service style, not JSON:API.
 
 | Endpoint | What it does |
 | --- | --- |
-| `POST /web/api/devices/partitions/{id}/bypassSensors` | **Selective** sensor bypass: a standalone partition action, NOT an arm-time option: the body carries `bypass` and `unbypass` as pipe-separated device-id strings, applied immediately. Gated by the partition's own `canBypassSensorWhenArmed` / `hasPermissionToChangeState`. **Implemented** as the manual `telus_smarthome.bypass_sensors` service; the integration's existing `CONF_FORCE_BYPASS` arm flag is a different mechanism and is untouched |
+| `POST /web/api/devices/partitions/{id}/bypassSensors` | **Selective** sensor bypass: a standalone partition action, NOT an arm-time option: the body carries `bypass` and `unbypass` as pipe-separated device-id strings, applied immediately. Gated by the partition's own `canBypassSensorWhenArmed` / `hasPermissionToChangeState`. **Implemented** as the manual `telus_smarthome_alarmdotcom.bypass_sensors` service; the integration's existing `CONF_FORCE_BYPASS` arm flag is a different mechanism and is untouched |
 | `PUT /web/api/devices/bluetoothArmingDevices/{id}` | Bluetooth arming device config (the phone-proximity auto-disarm path): **genuinely unimplemented, see below** |
 | `POST /web/api/systems/systems/{id}/connectPanelToWifi`, `GET /web/api/settings/panelWifi/wifiSettings/{id}`, `…/wifiNetworks` | panel Wi-Fi |
 | `POST …/DeviceCommands.asmx/SetStaticNetworkConfig`, `SetToFindIpAddressAutomatically` | camera IP configuration |
@@ -127,7 +127,7 @@ the options flow and documented in [configuration.md](configuration.md). It mean
 **`POST /web/api/devices/partitions/{id}/bypassSensors`, the manual action.** The
 body carries `bypass` and `unbypass` as pipe-separated device-id strings and is
 applied immediately, independent of any arm call. It is exposed as the
-`telus_smarthome.bypass_sensors` service.
+`telus_smarthome_alarmdotcom.bypass_sensors` service.
 
 Only one of them is automatic, which is what keeps them from disagreeing about
 which zones are skipped. **Do not add a second automatic path**: two of those

@@ -170,7 +170,7 @@ By default, credentials are read once at startup from `secrets.env`
 `MEDIAMTX_RTSP_PORT` and `LOG_LEVEL` come from `.env`.
 
 **This bridge holds its own separate copy of the TELUS username/password from
-the Home Assistant `telus_smarthome` integration.** They used to be
+the Home Assistant `telus_smarthome_alarmdotcom` integration.** They used to be
 completely disconnected -- changing the password via HA's integration would
 silently leave this bridge on the old password until someone noticed camera
 streams failing. That gap is now closed by the control endpoint below.

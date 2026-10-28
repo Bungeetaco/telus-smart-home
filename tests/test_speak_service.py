@@ -1,4 +1,4 @@
-"""Tests for `telus_smarthome.speak` / `stop_speaking` (`speak_service.py`, backlog E66).
+"""Tests for `telus_smarthome_alarmdotcom.speak` / `stop_speaking` (`speak_service.py`, backlog E66).
 
 Run from the repository root:
 
@@ -56,8 +56,8 @@ from fakes import (  # noqa: E402
 
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 
-from custom_components.telus_smarthome import speak_service  # noqa: E402
-from custom_components.telus_smarthome.const import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import speak_service  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import (  # noqa: E402
     DOMAIN,
     SERVICE_SPEAK,
     SERVICE_STOP_SPEAKING,

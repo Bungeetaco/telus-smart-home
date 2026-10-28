@@ -3,7 +3,7 @@
 # An actionable-notification intercom for the TELUS doorbell: the phone gets a
 # notification with a snapshot when someone rings (or stands at the door
 # without ringing), and three quick-reply buttons that speak through the
-# doorbell's own speaker via the integration's `telus_smarthome.speak`
+# doorbell's own speaker via the integration's `telus_smarthome_alarmdotcom.speak`
 # talkdown service.
 #
 # DESIGN CONSTRAINT, settled by the operator: nothing here speaks, plays a
@@ -261,7 +261,7 @@ automation:
     alias: telus_doorbell_speak_on_action
     description: >-
       Speak the canned phrase matching the tapped notification action through
-      the doorbell speaker via telus_smarthome.speak. Never gated on the mute
+      the doorbell speaker via telus_smarthome_alarmdotcom.speak. Never gated on the mute
       toggle: the tap is an explicit human action.
     triggers:
       - trigger: event
@@ -286,7 +286,7 @@ automation:
               - condition: trigger
                 id: onmyway
             sequence:
-              - action: telus_smarthome.speak
+              - action: telus_smarthome_alarmdotcom.speak
                 data:
                   entity_id: camera.doorbell
                   message: Hi! I'll be right with you, just give me a moment.
@@ -297,7 +297,7 @@ automation:
               - condition: trigger
                 id: leaveit
             sequence:
-              - action: telus_smarthome.speak
+              - action: telus_smarthome_alarmdotcom.speak
                 data:
                   entity_id: camera.doorbell
                   message: Please leave it at the door. Thank you!
@@ -306,7 +306,7 @@ automation:
               - condition: trigger
                 id: cantcome
             sequence:
-              - action: telus_smarthome.speak
+              - action: telus_smarthome_alarmdotcom.speak
                 data:
                   entity_id: camera.doorbell
                   message: >-

@@ -261,7 +261,7 @@ and evidence. Grouped by whether anything can actually be done about them.
   this rather than replacing it.
 
 - **E108** (DONE 2026-10-12, integration) - every unload and every Home
-  Assistant stop logged `Detected that custom integration 'telus_smarthome'
+  Assistant stop logged `Detected that custom integration 'telus_smarthome_alarmdotcom'
   closes the Home Assistant aiohttp session` from `controller.stop()`, which
   ended with the library's `close_websession()`. Home Assistant builds every
   session it hands out on one connector shared by the whole process and wraps
@@ -888,7 +888,7 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
       to a clean single-pass encode -- plus the bound and the opt-in behaviour.
 - **E2 (DONE) Cancel / stop an in-progress talk.**
   `POST /control/cameras/{id}/talk/stop` (and the Home Assistant service
-  `telus_smarthome.stop_speaking`) ends the clip currently playing. Implemented as
+  `telus_smarthome_alarmdotcom.stop_speaking`) ends the clip currently playing. Implemented as
   a stop *signal*, not task cancellation: `TalkManager` holds an `asyncio.Event`
   per in-flight talk, and the transport checks it at each chunk boundary, so the
   stream stops within one chunk (40 ms) while the MWS teardown still runs on its
@@ -899,8 +899,8 @@ cutoffs/levels, which is what the per-request `audio_filter` override is for.
   unconditionally. Covered by the test suite (a stop mid-clip must end promptly
   with partial stats and no exception).
 - **E3 (DONE) HA integration + speak service.**
-  `custom_components/telus_smarthome` v1.5.1 is live (rsynced to
-  `~/homeassistant/config/...`, HA restarted); `telus_smarthome.speak` is
+  `custom_components/telus_smarthome_alarmdotcom` v1.5.1 is live (rsynced to
+  `~/homeassistant/config/...`, HA restarted); `telus_smarthome_alarmdotcom.speak` is
   registered and plays through the doorbell end to end via BOTH paths:
   `media_content_id` = a direct URL to a self-hosted TTS engine on the host
   (e.g. `http://127.0.0.1:<tts-port>/speak?text=...`), which bypasses HA TTS
@@ -1471,7 +1471,7 @@ and there is no better backlog to put them in. Full detail in
   the same thing the TELUS app's own bypass screen does. It cannot be folded into
   `CONF_FORCE_BYPASS`, which is a boolean passed to an arm call.
 
-  So it ships as a MANUAL service (`telus_smarthome.bypass_sensors`) and is
+  So it ships as a MANUAL service (`telus_smarthome_alarmdotcom.bypass_sensors`) and is
   deliberately not wired into the arm path. The hazard the original entry named --
   two *automatic* bypass paths racing over one partition -- is real and is still
   avoided; a manual action alongside an automatic flag is a different thing.
@@ -1813,7 +1813,7 @@ that look worth having.
   a user that one disables the other.
 
 - **E42 (DONE) Unpairing is a service, never a button.**
-  `telus_smarthome.unpair_arming_device`, taking one phone's switch, backed by
+  `telus_smarthome_alarmdotcom.unpair_arming_device`, taking one phone's switch, backed by
   `DELETE /control/arming-devices/{device_id}`.
 
   **There is no undo from this side.** Re-pairing needs physical access to both
