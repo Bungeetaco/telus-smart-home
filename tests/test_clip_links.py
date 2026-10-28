@@ -56,13 +56,13 @@ ha_stubs.install()
 
 import aiohttp  # noqa: E402
 
-from custom_components.telus_smarthome import clip_view  # noqa: E402
-from custom_components.telus_smarthome.clip_view import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import clip_view  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.clip_view import (  # noqa: E402
     TelusClipRedirectView,
     clip_link_sig,
     make_clip_link,
 )
-from custom_components.telus_smarthome.const import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import (  # noqa: E402
     CONF_CLIP_LINK_SECRET,
     DOMAIN,
 )

@@ -3,7 +3,7 @@
 # An actionable-notification intercom for the TELUS doorbell: the phone gets a
 # notification with a snapshot when someone rings (or stands at the door
 # without ringing), and three quick-reply buttons that speak through the
-# doorbell's own speaker via the integration's `telus_smarthome.speak`
+# doorbell's own speaker via the integration's `telus_smarthome_alarmdotcom.speak`
 # talkdown service.
 #
 # DESIGN CONSTRAINT, settled by the operator: nothing here speaks, plays a
@@ -88,18 +88,18 @@ automation:
       /api/frigate/notifications snapshot path does not exist, and Frigate's
       best frame is only finalised at event end, long after this should fire.
     triggers:
-      - trigger: state
-        entity_id: event.doorbell_button_press
-        not_to:
-          - unknown
-          - unavailable
+      # event.received fires once per new press. A state trigger on the event
+      # entity would also fire at every Home Assistant start: an event entity
+      # restores its last event, so its state goes from unavailable to the
+      # previous press's timestamp, which no to/not_to filter can tell apart
+      # from a press.
+      - trigger: event.received
+        target:
+          entity_id: event.doorbell_button_press
+        options:
+          event_type:
+            - ring
     conditions:
-      # A real press is a state change from a previous real state (or from
-      # unknown: the entity starts at unknown every HA start and does not
-      # restore, so unknown -> timestamp IS the first press after a restart).
-      # from_state None is entity creation, not a press.
-      - condition: template
-        value_template: "{{ trigger.from_state is not none }}"
       - condition: state
         entity_id: input_boolean.telus_doorbell_notifications_muted
         state: "off"
@@ -215,14 +215,13 @@ automation:
       15 s after a doorbell press event, if Frigate still shows a person in
       the doorbell camera's front_door zone, send one follow-up notification.
     triggers:
-      - trigger: state
-        entity_id: event.doorbell_button_press
-        not_to:
-          - unknown
-          - unavailable
-    conditions:
-      - condition: template
-        value_template: "{{ trigger.from_state is not none }}"
+      # event.received, not a state trigger on the event entity: see (a).
+      - trigger: event.received
+        target:
+          entity_id: event.doorbell_button_press
+        options:
+          event_type:
+            - ring
     actions:
       - delay: "00:00:15"
       - condition: state
@@ -262,7 +261,7 @@ automation:
     alias: telus_doorbell_speak_on_action
     description: >-
       Speak the canned phrase matching the tapped notification action through
-      the doorbell speaker via telus_smarthome.speak. Never gated on the mute
+      the doorbell speaker via telus_smarthome_alarmdotcom.speak. Never gated on the mute
       toggle: the tap is an explicit human action.
     triggers:
       - trigger: event
@@ -287,7 +286,7 @@ automation:
               - condition: trigger
                 id: onmyway
             sequence:
-              - action: telus_smarthome.speak
+              - action: telus_smarthome_alarmdotcom.speak
                 data:
                   entity_id: camera.doorbell
                   message: Hi! I'll be right with you, just give me a moment.
@@ -298,7 +297,7 @@ automation:
               - condition: trigger
                 id: leaveit
             sequence:
-              - action: telus_smarthome.speak
+              - action: telus_smarthome_alarmdotcom.speak
                 data:
                   entity_id: camera.doorbell
                   message: Please leave it at the door. Thank you!
@@ -307,7 +306,7 @@ automation:
               - condition: trigger
                 id: cantcome
             sequence:
-              - action: telus_smarthome.speak
+              - action: telus_smarthome_alarmdotcom.speak
                 data:
                   entity_id: camera.doorbell
                   message: >-

@@ -309,20 +309,20 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # Create real devices
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
-    # Register the talkdown service (telus_smarthome.speak). Once per HA run and
+    # Register the talkdown service (telus_smarthome_alarmdotcom.speak). Once per HA run and
     # guarded by has_service inside -- reloads land here again but re-registration
     # is a no-op, same spirit as the clip_view "once per HA run" guard above.
     async_register_speak_service(hass)
 
     # Register the manual selective-sensor-bypass service
-    # (telus_smarthome.bypass_sensors). Same once-per-HA-run, has_service-guarded
+    # (telus_smarthome_alarmdotcom.bypass_sensors). Same once-per-HA-run, has_service-guarded
     # lifecycle as the talkdown services above. It is a MANUAL action only and is
     # deliberately not wired into the arm path -- CONF_FORCE_BYPASS remains the
     # only bypass that happens as a side effect of arming (see bypass_service.py).
     async_register_bypass_service(hass)
     async_register_unpair_service(hass)
 
-    async def handle_telus_smarthome_debug_request_event(event: Event) -> None:
+    async def handle_telus_smarthome_alarmdotcom_debug_request_event(event: Event) -> None:
         """Dump debug data when requested via Home Assistant event."""
 
         event_device = controller.api.devices.get(str(event.data.get("device_id")))
@@ -338,7 +338,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # duplicate listener registered against a controller whose session may already be
     # closed -- unwrapped, every options-flow save/reauth/reconfigure added another.
     config_entry.async_on_unload(
-        hass.bus.async_listen(DEBUG_REQ_EVENT, handle_telus_smarthome_debug_request_event)
+        hass.bus.async_listen(DEBUG_REQ_EVENT, handle_telus_smarthome_alarmdotcom_debug_request_event)
     )
 
     LOGGER.info("%s: Finished initializing Alarmdotcom from config entry.", __name__)

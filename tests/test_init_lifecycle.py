@@ -11,7 +11,7 @@ the three import-time patch modules, whose real application CI's
 check_patch.py job proves), `tests/fakes.py` the hass/registry fakes, and the
 REAL `__init__.py` runs with a scripted controller and an absent bridge.
 
-The module is imported as `custom_components.telus_smarthome.__init__`
+The module is imported as `custom_components.telus_smarthome_alarmdotcom.__init__`
 explicitly, because the harness deliberately seeds the package without
 executing its __init__ (see ha_stubs); importing it by name runs the real
 file with its relative imports intact.
@@ -70,9 +70,9 @@ from homeassistant.exceptions import (  # noqa: E402
     ConfigEntryNotReady,
 )
 
-from custom_components.telus_smarthome import camera as camera_module  # noqa: E402
-from custom_components.telus_smarthome import event as event_module  # noqa: E402
-from custom_components.telus_smarthome.const import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import camera as camera_module  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import event as event_module  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.const import (  # noqa: E402
     ALARM_COM_MANUFACTURER,
     CONF_CLIP_LINK_SECRET,
     DATA_CONTROLLER,
@@ -85,7 +85,7 @@ from custom_components.telus_smarthome.const import (  # noqa: E402
     SKYBELL_MANUFACTURER,
 )
 
-init_module = importlib.import_module("custom_components.telus_smarthome.__init__")
+init_module = importlib.import_module("custom_components.telus_smarthome_alarmdotcom.__init__")
 
 
 async def _absent_bridge(hass, url, params=None, timeout=None):

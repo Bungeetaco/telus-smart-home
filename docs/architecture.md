@@ -15,7 +15,7 @@ host**.
 
 | Component | Lives in | Runtime | Responsible for |
 | --- | --- | --- | --- |
-| **Home Assistant integration** | `custom_components/telus_smarthome/` | Inside the Home Assistant process | Panel, lock, and sensor entities; camera/event entities; config & credential flows; clip-link redirect; talkdown service |
+| **Home Assistant integration** | `custom_components/telus_smarthome_alarmdotcom/` | Inside the Home Assistant process | Panel, lock, and sensor entities; camera/event entities; config & credential flows; clip-link redirect; talkdown service |
 | **Camera bridge** | `camera-bridge/` | Standalone Docker container | Pulling live video over WebRTC and re-serving it as RTSP; snapshots; clip/event/history/automation lookups; two-way audio (talkdown) |
 
 They are deliberately separate. The integration is a Home Assistant custom
@@ -248,7 +248,7 @@ it until it is put back.
 ```mermaid
 graph TB
     subgraph HA["Home Assistant process"]
-        INT["telus_smarthome integration<br/>panel / lock / sensors<br/>camera / event entities<br/>speak service, clip redirect"]
+        INT["telus_smarthome_alarmdotcom integration<br/>panel / lock / sensors<br/>camera / event entities<br/>speak service, clip redirect"]
     end
 
     subgraph BR["camera-bridge container (--network host)"]

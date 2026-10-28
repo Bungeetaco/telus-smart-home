@@ -62,8 +62,8 @@ from fakes import (  # noqa: E402
 
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 
-from custom_components.telus_smarthome import arming_devices_coordinator as adc  # noqa: E402
-from custom_components.telus_smarthome import switch  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import arming_devices_coordinator as adc  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import switch  # noqa: E402
 
 PHONE = {"id": "ad42", "description": "Dad's iPhone",
          "supports_disarming_toggle": True, "disarming_enabled": True,
@@ -405,7 +405,7 @@ async def test_switch_platform_setup_gates_arming_and_panel_entities():
     with_service_device(hass, entry)
     controller = types.SimpleNamespace(
         api=types.SimpleNamespace(devices=types.SimpleNamespace(cameras={})))
-    hass.data["telus_smarthome"] = {entry.entry_id: {
+    hass.data["telus_smarthome_alarmdotcom"] = {entry.entry_id: {
         "connection": controller,
         "camera_coordinator": types.SimpleNamespace(data={}),
     }}
@@ -419,7 +419,7 @@ async def test_switch_platform_setup_gates_arming_and_panel_entities():
         await switch.async_setup_entry(hass, entry, added.extend)
     finally:
         fakes.restore(switch, saved)
-    store = hass.data["telus_smarthome"][entry.entry_id]
+    store = hass.data["telus_smarthome_alarmdotcom"][entry.entry_id]
 
     # A phone that cannot be written yields NO switch; a writable one appears.
     store["arming_devices_coordinator"].async_set_updated_data({

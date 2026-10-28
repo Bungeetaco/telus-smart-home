@@ -59,8 +59,8 @@ import ha_stubs  # noqa: E402
 
 ha_stubs.install()
 
-from custom_components.telus_smarthome import sensor  # noqa: E402
-from custom_components.telus_smarthome.sensor import (  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import sensor  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.sensor import (  # noqa: E402
     AUDIO_FLOWING,
     AUDIO_NO_AUDIO_YET,
     AUDIO_NOT_CONSUMING,

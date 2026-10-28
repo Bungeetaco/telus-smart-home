@@ -111,7 +111,7 @@ class FakeRegistryEntry:
     """One entity-registry row, with upstream's field names."""
 
     def __init__(self, entity_id: str, unique_id: str | None = None,
-                 platform: str = "telus_smarthome", config_entry_id: str | None = "entry1",
+                 platform: str = "telus_smarthome_alarmdotcom", config_entry_id: str | None = "entry1",
                  original_name: str | None = None, name: str | None = None) -> None:
         self.entity_id = entity_id
         self.domain = entity_id.split(".")[0]
@@ -227,7 +227,7 @@ class FakeConfigEntry:
 
     def __init__(self, entry_id: str | None = None, data: dict[str, Any] | None = None,
                  options: dict[str, Any] | None = None, unique_id: str | None = None,
-                 title: str = "", version: int = 4, domain: str = "telus_smarthome") -> None:
+                 title: str = "", version: int = 4, domain: str = "telus_smarthome_alarmdotcom") -> None:
         if entry_id is None:
             FakeConfigEntry._counter += 1
             entry_id = f"entry{FakeConfigEntry._counter}"

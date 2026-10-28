@@ -1,6 +1,6 @@
 # Doorbell talkdown deterrent -- HA automation (reference; not auto-deployed).
 #
-# Speaks a recorded-notice through the doorbell speaker (telus_smarthome.speak)
+# Speaks a recorded-notice through the doorbell speaker (telus_smarthome_alarmdotcom.speak)
 # when a person stands at the front door for >= 10 continuous seconds, but never
 # for known occupants.
 #
@@ -22,7 +22,7 @@
   description: >-
     When a person stands at the front door for >=10 continuous seconds (Frigate
     front_door_talk zone, loitering_time 10), speak a recorded notice through the
-    doorbell speaker via telus_smarthome.speak. Gated on binary_sensor.recent_entry
+    doorbell speaker via telus_smarthome_alarmdotcom.speak. Gated on binary_sensor.recent_entry
     being off so it never talks to an occupant who just came in. Fires
     once per tracked person on the zone-entry transition, same pattern as
     frigate_doorbell_person.
@@ -44,7 +44,7 @@
       entity_id: binary_sensor.recent_entry
       state: "off"
   actions:
-    - action: telus_smarthome.speak
+    - action: telus_smarthome_alarmdotcom.speak
       # Omit entity_id to target the doorbell by default; or set it explicitly to
       # the real TELUS bridge camera entity (unique_id = the doorbell device id,
       # <unit-id>-<did>), e.g. entity_id: camera.doorbell

@@ -42,7 +42,7 @@ except ImportError:
 _spec = importlib.util.spec_from_file_location(
     "telus_auth_patch_real",
     pathlib.Path(__file__).resolve().parents[1]
-    / "custom_components" / "telus_smarthome" / "telus_auth_patch.py")
+    / "custom_components" / "telus_smarthome_alarmdotcom" / "telus_auth_patch.py")
 telus_auth_patch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(telus_auth_patch)
 

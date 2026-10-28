@@ -52,7 +52,7 @@ ha_stubs.install()
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass  # noqa: E402
 
-from custom_components.telus_smarthome import binary_sensor  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom import binary_sensor  # noqa: E402
 from fakes import FakeConfigEntry  # noqa: E402
 
 Subtype = ha_stubs.LibSensor.Subtype
@@ -187,7 +187,7 @@ async def test_connectivity_sensor_reports_a_down_bridge_instead_of_vanishing():
 
     assert entity._attr_unique_id == "entryC_camera_bridge"
     identifiers = entity._attr_device_info["identifiers"]
-    assert identifiers == {("telus_smarthome", "entryC_integration")}, (
+    assert identifiers == {("telus_smarthome_alarmdotcom", "entryC_integration")}, (
         f"device {identifiers!r}: this reports on the integration's own "
         "plumbing and must join the synthetic Integration service device, not "
         "any TELUS device")

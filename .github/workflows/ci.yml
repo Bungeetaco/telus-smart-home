@@ -21,7 +21,7 @@ jobs:
       - name: Install integration requirements (as declared in manifest.json)
         run: |
           python -m pip install --upgrade pip
-          reqs=$(python -c "import json; print(' '.join(json.load(open('custom_components/telus_smarthome/manifest.json'))['requirements']))")
+          reqs=$(python -c "import json; print(' '.join(json.load(open('custom_components/telus_smarthome_alarmdotcom/manifest.json'))['requirements']))")
           echo "installing: $reqs"
           pip install $reqs
       - name: Assert the monkeypatch still applies (fails loudly if upstream moved an internal)

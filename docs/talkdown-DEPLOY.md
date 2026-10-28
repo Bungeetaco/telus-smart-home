@@ -12,7 +12,7 @@ cameras. The mechanism is documented in
 
 Two deployments have to move together. The bridge builds its image from the
 repository working tree, while Home Assistant runs a **separate copy** of the
-integration at `~/homeassistant/config/custom_components/telus_smarthome`, so
+integration at `~/homeassistant/config/custom_components/telus_smarthome_alarmdotcom`, so
 the HA side needs an explicit sync: a bridge rebuild alone leaves the two
 halves mismatched.
 
@@ -43,14 +43,14 @@ step 3.
 ## 2. Deploy the HA integration (sync the separate copy)
 
     ssh <ha-host> 'rsync -a --delete \
-      <repo>/custom_components/telus_smarthome/ \
-      ~/homeassistant/config/custom_components/telus_smarthome/'
+      <repo>/custom_components/telus_smarthome_alarmdotcom/ \
+      ~/homeassistant/config/custom_components/telus_smarthome_alarmdotcom/'
 
-Restart Home Assistant so `services.yaml` and `telus_smarthome.speak` register:
+Restart Home Assistant so `services.yaml` and `telus_smarthome_alarmdotcom.speak` register:
 
     ssh <ha-host> 'sudo docker restart homeassistant'
 
-Verify: Developer Tools > Actions > search `telus_smarthome.speak`.
+Verify: Developer Tools > Actions > search `telus_smarthome_alarmdotcom.speak`.
 
 ## 3. (Optional) turn talkdown off
 
@@ -83,7 +83,7 @@ WAV, or an MP3 music file). ffmpeg transcodes any input to the doorbell's
       -d '{"audio_url":"http://127.0.0.1:8123/local/music.mp3"}'
     # -> {"path":"full_duplex","chunks":N,"bytes":M}
 
-Or via HA Developer Tools > Actions (`telus_smarthome.speak`, with a TTS
+Or via HA Developer Tools > Actions (`telus_smarthome_alarmdotcom.speak`, with a TTS
 `message:` or a media URL). Expected: audio plays at the doorbell within a few
 seconds; the bridge logs `talkdown: full-duplex armed ...` then
 `talkdown: streamed N chunks / M bytes mu-law to <host>`.

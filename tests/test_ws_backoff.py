@@ -27,7 +27,7 @@ import ha_stubs  # noqa: E402
 
 ha_stubs.install()
 
-from custom_components.telus_smarthome.ws_backoff import reconnect_delay  # noqa: E402
+from custom_components.telus_smarthome_alarmdotcom.ws_backoff import reconnect_delay  # noqa: E402
 
 
 def test_no_failures_is_the_plain_delay():

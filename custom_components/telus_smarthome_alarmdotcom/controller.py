@@ -35,7 +35,9 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     CONF_WEBSOCKET_RECONNECT_TIMEOUT,
     KEEP_ALIVE_INTERVAL_SECONDS,
+    WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
     WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS,
+    WEBSOCKET_SESSION_TOTAL_TIMEOUT_SECONDS,
 )
 from .ws_backoff import reconnect_delay
 
@@ -190,7 +192,22 @@ class AlarmIntegrationController:
         # auto_cleanup off because this controller releases it itself in
         # release_websession(); with auto_cleanup on, HA would also hold it
         # until shutdown, one per reload.
-        self._websession = async_create_clientsession(self.hass, auto_cleanup=False)
+        #
+        # Bound the TCP+TLS connect phase (backlog E106). The library opens the
+        # push socket with ws_connect(..., timeout=30), but that float only sets
+        # aiohttp's ws CLOSE timeout, not the connect; the connect uses this
+        # session's ClientTimeout, whose default sock_connect is 30 s, so a
+        # stalled connect to webskt.alarm.com burned a full 30 s before failing.
+        # sock_connect bounds only connection establishment -- a running socket
+        # (heartbeat) and slow REST responses (total) are untouched. See const.
+        self._websession = async_create_clientsession(
+            self.hass,
+            auto_cleanup=False,
+            timeout=aiohttp.ClientTimeout(
+                total=WEBSOCKET_SESSION_TOTAL_TIMEOUT_SECONDS,
+                sock_connect=WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
+            ),
+        )
         self.api = libAlarmController(
             username=username,
             password=password,

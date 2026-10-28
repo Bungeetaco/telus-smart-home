@@ -109,8 +109,8 @@ Lovelace resource list). None are guesses.
 - Frigate publishes on MQTT topic `frigate/events`; the doorbell camera's
   `front_door` zone has `loitering_time: 5`, so zone credit already means
   five continuous seconds standing at the door
-- The `telus_smarthome.speak` and `telus_smarthome.stop_speaking` services
-  (see `custom_components/telus_smarthome/services.yaml`)
+- The `telus_smarthome_alarmdotcom.speak` and `telus_smarthome_alarmdotcom.stop_speaking` services
+  (see `custom_components/telus_smarthome_alarmdotcom/services.yaml`)
 
 Limit of the evidence: the `current_zones` key the package's
 "person at door" sensor reads on `frigate/events` is standard in Frigate's

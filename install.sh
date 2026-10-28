@@ -68,7 +68,7 @@ if [[ "$REPLY" =~ ^[Yy]$ ]]; then
     exit 1
   fi
   mkdir -p "$HA_CONFIG_DIR/custom_components"
-  cp -r "$SCRIPT_DIR/custom_components/telus_smarthome" "$HA_CONFIG_DIR/custom_components/"
+  cp -r "$SCRIPT_DIR/custom_components/telus_smarthome_alarmdotcom" "$HA_CONFIG_DIR/custom_components/"
   echo "  Copied. Restart Home Assistant, then add the integration via Settings >"
   echo "  Devices & Services > Add Integration > TELUS Smart Home."
 fi
