@@ -51,25 +51,29 @@ The installer handles the network pre-flight, your TELUS credentials, the shared
 ## Ringing the doorbell as a trigger
 
 Each doorbell gets an event entity (`event.<doorbell>_button_press`) that fires
-when someone presses the button. Trigger on its state change:
+when someone presses the button. Trigger on it with `event.received`:
 
 ```yaml
 automation:
   - alias: Someone is at the door
     triggers:
-      - trigger: state
-        entity_id: event.doorbell_button_press
-        # Not to: an event entity's state is the timestamp of the last
-        # event, so every press is a new state. `not_to` filters out the
-        # startup transition from unavailable/unknown, which is not a press.
-        not_to:
-          - unavailable
-          - unknown
+      - trigger: event.received
+        target:
+          entity_id: event.doorbell_button_press
+        options:
+          event_type:
+            - ring
     actions:
       - action: notify.mobile_app_phone
         data:
           message: Someone is at the front door
 ```
+
+Not a `state` trigger on the entity: an event entity restores its last event
+when Home Assistant starts, so its state changes from `unavailable` to the
+previous press's timestamp, and a state trigger takes that for a new press (a
+`not_to` filter cannot tell them apart, because the new state is a timestamp).
+`event.received` fires only for a new event.
 
 Check the entity's actual id under **Settings → Devices & services → Entities**;
 it is named from the camera's own name, so a doorbell called "Front Door"
