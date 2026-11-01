@@ -75,6 +75,8 @@ from custom_components.telus_smarthome_alarmdotcom import event as event_module 
 from custom_components.telus_smarthome_alarmdotcom.const import (  # noqa: E402
     ALARM_COM_MANUFACTURER,
     CONF_CLIP_LINK_SECRET,
+    DATA_ARMING_DEVICES_COORDINATOR,
+    DATA_CAMERA_COORDINATOR,
     DATA_CONTROLLER,
     DOMAIN,
     PLATFORMS,
@@ -472,6 +474,79 @@ async def test_unload_stops_the_controller_and_keeps_shared_services_until_last(
             "clip_view_registered sentinel must not count as an entry")
 
 
+async def test_remove_config_entry_device_allows_only_what_nothing_reports_any_more():
+    """The device-page Delete button (`async_remove_config_entry_device`) says yes
+    only for a device that nothing in the loaded entry still reports: not the
+    library (`controller.api.devices`), not the bridge camera list, not the
+    paired-phone coordinator, and never this fork's own service and activity
+    devices. Everything else answers no, so a click cannot remove a device its
+    platform would recreate on the next poll.
+
+    Why this exists: the retired bridge-served doorbell (a camera the bridge
+    stopped listing when the device moved platforms) sat in the registry with
+    every entity unavailable and could not be deleted from the UI at all --
+    Home Assistant refuses the delete when the integration does not implement
+    this hook ("Config entry does not support device removal"). The prune pass
+    cannot help: it only ever removes library-stamped devices, by design.
+
+    Proven to fail against: the hook missing (AttributeError); a hook that
+    returns True for everything (the live camera and the service device would
+    be deletable); one that returns False for everything (the retired doorbell
+    stays undeletable, the shipped symptom); one that ignores the attribute
+    suffixes on an identifier (`<id>_debug` on a live device would read as
+    absent); and one that forgets the camera coordinator or the paired phones
+    (a bridge camera or a phone the library never lists would be deletable
+    while live).
+    """
+    entry = FakeConfigEntry(entry_id="e1")
+    hass = FakeHass()
+    hass.config_entries = FakeConfigEntries([entry])
+    controller = types.SimpleNamespace(api=types.SimpleNamespace(devices=types.SimpleNamespace(
+        all={"111111-1": adc_device("111111-1"), "111111-127": adc_device("111111-127")},
+        cameras={}, partitions={"111111-127": adc_device("111111-127")})))
+    hass.data[DOMAIN] = {"e1": {
+        DATA_CONTROLLER: controller,
+        DATA_CAMERA_COORDINATOR: types.SimpleNamespace(data={"111111-2049": {"id": "111111-2049"}}),
+        DATA_ARMING_DEVICES_COORDINATOR: types.SimpleNamespace(data={"111111-5263": {"description": "Phone"}}),
+    }}
+
+    def device(*identifiers):
+        return FakeDeviceEntry("d", {(DOMAIN, i) for i in identifiers}, {"e1"})
+
+    keep = {
+        "library sensor": device("111111-1"),
+        "library sensor via a suffixed attribute identifier": device("111111-1_debug"),
+        "partition": device("111111-127"),
+        "bridge camera the library never lists": device("111111-2049"),
+        "paired phone": device("111111-5263"),
+        "service device": device("e1_integration"),
+        "activity device": device("e1_activity"),
+    }
+    for what, dev in keep.items():
+        assert await init_module.async_remove_config_entry_device(hass, entry, dev) is False, (
+            f"{what} is still reported by the loaded entry and must not be deletable "
+            "from the device page: its platform would recreate it on the next poll")
+
+    gone = {
+        "retired bridge camera": device("111111-2048"),
+        "zone the library dropped": device("111111-9"),
+        "zone the library dropped, suffixed identifier": device("111111-9_malfunction"),
+    }
+    for what, dev in gone.items():
+        assert await init_module.async_remove_config_entry_device(hass, entry, dev) is True, (
+            f"{what} is reported by nothing any more and must be deletable: this is "
+            "the shipped symptom (an unavailable doorbell nobody could remove)")
+
+    # A device whose identifiers are all another integration's is not ours to keep.
+    foreign = FakeDeviceEntry("d", {("other_domain", "x")}, {"e1"})
+    assert await init_module.async_remove_config_entry_device(hass, entry, foreign) is True
+
+    # An entry that is not loaded protects nothing (HA only offers the button on a
+    # loaded entry, but the hook must not raise if it is ever called otherwise).
+    unloaded = FakeConfigEntry(entry_id="e2")
+    assert await init_module.async_remove_config_entry_device(hass, unloaded, device("111111-1")) is True
+
+
 TESTS = (
     test_setup_maps_auth_and_transport_failures,
     test_setup_succeeds_with_the_bridge_down_and_wires_everything,
@@ -479,6 +554,7 @@ TESTS = (
     test_setup_registers_the_via_devices_before_forwarding_platforms,
     test_migrations_v1_to_v4,
     test_unload_stops_the_controller_and_keeps_shared_services_until_last,
+    test_remove_config_entry_device_allows_only_what_nothing_reports_any_more,
 )
 
 

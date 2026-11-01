@@ -320,6 +320,21 @@ and evidence. Grouped by whether anything can actually be done about them.
   previous state to exist and not be `unavailable`/`unknown`, so only a change
   between two live states counts as a kick.
 
+- **E111** (DONE, integration) - the device page's Delete button. A
+  bridge-served camera the bridge stopped listing (the doorbell, after it
+  moved to another platform) sat in the registry with every entity
+  unavailable and could not be deleted: Home Assistant answers "Config entry
+  does not support device removal" when the integration lacks
+  `async_remove_config_entry_device`, and the prune pass is gated to
+  library-stamped devices on purpose (E110), so nothing could ever remove it.
+  The hook now exists and allows the delete only for a device that nothing in
+  the loaded entry still reports (library tree, bridge camera list,
+  paired-phone coordinator, the fork's own service/activity devices), with
+  the same attribute-suffix stripping the prune pass uses, so a click can
+  never remove a device its platform would recreate on the next poll. Pinned
+  in `tests/test_init_lifecycle.py` (proven to fail against the hook missing,
+  a yes-to-everything hook, a no-to-everything hook, one that ignores the
+  suffixes, and one that forgets either coordinator).
 - **E110** (DONE, integration) - two log-noise fixes, one of which was
   registry churn. (a) Every config-entry setup (boot and reload) logged
   `Removing device no longer present on Alarm.com` for the two bridge-served

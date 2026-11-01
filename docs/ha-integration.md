@@ -248,6 +248,24 @@ that loop also records which library ids already have a device, which the
 Skybell pass below reads, so a camera the library and the bridge both report
 keeps its one device instead of gaining a virtual one on every setup.
 
+### Deleting a device from its page
+
+The prune pass never touches the devices this fork registers itself, so a
+bridge-served camera the bridge stops listing (a doorbell moved to another
+platform, say) stays in the registry with every entity unavailable. Home
+Assistant only shows the device page's Delete button when the integration
+implements `async_remove_config_entry_device`; `__init__.py` does, and
+answers yes only when **nothing in the loaded entry still reports the
+device**: not the library's device tree (zones, partitions, Skybell cameras),
+not the bridge camera coordinator, not the paired-phone coordinator, and
+never the fork's own service and activity devices. Any device still reported
+answers no, because its platform would recreate it on the next poll. The
+comparison strips the attribute suffixes an identifier may carry
+(`<id>_debug`, `<id>_malfunction`) and uses the bare Alarm.com id. A device
+with no identifier of this domain is not ours to keep, and an entry that is
+not loaded protects nothing (the button is never offered in that state; the
+hook still must not raise).
+
 What a wrongly pruned device costs, for the record: its platform re-registers
 it moments later and Home Assistant restores the device's registry id, area,
 labels, user-given name, creation time and disabled state from the

@@ -39,6 +39,7 @@ from .const import (
     CONF_NO_ENTRY_DELAY,
     CONF_SILENT_ARM,
     DATA_ACTIVITY_COORDINATOR,
+    DATA_ARMING_DEVICES_COORDINATOR,
     DATA_CAMERA_COORDINATOR,
     DATA_CONTROLLER,
     DEBUG_REQ_EVENT,
@@ -467,6 +468,58 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
         LOGGER.info("Migration to version %s successful", config_entry.version)
 
+    return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Whether the device page's Delete button may remove this device.
+
+    Home Assistant only offers the button when the integration implements this
+    hook; without it the UI answers "Config entry does not support device
+    removal", which is what left the retired bridge-served doorbell -- every
+    entity unavailable, nothing reporting it any more -- undeletable. The prune
+    pass at setup cannot cover that case by design: it only ever removes
+    library-stamped devices, because the bridge cameras and the paired phones
+    share the library's id namespace without being in its list.
+
+    The answer is yes only when NOTHING in the loaded entry still reports the
+    device: not the library's device tree (zones, partitions, Skybell cameras),
+    not the bridge's camera list, not the paired-phone coordinator, and never
+    this fork's own service and activity devices. Any device still reported
+    would be recreated by its platform on the next poll, so the delete would
+    only churn the registry. Identifiers carry the same attribute suffixes the
+    prune pass strips (`<id>_debug`, `<id>_malfunction`), so the bare Alarm.com
+    id is compared, never the whole string. A device none of whose identifiers
+    are ours is not ours to keep, and an entry that is not loaded protects
+    nothing (the UI never asks in that state; the hook must still not raise).
+    """
+    data = (hass.data.get(DOMAIN) or {}).get(config_entry.entry_id)
+    if not data:
+        return True
+
+    present: set[str] = {
+        f"{config_entry.entry_id}_integration",
+        f"{config_entry.entry_id}_activity",
+    }
+    controller = data.get(DATA_CONTROLLER)
+    devices = getattr(getattr(controller, "api", None), "devices", None)
+    for tree in ("all", "cameras", "partitions"):
+        present.update(str(key) for key in (getattr(devices, tree, None) or {}))
+    for coordinator_key in (DATA_CAMERA_COORDINATOR, DATA_ARMING_DEVICES_COORDINATOR):
+        coordinator = data.get(coordinator_key)
+        present.update(str(key) for key in (getattr(coordinator, "data", None) or {}))
+
+    for identifier_domain, identifier_id in device_entry.identifiers:
+        if identifier_domain != DOMAIN or identifier_id is None:
+            continue
+        identifier = str(identifier_id)
+        if identifier in present:
+            return False
+        id_matches = re.match(r"([0-9]+-[0-9]+)", identifier)
+        if id_matches is not None and id_matches.group(1) in present:
+            return False
     return True
 
 
