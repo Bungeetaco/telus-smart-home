@@ -35,7 +35,14 @@ import weakref
 
 from pyalarmdotcomajax.websockets.client import WebSocketClient
 
+from . import ws_log_filter
+
 log = logging.getLogger(__name__)
+
+# The library logs each failed connect as a full traceback whose URL carries the
+# websocket token; collapse those to one line (backlog E106). Import-time like the
+# patches below, so it is in place before the first connect attempt.
+ws_log_filter.install()
 
 # Weak refs so a reloaded/removed config entry's coordinator can be collected.
 _coordinators: weakref.WeakSet = weakref.WeakSet()

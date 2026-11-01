@@ -309,6 +309,9 @@ class AlarmIntegrationController:
         # Refresh once per reconnect, not on the initial connect (setup has just
         # polled), so the blind window costs ~1s instead of a poll interval.
         if state == WebSocketState.RUNNING:
+            if not self._ws_attempt_reached_running and self._ws_connect_failures:
+                LOGGER.info("Websocket reached RUNNING after %d failed attempt(s)",
+                            self._ws_connect_failures)
             self._ws_attempt_reached_running = True
         if state == WebSocketState.RUNNING and previous not in (None, WebSocketState.STOPPED):
             if self._ws_seen_running:

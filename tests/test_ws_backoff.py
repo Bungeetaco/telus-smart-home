@@ -36,10 +36,22 @@ def test_no_failures_is_the_plain_delay():
     print("  ok  a socket that connected reconnects on the configured delay")
 
 
+def test_first_failure_is_a_quick_retry():
+    """SYNs to the websocket host are lost independently at 20-40 % while a
+    successful connect takes well under a second, so one near-immediate retry
+    clears most streaks; the doubling alone left the push feed blind for a
+    whole first back-off window."""
+    assert reconnect_delay(30, 1, 300) == 2, reconnect_delay(30, 1, 300)
+    assert reconnect_delay(30, 1, 300, quick_retry_s=5) == 5
+    assert reconnect_delay(1, 1, 300) == 1, "the quick retry never exceeds the configured base"
+    assert reconnect_delay(30, 1, 300, quick_retry_s=-3) == 0, "a negative quick retry is clamped, not honoured"
+    print("  ok  the first failed attempt is retried after the quick-retry delay, capped by the base")
+
+
 def test_failures_double_up_to_the_cap():
-    seen = [reconnect_delay(30, n, 300) for n in range(1, 7)]
+    seen = [reconnect_delay(30, n, 300) for n in range(2, 8)]
     assert seen == [60, 120, 240, 300, 300, 300], seen
-    print("  ok  failed attempts double 30 -> 60 -> 120 -> 240 and stop at the 300 cap")
+    print("  ok  from the second failed attempt the base doubles 60 -> 120 -> 240 and stops at the 300 cap")
 
 
 def test_the_cap_never_undercuts_the_base():
@@ -57,6 +69,7 @@ def test_zero_base_stays_zero():
 def main() -> int:
     failures = 0
     for test in (test_no_failures_is_the_plain_delay,
+                 test_first_failure_is_a_quick_retry,
                  test_failures_double_up_to_the_cap,
                  test_the_cap_never_undercuts_the_base,
                  test_zero_base_stays_zero):

@@ -408,11 +408,21 @@ and evidence. Grouped by whether anything can actually be done about them.
   configured reconnect timeout up to `WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS`
   (300), resetting on the first connect that succeeds. The arithmetic lives in
   `ws_backoff.py` so the stubbed test harness can pin it (`test_ws_backoff.py`)
-  without importing `controller.py`. Why the connects time out is NOT known:
-  from the same VM the host connects in 60 ms when probed, there is no IPv6
-  in play (A record only, no v6 route), and the timeouts come in clusters with
-  no local event beside them -- left open as the next question if the streaks
-  continue after this lands.
+  without importing `controller.py`. The first failure of a streak is retried
+  after `QUICK_RETRY_SECONDS` (2 s) instead of doubling: probed from the HA
+  host and from a second machine on the same network, SYNs to the websocket
+  host are lost independently at a 20-40 % rate while every other
+  Alarm.com/TELUS host connects every time and a successful connect completes
+  in well under a second, so one quick retry clears most streaks for one extra
+  token fetch, where doubling alone left the push feed blind for the whole
+  first window (an 11-minute startup gap, six attempts, was the worst seen).
+  The doubling applies from the second consecutive failure. The library's
+  per-failure traceback (whose URL carries the websocket token) is collapsed
+  to one warning line by `ws_log_filter.py`, installed at import by
+  `telus_ws_push_patch.py`; `controller.py` logs an INFO line when a socket
+  reaches RUNNING after failed attempts so recovery is visible. Why that one
+  host drops SYNs is NOT known (no IPv6 in play; the loss is per-connection,
+  not clustered on any local event).
 
 - **E105** (DONE 2026-10-05, integration) - the coordinators honour a bridge
   `429`, and the settings poll is five times slower. A TELUS-backed poll that

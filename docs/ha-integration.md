@@ -1265,7 +1265,7 @@ From `const.py` (timing and identity):
 | --- | --- | --- |
 | `CONF_DEFAULT_UPDATE_INTERVAL_SECONDS` | 300 | Default REST poll (fallback behind push) |
 | `CONF_DEFAULT_WEBSOCKET_RECONNECT_TIMEOUT` | 30 | Default reconnect delay after a socket close |
-| `WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS` | 300 | Ceiling on the reconnect delay while connect attempts keep **failing before reaching RUNNING** (`ws_backoff.reconnect_delay`): the delay doubles from the reconnect timeout per consecutive failure and resets on the first attempt that connects. A healthy socket the server drops on its routine ~6 min cycle keeps the fixed delay. Every attempt costs a REST token fetch, and the failures seen live are TCP connect timeouts to the websocket host arriving in streaks (backlog E106) |
+| `WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS` | 300 | Ceiling on the reconnect delay while connect attempts keep **failing before reaching RUNNING** (`ws_backoff.reconnect_delay`): the first failure of a streak is retried after `QUICK_RETRY_SECONDS` (2 s, never longer than the reconnect timeout), each further consecutive failure doubles the reconnect timeout up to this ceiling, and the counter resets on the first attempt that connects. A healthy socket the server drops on its routine ~6 min cycle keeps the fixed delay. Every attempt costs a REST token fetch, and the failures seen live are TCP connect timeouts to the websocket host arriving in streaks (backlog E106) |
 | `KEEP_ALIVE_INTERVAL_SECONDS` | 60 | Session keepalive interval |
 | `HEARTBEAT_SECONDS` (heartbeat patch) | 55 | Websocket ping interval |
 | `WEBSOCKET_START_TIMEOUT_SECONDS` (controller) | 60 | Pre-`RUNNING` backstop |
