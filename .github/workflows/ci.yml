@@ -17,7 +17,7 @@ jobs:
           # runs is worse than not testing. Renovate reports both under the dep name
           # "python" and is configured to group them into a single reviewed PR, so
           # they move together -- never change one of them alone.
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Install integration requirements (as declared in manifest.json)
         run: |
           python -m pip install --upgrade pip
@@ -40,7 +40,7 @@ jobs:
           # python:<ver>-slim), for the same reason as every other job here.
           # Renovate groups the two under the dep name "python" -- never change
           # one alone.
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Install aiohttp
         # The ONLY third-party import in the modules these suites exercise.
         # Home Assistant itself is deliberately NOT installed: it is stubbed in
@@ -72,7 +72,7 @@ jobs:
           # runs is worse than not testing. Renovate reports both under the dep name
           # "python" and is configured to group them into a single reviewed PR, so
           # they move together -- never change one of them alone.
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Install bridge requirements (--only-binary catches aiortc/av bumps with no manylinux wheel)
         run: |
           python -m pip install --upgrade pip
@@ -90,7 +90,7 @@ jobs:
           # runs is worse than not testing. Renovate reports both under the dep name
           # "python" and is configured to group them into a single reviewed PR, so
           # they move together -- never change one of them alone.
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Install bridge requirements
         run: |
           python -m pip install --upgrade pip
@@ -120,7 +120,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           # Must MIRROR the runtime image (camera-bridge/Dockerfile: python:3.12-slim).
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Install ffmpeg
         # The bridge image ships ffmpeg; GitHub runners do not. The talkdown
         # transport shells out to it to encode each clip, so the tests need it to
