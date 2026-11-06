@@ -87,7 +87,7 @@ class BaseDevice(CoordinatorEntity):  # type: ignore
             if via_device_id is not None:
                 device_info["via_device_id"] = via_device_id
 
-        self._attr_device_info = DeviceInfo(device_info)
+        self._attr_device_info = DeviceInfo(**device_info)
 
     def _partition_device_id(self, partition_id: str) -> str | None:
         """Registry id of this config entry's device for `partition_id`, or

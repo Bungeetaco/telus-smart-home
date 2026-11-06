@@ -338,15 +338,22 @@ class HomeAssistantError(Exception):
 
 
 class DeviceInfo(dict):
-    """Stand-in for the `DeviceInfo` TypedDict (a plain dict upstream too).
+    """Stand-in for `DeviceInfo`, keyword-only like the upstream dataclass.
 
-    Accepts a positional mapping as well as keywords, exactly as a TypedDict
-    constructor does -- base_device.py builds the mapping first and passes it
-    positionally.
+    Upstream turned `DeviceInfo` from a TypedDict into a dataclass in Home
+    Assistant 2026.11: fields are keyword arguments, and a positional mapping
+    raises `TypeError: DeviceInfo.__init__() takes 1 positional argument but 2
+    were given`. That TypeError took every platform built on `base_device.py`
+    down at setup (panel, sensors, lock, buttons) the first time the
+    integration ran on 2026.11, because the base entity built a dict and passed
+    it positionally -- legal for the old TypedDict, fatal for the dataclass.
+    This stand-in refuses the positional form for the same reason upstream
+    does, so the suites fail the way Home Assistant fails. Dict access stays,
+    as upstream keeps a `[]`/`.get()` compatibility layer for now.
     """
 
-    def __init__(self, mapping: Any = None, **kwargs: Any) -> None:
-        super().__init__(dict(mapping or {}), **kwargs)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
 
 def callback(func: Any) -> Any:

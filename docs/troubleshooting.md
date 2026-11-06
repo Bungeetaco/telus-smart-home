@@ -44,6 +44,7 @@ the component READMEs.
 - [A control answers `429`, or Home Assistant keeps retrying into a rate limit](#a-control-answers-429-or-home-assistant-keeps-retrying-into-a-rate-limit)
 - [An arming-device write answers `404 unknown_device`](#an-arming-device-write-answers-404-unknown_device)
 - [Checking whether talkdown has been failing](#checking-whether-talkdown-has-been-failing)
+- [Every panel, sensor, lock and button platform fails at setup on Home Assistant 2026.11](#every-panel-sensor-lock-and-button-platform-fails-at-setup-on-home-assistant-202611)
 
 ---
 
@@ -1539,3 +1540,31 @@ The same data is available without a curl: the `talkdown_status` and
 `talkdown_failures` diagnostic sensors expose it in Home Assistant, and can
 drive a notification when a talk fails; see
 [ha-integration.md](ha-integration.md#talkdown-diagnostics).
+
+## Every panel, sensor, lock and button platform fails at setup on Home Assistant 2026.11
+
+Symptom: after updating Home Assistant to 2026.11 the integration entry still
+shows as loaded, cameras, events and automation-rule switches work, but the
+panel, every sensor, the lock and the buttons are `unavailable`, and the log
+carries one line per platform:
+
+```
+Error while setting up telus_smarthome_alarmdotcom platform for alarm_control_panel: DeviceInfo.__init__() takes 1 positional argument but 2 were given
+```
+
+followed by `ConfigEntryError: Failed to set up the telus_smarthome_alarmdotcom
+alarm_control_panel platform` (and the same for `binary_sensor`, `lock` and
+`button`). Nothing is wrong with the account or the panel: Home Assistant
+2026.11 turned `DeviceInfo` from a TypedDict into a dataclass, whose fields are
+keyword arguments. Versions before 1.31.8 built the device description as a
+mapping in `base_device.py` and passed it positionally, which the TypedDict
+accepted and the dataclass refuses. Every entity derived from `BaseDevice`
+raised at construction, so each of those platforms failed as a whole; the
+camera, event and switch platforms build their `DeviceInfo` by keyword and were
+unaffected, which is why the entry looked half alive.
+
+Fix: update to 1.31.8 or later and restart Home Assistant (integration code
+only loads on a full restart, not on a config-entry reload). The suites pin
+this: `tests/ha_stubs.py`'s `DeviceInfo` stand-in is keyword-only like the
+dataclass, so a positional mapping fails in `tests/test_device_links.py` the
+same way it fails in Home Assistant.
