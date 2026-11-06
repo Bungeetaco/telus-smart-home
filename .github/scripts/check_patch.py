@@ -18,6 +18,8 @@ a login that succeeds but yields a dead session.
 Run from the repo root: python .github/scripts/check_patch.py
 """
 import asyncio
+import importlib
+import importlib.machinery
 import importlib.util
 import pathlib
 import sys
@@ -46,14 +48,33 @@ REQUIRED_INSTANCE_ATTRS = (
 )
 
 
+PACKAGE = "custom_components.telus_smarthome_alarmdotcom"
+
+
+def _register_package_shells():
+    """Register the integration package in sys.modules WITHOUT executing its
+    __init__ (which imports Home Assistant, absent in CI).
+
+    The patch modules are imported as real members of that package, so their
+    relative imports (telus_ws_push_patch does `from . import ws_log_filter`)
+    resolve exactly as they do inside Home Assistant. Loading them by bare file
+    path, as this script once did, gave them no parent package and failed with
+    "attempted relative import with no known parent package" -- a CI failure
+    that said nothing about the patches' real compatibility.
+    """
+    for name, path in (("custom_components", BASE.parent), (PACKAGE, BASE)):
+        if name in sys.modules:
+            continue
+        spec = importlib.machinery.ModuleSpec(name, None, is_package=True)
+        spec.submodule_search_locations = [str(path.resolve())]
+        sys.modules[name] = importlib.util.module_from_spec(spec)
+
+
 def _load(name):
-    """Import a patch module BY PATH, so the package __init__ (which imports
-    Home Assistant, absent in CI) is never executed."""
-    spec = importlib.util.spec_from_file_location(name, BASE / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)  # runs that module's compatibility guard
-    return mod
+    """Import a patch module as a member of the integration package; importing
+    it runs that module's compatibility guard."""
+    _register_package_shells()
+    return importlib.import_module(f"{PACKAGE}.{name}")
 
 
 def main() -> int:
