@@ -272,6 +272,45 @@ def _redact_url(url: str) -> str:
     return _URL_CREDENTIALS_RE.sub("://***:***@", url)
 
 
+class SlateFrame:
+    """A black picture of the publisher's size, written in place of the camera's
+    frames once the last real one is too old to keep repeating
+    (camera_session._hold_frames, config.FRAME_HOLD_MAX_S).
+
+    It exists because an idle publisher is not "dark": ffmpeg left with nothing
+    to send stops publishing, MediaMTX's read timeout then closes it and
+    destroys the path, every reader is refused for the rest of the outage, and
+    the first write of the recovered session lands on the dead pipe and costs a
+    failed session plus a backoff. A slate keeps the publisher, the path and
+    every reader attached, and is honest in the only way that matters: it is
+    visibly not a live picture.
+
+    Exactly one raw yuv420p frame of the size ffmpeg was launched with (-s WxH):
+    luma 16 and chroma 128 are black (all-zero bytes would be bright green), and
+    any other length desynchronises the raw pipe for every frame after it (see
+    write_frame). Built once and reused; no numpy, no av -- write_frame takes the
+    bytes directly (yuv420p_bytes), to_ndarray is only the generic fallback.
+    """
+
+    __slots__ = ("width", "height", "_raw")
+
+    def __init__(self, width: int, height: int):
+        self.width, self.height = int(width), int(height)
+        self._raw = None
+
+    @property
+    def yuv420p_bytes(self) -> bytes:
+        if self._raw is None:
+            luma = self.width * self.height
+            self._raw = bytes([16]) * luma + bytes([128]) * (luma // 2)
+        return self._raw
+
+    def to_ndarray(self, format="yuv420p"):
+        if format != "yuv420p":
+            raise ValueError(f"SlateFrame only exists in yuv420p, not {format}")
+        return memoryview(self.yuv420p_bytes)
+
+
 def clamp_fps(fps) -> int:
     """The rate ffmpeg is actually declared with, for any measured value.
 
@@ -845,7 +884,11 @@ class FfmpegSink:
         # the loop stays responsive; only the actual pipe write/drain (already
         # non-blocking/async) still happens on the loop.
         loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, lambda: frame.to_ndarray(format="yuv420p").tobytes())
+        # A SlateFrame already IS raw yuv420p of this publisher's size; the
+        # executor hop exists for the pixel-format copy, and it has none.
+        data = getattr(frame, "yuv420p_bytes", None)
+        if data is None:
+            data = await loop.run_in_executor(None, lambda: frame.to_ndarray(format="yuv420p").tobytes())
         try:
             self.proc.stdin.write(data)
             # BOUNDED, and that bound is the publisher-liveness check itself.

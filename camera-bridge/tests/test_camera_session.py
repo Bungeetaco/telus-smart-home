@@ -37,9 +37,13 @@ Pinned here:
                           two share one `wait_for` and must not be collapsed.
   3. frame hold        -- the reconnect gap is bridged by repeating the last real
                           frame into the still-running publisher (readers see a
-                          freeze, not a torn-down path), and the hold is bounded
-                          by time-since-the-last-REAL-frame, so an offline camera
-                          stops masquerading as live after FRAME_HOLD_MAX_S.
+                          freeze, not a torn-down path). The REAL frame is
+                          repeated for at most FRAME_HOLD_MAX_S since it arrived,
+                          so an offline camera stops masquerading as live -- and
+                          then a black slate takes over at the same cadence
+                          rather than the publisher going idle, because an idle
+                          publisher is closed by MediaMTX, loses the path, and
+                          every reader is refused for the rest of the outage.
   4. fps measurement   -- the median of consecutive deltas, not span/(n-1): a
                           buffered burst at either end of the batch must not
                           contaminate the estimate (this shipped, producing a
@@ -451,7 +455,10 @@ class FakeSink:
                 or self.publisher_stalled:
             return False
         self.last_video_accepted_at = time.monotonic()
-        self.writes.append((time.monotonic(), frame.seq))
+        # A real frame carries the scenario's seq; the slate the hold writes once
+        # the real frame is too old (ffmpeg_sink.SlateFrame) has none, and is
+        # recorded by its class name so a test can tell the two apart.
+        self.writes.append((time.monotonic(), getattr(frame, "seq", type(frame).__name__)))
         if CTX.write_frame_hook is not None:
             await CTX.write_frame_hook(self)
         if self.write_error is not None:
@@ -1088,20 +1095,34 @@ async def test_frame_hold_bridges_the_reconnect_gap():
         "the publisher went silent across the rotation")
 
 
-async def test_frame_hold_is_bounded_by_time_since_a_real_frame():
-    """The hold ends FRAME_HOLD_MAX_S after the last REAL frame, not after each
-    invocation. An offline camera must stop masquerading as live and let the
-    feed go dark honestly."""
+async def test_the_hold_switches_to_a_slate_instead_of_going_dark():
+    """FRAME_HOLD_MAX_S after the last REAL frame (not after each invocation)
+    the hold stops repeating that frame, so an offline camera does not keep
+    presenting a stale picture as live -- but it does NOT stop writing: a black
+    slate of the publisher's size (ffmpeg_sink.SlateFrame) takes over at the
+    same cadence until the camera is back, and the status says so (`hold`).
+
+    This pins the opposite of what the hold used to do. Ending the hold and
+    "letting the feed go dark" was not dark: the idle publisher was closed by
+    MediaMTX's read timeout, the path was destroyed, every reader was refused
+    (`no stream is available on path`; Home Assistant's stream worker logged
+    `404 Not Found`) for the rest of the outage, and the recovered session's
+    first write hit the dead pipe and cost one more failed session plus a 30 s
+    backoff (backlog E93)."""
     gap = {}
+    seen = {}
 
     async def very_slow_second_attempt(idx):
         if idx == 1:
             gap["start"] = time.monotonic()
             await asyncio.sleep(1.5)
             gap["end"] = time.monotonic()
+            # Sampled while the hold is still running: the next session's
+            # connect is what stops it.
+            seen["hold"] = ctx.status[CAMERA["id"]]["hold"]
 
-    # Frames flow right up to the rotation, so the hold does start -- the bound
-    # under test is how long it then survives with no live frame behind it.
+    # Frames flow right up to the rotation, so the hold does start -- under test
+    # is what it writes once no live frame is behind it any more.
     with scenario([Plan(frames=steady(6, 0.02), tail=("repeat", 0.02, 1280, 720))],
                   SESSION_MAX_LIFETIME_S=0.3, FRAME_HOLD_MAX_S=0.5) as ctx:
         ctx.gvs_hook = very_slow_second_attempt
@@ -1110,14 +1131,40 @@ async def test_frame_hold_is_bounded_by_time_since_a_real_frame():
         writes = list(ctx.sink.writes)
         await stop(ctx)
 
-    in_gap = [t for t, _ in writes if gap["start"] <= t <= gap["end"]]
+    in_gap = [(t - gap["start"], seq) for t, seq in writes if gap["start"] <= t <= gap["end"]]
     assert len(in_gap) >= 3, f"the hold barely ran at all ({len(in_gap)} frames)"
-    # Bounded: with a 0.5s bound, nothing may still be written in the last third
-    # of a 1.5s gap.
-    latest = max(in_gap) - gap["start"]
-    assert latest < 1.0, (
-        f"still holding {latest:.2f}s into the gap with FRAME_HOLD_MAX_S=0.5 -- "
+    real_seq = max(seq for _, seq in writes if seq != "SlateFrame")
+    early = [seq for dt, seq in in_gap if dt < 0.4]
+    late = [seq for dt, seq in in_gap if dt >= 0.6]
+    assert early and all(seq == real_seq for seq in early), (
+        f"the last real frame was not what the hold repeated first: {early[:5]}")
+    assert late and all(seq == "SlateFrame" for seq in late), (
+        f"past FRAME_HOLD_MAX_S=0.5 the hold must write slates, not {set(late)} -- "
         "an offline camera would look live forever")
+    # Fed to the end: with the old bound nothing was written in the last third
+    # of a 1.5 s gap, and that silence is what cost the path.
+    latest = max(dt for dt, _ in in_gap)
+    assert latest >= 1.2, (
+        f"last write {latest:.2f}s into a {gap['end'] - gap['start']:.2f}s gap -- "
+        "the publisher went idle and MediaMTX would have closed it")
+    assert seen.get("hold") == "slate", f"status hold should read 'slate' during the outage, read {seen.get('hold')!r}"
+    assert ctx.status[CAMERA["id"]]["hold"] is None, "hold must clear once the next session takes over"
+
+
+async def test_the_slate_is_a_black_frame_of_the_publishers_size():
+    """ffmpeg was launched with a fixed raw input size (-s WxH); a frame of any
+    other length desynchronises the pipe for every frame after it, so the slate
+    must be exactly one yuv420p frame of the size it is built for -- and black
+    (luma 16, chroma 128), because an all-zero buffer is bright green. It is
+    built once, and the generic to_ndarray path yields the same bytes."""
+    slate = fs.SlateFrame(1280, 720)
+    raw = slate.yuv420p_bytes
+    assert (slate.width, slate.height) == (1280, 720)
+    assert len(raw) == 1280 * 720 * 3 // 2, f"{len(raw)} bytes is not one 1280x720 yuv420p frame"
+    assert set(raw[:1280 * 720]) == {16}, "luma plane is not black"
+    assert set(raw[1280 * 720:]) == {128}, "chroma planes are not neutral"
+    assert slate.yuv420p_bytes is raw, "the slate must be built once and reused"
+    assert slate.to_ndarray(format="yuv420p").tobytes() == raw
 
 
 async def test_the_holds_audio_topup_is_never_behind_its_video_write():
@@ -5743,7 +5790,8 @@ TESTS = [
     test_a_first_frame_timeout_reports_how_long_it_actually_waited,
     test_the_streaming_line_reports_how_long_the_first_frame_took,
     test_frame_hold_bridges_the_reconnect_gap,
-    test_frame_hold_is_bounded_by_time_since_a_real_frame,
+    test_the_hold_switches_to_a_slate_instead_of_going_dark,
+    test_the_slate_is_a_black_frame_of_the_publishers_size,
     test_the_holds_audio_topup_is_never_behind_its_video_write,
     test_a_failed_hold_task_does_not_fail_the_next_session,
     test_fps_is_the_median_delta_not_the_span,

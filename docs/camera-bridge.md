@@ -141,7 +141,7 @@ deliberately redundant safety nets:
 |---|---|---|
 | Proactive rotation | `SESSION_MAX_LIFETIME_S = 165` | Every session is torn down and reconnected at 165s, comfortably before the ~180s server-side kill, so the feed never waits on a server-initiated teardown. |
 | Frame-silence watchdog | `FRAME_SILENCE_TIMEOUT_S = 15` | If no frame arrives for 15s, the session is treated as dead and reconnected immediately, without waiting for the rotation deadline. |
-| Frame-hold bridge | `FRAME_HOLD_MAX_S = 60` | The last real frame is repeated into the still-running publisher during a rotation/reconnect gap, so readers see a brief freeze rather than a torn-down path. After 60s with no live frame, the hold ends and the feed is allowed to go dark honestly. |
+| Frame-hold bridge | `FRAME_HOLD_MAX_S = 60` | The last real frame is repeated into the still-running publisher during a rotation/reconnect gap, so readers see a brief freeze rather than a torn-down path. After 60s with no live frame the stale picture gives way to a black slate (`ffmpeg_sink.SlateFrame`) at the same cadence: an offline camera is never shown as live, and the publisher never goes idle -- MediaMTX closes an idle publisher at its read timeout and destroys the path with it. `/control/status` reports the held picture in `hold`. |
 
 Why 165s and not the earlier 120s: the original rotation design tore the ffmpeg
 publisher down along with each session. Once the publisher was made to **outlive
@@ -425,7 +425,10 @@ come from the resolution setting.
 
 ## ffmpeg encode and RTSP publish
 
-`ffmpeg_sink.FfmpegSink` feeds decoded `av.VideoFrame` objects to an `ffmpeg`
+`ffmpeg_sink.FfmpegSink` feeds decoded `av.VideoFrame` objects (and, while a
+camera has been silent longer than `FRAME_HOLD_MAX_S`, the black
+`ffmpeg_sink.SlateFrame`, which is already raw `yuv420p` and skips the
+pixel-format copy) to an `ffmpeg`
 subprocess over `pipe:0` (raw `yuv420p`), which encodes H.264 and publishes via
 **RTSP ANNOUNCE** (ffmpeg's RTSP muxer cannot act as a server, so MediaMTX is the
 server and ffmpeg the publisher).

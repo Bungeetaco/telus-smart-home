@@ -314,12 +314,14 @@ SESSION_CLOSE_TIMEOUT_S = 5
 # This still sits close to the confirmed ~180s server limit (15s margin,
 # matching FRAME_SILENCE_TIMEOUT_S) to keep freeze-bridged gaps infrequent.
 SESSION_MAX_LIFETIME_S = 165
-# Upper bound on how long camera_session.py keeps repeating the last real frame
-# into the RTSP publish while a Janus session is rotated/reconnected, measured
-# from when the last real frame arrived. Rotation gaps are ~2-8s, so this only
-# ever expires when the camera is genuinely gone (e.g. the 2026-07-17 doorbell
-# outage) -- at which point the feed is allowed to go dark rather than keep
-# presenting a stale frozen image as live.
+# How long camera_session.py keeps repeating the last REAL frame into the RTSP
+# publish while a Janus session is rotated/reconnected, measured from when that
+# frame arrived. Rotation gaps are ~2-8s, so this only ever expires when the
+# camera is genuinely gone (e.g. the 2026-07-17 doorbell outage) -- at which
+# point the stale picture is replaced by a black slate (ffmpeg_sink.SlateFrame)
+# rather than presented as live. The publisher keeps writing either way: an
+# idle publisher is closed by MediaMTX's read timeout and takes the path and
+# every reader with it (backlog E93).
 FRAME_HOLD_MAX_S = 60
 # If no frame arrives for this long, treat the session as dead and reconnect --
 # this must fire well before SESSION_MAX_LIFETIME_S in the worst case (e.g. the

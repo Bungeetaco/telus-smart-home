@@ -4027,8 +4027,8 @@ entries are the mechanism that keeps it under review
   audio calls in a window where it made 53 video ones. Not reproduced, not
   explained, and not obviously the same thing E88 fixed, since the fix is
   present in that build. Recorded rather than rationalised.
-- **E93 (open) A no-frames outage takes the RTSP path down with it: every
-  reader sees 404 for the outage plus the backoff.** When the indoor camera
+- **E93 (FIXED, awaiting live confirmation) A no-frames outage took the RTSP
+  path down with it: every reader saw 404 for the outage plus the backoff.** When the indoor camera
   stops delivering frames (session after session reaches `webrtcup` and then
   `no frames received before timeout (waited 20.0s of 20.0s; webrtcup seen
   before the wait)`, which places the fault at the camera or its uplink rather
@@ -4055,12 +4055,28 @@ entries are the mechanism that keeps it under review
   (Operation timed out)`, and the 404 pairs). The cloud session is the limit of
   what the bridge controls; the path is not.
 
-  Enhancement: while a camera is between sessions, keep the publisher fed so
-  MediaMTX never destroys the path. Repeat the last decoded frame (or a slate)
-  at 1 fps with silent audio until the next session's first frame, then hand
-  over as usual. Readers would see a frozen picture for the outage instead of
-  404s, HA's stream worker would stay attached, and the doorbell's Frigate
-  input (go2rtc reading the same MediaMTX) would stop flapping with it. A
-  cheaper change that only moves the problem: raise `readTimeout` past the
-  longest observed outage (about 90 s here), which keeps the path but still
-  leaves readers without packets, so HA would log timeouts instead of 404s.
+  The mechanism was the frame hold's own bound: `_hold_frames` ENDED after
+  `FRAME_HOLD_MAX_S` (60 s) since the last real frame, by design "letting the
+  feed go dark honestly" -- and an idle publisher is not dark, it is a path
+  MediaMTX destroys 30 s later. The silence timeline above fits exactly: last
+  real frame 16:19:33, hold ends 16:20:33, `i/o timeout` 16:20:53.
+
+  Fix: the hold no longer ends. Past `FRAME_HOLD_MAX_S` it stops repeating the
+  stale frame and writes a black slate of the publisher's size
+  (`ffmpeg_sink.SlateFrame`, luma 16 / chroma 128, no numpy) at the same
+  cadence with the usual silence top-up, until the next session's first frame
+  stops it as before. `/control/status` gains `hold` (`null` / `"frame"` /
+  `"slate"`). The honesty the bound existed for is kept -- a black picture is
+  visibly not live -- while the publisher, the path and every reader survive
+  the outage, and the recovered session no longer meets a dead pipe, so the
+  extra 30 s step on the ladder disappears with it. Pinned by
+  `test_the_hold_switches_to_a_slate_instead_of_going_dark` (proven to fail
+  against both a hold that keeps the stale frame and one bounded again) and
+  `test_the_slate_is_a_black_frame_of_the_publishers_size`.
+
+  Live confirmation to look for: a no-frames episode on the indoor camera with
+  `hold: "slate"` in the status, no `no stream is available on path` from
+  MediaMTX, no `404` in the HA log, and the camera back on screen at the first
+  frame of the recovered session rather than 30 s later. Raising MediaMTX's
+  `readTimeout` instead was considered and rejected: it keeps the path but
+  leaves readers without packets, trading 404s for timeouts.

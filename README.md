@@ -159,7 +159,7 @@ Full symptom → cause → fix coverage is in [docs/troubleshooting.md](docs/tro
 
 - **Entities go *Unavailable*, or HA keeps retrying into a rate limit** — Alarm.com rate-limits a live account (HTTP 429); the coordinators hold off on their own. Don't shorten the poll interval. See *Alarm.com rate-limiting* in the doc.
 - **A doorbell notification fires on every HA restart** — you're using a `state` trigger; switch to `event.received` as shown above.
-- **Camera is black, or the stream freezes / goes dark** — the bridge isn't publishing. Check `docker compose logs -f` and `curl -s http://127.0.0.1:8199/control/health`.
+- **Camera is black, or the stream freezes / goes dark** — a brief freeze is a session rotation. A picture that freezes for a minute and then turns black is the camera not delivering (the bridge keeps the path up with a black slate; `/control/status` reads `hold: "slate"`). A stream that errors out (`404`, "no stream available") means the bridge isn't publishing: check `docker compose logs -f` and `curl -s http://127.0.0.1:8199/control/health`.
 - **Talkdown returns 403/409/422, or sounds bad on the speaker** — covered in the doc under the matching headings; a certificate-fingerprint mismatch is logged, not silently blocked.
 - **The push websocket drops every few minutes** — expected; the integration reconnects with back-off. Only worry if it never comes back.
 

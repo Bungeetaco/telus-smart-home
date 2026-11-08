@@ -389,9 +389,14 @@ them into one:
    is what makes it safe against a camera that stalls at the very start.
 3. **Gap bridging**: the ffmpeg publisher **outlives** rotations; each
    rotation/reconnect gap is bridged by **repeating the last real frame** into
-   the still-running publisher (up to `FRAME_HOLD_MAX_S`, 60 s). Readers see a
-   brief freeze, not a torn-down RTSP path. A genuinely offline camera stops
-   being held after 60 s and the feed is allowed to go dark honestly.
+   the still-running publisher. Readers see a brief freeze, not a torn-down
+   RTSP path. The real frame is repeated for at most `FRAME_HOLD_MAX_S` (60 s)
+   after it arrived; a camera still silent after that is shown as a **black
+   slate** at the same cadence, so it is never presented as live while the
+   publisher, the path and every reader stay up. An idle publisher is NOT
+   "dark": MediaMTX closes it at its read timeout, destroys the path, and every
+   reader is refused (`no stream is available on path`; Home Assistant's stream
+   worker logs `Server returned 404 Not Found`) until the camera is back.
 
 Because the publisher now outlives sessions and gaps are frame-held, the
 rotation margin can be tightened (to 15 s, matching the frame-silence timeout)
@@ -404,7 +409,13 @@ If you touch `camera_session.py` or `janus_client.py`, read them in full first.
 
 **Diagnosis.** A feed that freezes briefly on a ~15/165 s cadence and recovers
 is the rotation/frame-hold working as designed. A feed that freezes for ~60 s
-then goes dark is the frame-hold expiring on a genuinely offline camera.
+and then turns black is a camera that has stopped delivering: `/control/status`
+reads `hold: "slate"` with `publisher_alive: true`, and the bridge log carries
+`no frames received before timeout` or `no frame for 15s` for that camera. The
+camera or its uplink is the fault; the bridge is keeping the path for it. A
+reader refused with `no stream is available on path` (HA: `404 Not Found`) means
+the publisher itself is gone (`publisher_alive: false`), which is a different
+problem.
 Per-camera health (`state`, `consecutive_failures`, `last_frame_at`, `fps`,
 `dropped_frames`, `last_error`) is available from the bridge's
 `GET /control/status` endpoint (same auth as the other control endpoints),

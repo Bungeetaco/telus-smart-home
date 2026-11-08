@@ -110,9 +110,14 @@ and the rotation loop in `camera_session.py`'s `run_camera_forever`):
   (including when zero frames have ever arrived for that session), which is
   what makes it safe against a camera that stalls immediately.
 - Bridges each rotation/reconnect gap by **repeating the last real frame** into
-  the still-running publisher (`FRAME_HOLD_MAX_S = 60`), so readers see a brief
-  freeze rather than a torn-down RTSP path. A genuinely offline camera stops
-  being held after 60s and the feed is allowed to go dark honestly.
+  the still-running publisher, so readers see a brief freeze rather than a
+  torn-down RTSP path. The real frame is repeated for at most
+  `FRAME_HOLD_MAX_S` (60s) after it arrived; a camera still silent after that
+  is shown as a **black slate** at the same cadence, so an offline camera is
+  never presented as live and the publisher never goes idle (an idle publisher
+  is closed by MediaMTX's read timeout, which destroys the path and refuses
+  every reader for the rest of the outage). `/control/status` reports which
+  picture is being held in `hold` (`null`, `"frame"` or `"slate"`).
 
 **If you touch `camera_session.py` or `janus_client.py`: read them in full
 first.** The frame-silence check and the rotation deadline check are two

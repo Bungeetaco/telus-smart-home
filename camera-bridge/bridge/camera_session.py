@@ -495,6 +495,13 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # ffmpeg took it. Throughout the E62 outage the first was fresh, the
         # state read "streaming", and there was no publisher at all.
         "publisher_alive": None, "last_publish_at": None,
+        # What the publisher is being fed while no session delivers: null while
+        # live frames flow, "frame" while the last real frame is repeated across
+        # a rotation/reconnect gap, "slate" once that frame is older than
+        # FRAME_HOLD_MAX_S and a black picture has taken its place (see
+        # _hold_frames). A black feed with publisher_alive true and hold "slate"
+        # is a camera that is not delivering, not a publisher that died.
+        "hold": None,
     }
 
     def _update_status(**fields):
@@ -863,10 +870,20 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # they keep its timeline moving at real time, since
         # -use_wallclock_as_timestamps is in effect on every publisher this
         # bridge launches (see ffmpeg_sink.py's comment on the video input's
-        # absent `-r`). Bounded by
-        # time-since-last-real-frame, not per-invocation, so a genuinely
-        # offline camera (e.g. the 2026-07-17 doorbell outage) stops
-        # masquerading as live after FRAME_HOLD_MAX_S and fails honestly.
+        # absent `-r`). The REAL frame is repeated for at most FRAME_HOLD_MAX_S
+        # from when it arrived (not per invocation), so a genuinely offline
+        # camera (e.g. the 2026-07-17 doorbell outage) stops masquerading as
+        # live -- but the writing does not stop: a black slate of the same
+        # size (ffmpeg_sink.SlateFrame) takes over at the same cadence until
+        # a session delivers again. The hold used to END here instead and let
+        # the publisher go idle, and idle is not dark: MediaMTX's read timeout
+        # closed the silent publisher and destroyed the path, every reader was
+        # refused ("no stream is available on path"; Home Assistant's stream
+        # worker logged 404 Not Found) for the rest of the outage, and the
+        # recovered session's first write then hit the dead pipe and cost one
+        # more failed session plus a 30 s backoff (backlog E93). With the slate
+        # the path, the readers and the publisher all survive the outage, and
+        # the picture is honest in the way that matters: it is visibly not live.
         #
         # The previous session's audio pump is stopped HERE, as this task's very
         # first act, rather than by the (synchronous) _start_hold: it makes the
@@ -874,6 +891,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # nothing can be mid-write when the silence below starts, and the next
         # session's pump is not started until _stop_hold has finished.
         await _stop_audio_pump()
+        _update_status(hold="frame")
         # The rate the RUNNING ffmpeg was DECLARED with, not the most recent
         # measurement. Those two are deliberately different for a while whenever
         # a rate change has been confirmed and is waiting for the next rotation
@@ -936,9 +954,18 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
         # _stop_hold's contract, that nothing is writing to the publisher once it
         # returns, is unchanged.
         video_write: asyncio.Task | None = None
+        slate = None
         try:
-            while time.monotonic() - last_live < c.FRAME_HOLD_MAX_S:
+            while True:
                 now = time.monotonic()
+                if slate is None and now - last_live >= c.FRAME_HOLD_MAX_S:
+                    slate = ffmpeg_sink.SlateFrame(last_frame.width, last_frame.height)
+                    _update_status(hold="slate")
+                    log.warning("%s: no live frames for %ss -- the held picture is now a "
+                                "black slate, not the stale frame; the publisher and its "
+                                "readers stay attached until the camera delivers again",
+                                camera["id"], c.FRAME_HOLD_MAX_S)
+                held = last_frame if slate is None else slate
                 if video_write is not None and video_write.done():
                     finished, video_write = video_write, None
                     if not finished.result():
@@ -951,7 +978,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                     if handover is not None:
                         handover.hold_video()
                 if now >= next_video_at and video_write is None:
-                    video_write = asyncio.ensure_future(sink.write_frame(last_frame))
+                    video_write = asyncio.ensure_future(sink.write_frame(held))
                     next_video_at = max(next_video_at + interval, now)
                     if handover is not None:
                         handover.hold_video_issued()
@@ -982,9 +1009,6 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                         # reconnect over an input that has already been given up on.
                         tick = interval
                 await asyncio.sleep(tick)
-            log.warning("%s: no live frames for %ss, ending frame-hold -- letting "
-                        "the stream go dark until the camera recovers",
-                        camera["id"], c.FRAME_HOLD_MAX_S)
         finally:
             if video_write is not None:
                 # asyncio.wait rather than `await`, for the same reason
@@ -1015,10 +1039,12 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
 
     def _start_hold():
         nonlocal hold_task
+        # No publisher or no frame yet: there is nothing to hold and no path to
+        # keep. There is deliberately no age check on last_frame here -- a hold
+        # that starts past FRAME_HOLD_MAX_S simply begins on the slate.
         if sink is None or last_frame is None:
             return
-        if (hold_task is None or hold_task.done()) and \
-                time.monotonic() - last_live < c.FRAME_HOLD_MAX_S:
+        if hold_task is None or hold_task.done():
             hold_task = asyncio.ensure_future(_hold_frames())
 
     async def _stop_hold():
@@ -1038,6 +1064,7 @@ async def run_camera_forever(telus, camera: dict, get_video_source, status: dict
                 log.exception("%s: frame-hold task failed; continuing with this session",
                               camera["id"])
             hold_task = None
+        _update_status(hold=None)
         # The second half of the serialization window opens here: the hold has
         # stopped writing silence and the next session's pump does not exist yet.
         # `session` is the INCOMING one at the only call site that matters (the
