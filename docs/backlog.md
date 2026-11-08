@@ -4027,3 +4027,40 @@ entries are the mechanism that keeps it under review
   audio calls in a window where it made 53 video ones. Not reproduced, not
   explained, and not obviously the same thing E88 fixed, since the fix is
   present in that build. Recorded rather than rationalised.
+- **E93 (open) A no-frames outage takes the RTSP path down with it: every
+  reader sees 404 for the outage plus the backoff.** When the indoor camera
+  stops delivering frames (session after session reaches `webrtcup` and then
+  `no frames received before timeout (waited 20.0s of 20.0s; webrtcup seen
+  before the wait)`, which places the fault at the camera or its uplink rather
+  than in the bridge), the publisher is left attached to MediaMTX with nothing
+  to send. MediaMTX's `readTimeout` (30 s) then closes it (`closed: read tcp
+  127.0.0.1:8554->127.0.0.1:...: i/o timeout`), the path is destroyed, every
+  reader is refused with `no stream is available on path`, HA's stream worker
+  logs `Server returned 404 Not Found` and retries every 30 s, and the next
+  session that does deliver frames has to re-create the path. The ffmpeg pipe
+  break that follows the readTimeout is counted as one more failure ("ffmpeg
+  pipe broken, restarting sink"), so the reconnect ladder (2, 4, 8, 16 s) ends
+  on a 30 s wait that is pure dead time once the camera is back.
+
+  Two episodes on 2026-11-08, indoor camera, UTC:
+
+  | first failure | path closed by MediaMTX | path back | 404s seen by HA |
+  |---|---|---|---|
+  | 14:36:12 `no frame for 15s, treating session as dead` | 14:37:27 | 14:38:07 | 14:37:35, 14:38:05 |
+  | 16:19:53 handover `session_failed` | 16:20:53 | 16:22:05 | 16:21:13, 16:21:43 |
+
+  Over the preceding 48 h the same camera logged 999 `settled` handovers and 5
+  `session_failed`; HA's log for it carries 77 `Error from stream worker`
+  lines in 32 h (`Stream ended; no additional packets`, `Error demuxing stream
+  (Operation timed out)`, and the 404 pairs). The cloud session is the limit of
+  what the bridge controls; the path is not.
+
+  Enhancement: while a camera is between sessions, keep the publisher fed so
+  MediaMTX never destroys the path. Repeat the last decoded frame (or a slate)
+  at 1 fps with silent audio until the next session's first frame, then hand
+  over as usual. Readers would see a frozen picture for the outage instead of
+  404s, HA's stream worker would stay attached, and the doorbell's Frigate
+  input (go2rtc reading the same MediaMTX) would stop flapping with it. A
+  cheaper change that only moves the problem: raise `readTimeout` past the
+  longest observed outage (about 90 s here), which keeps the path but still
+  leaves readers without packets, so HA would log timeouts instead of 404s.
