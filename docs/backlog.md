@@ -233,7 +233,7 @@ and evidence. Grouped by whether anything can actually be done about them.
   exists, is a camera/portal setting or an accepted limitation. Frigate's
   audio-based detection on this camera would also be blind during the gaps.
 
-- **E98** (implemented bridge-side, live calibration pending) - the two cameras' recorded audio levels are
+- **E98** (implemented bridge-side; live calibration done 2026-11-12, see the end of this entry) - the two cameras' recorded audio levels are
   wildly asymmetric: the living room peaks at -0.2 to -0.6 dB (at or brushing
   full scale, so loud content likely clips) with means of -15 to -39 dB, while
   the doorbell means sit at -47 to -72 dB with peaks near -14 dB at their
@@ -259,6 +259,22 @@ and evidence. Grouped by whether anything can actually be done about them.
   quiet or its porch hiss too loud. The alarm.com portal has not been checked
   for a per-camera microphone-volume setting; if one exists it composes with
   this rather than replacing it.
+
+  **Live calibration (2026-11-12).** The AGC was the source of the living
+  room's persistent "fan-like" roar, not the microphone. A temporary dump of
+  the raw RTP payload (decoded as G.711 mu-law, which the packets are) showed
+  the room at about -30 dB RMS with a 22 dB crest factor, i.e. real, quiet
+  ambient audio; the published stream sat at a constant -9 dB with 2 dB of
+  variation, i.e. the floor amplified by the full `AUDIO_NORMALIZE_MAX_GAIN`
+  (12 = +21.6 dB). With `AUDIO_NORMALIZE_MAX_GAIN=2` (+6 dB, deployment env)
+  the published level is -22 to -27 dB and the roar is gone; the target of 0.9
+  still tames loud peaks. Keep the max gain small for an indoor camera: a
+  quiet room is the common case and any cap above ~6 dB turns its floor into
+  noise. Two traps met on the way: `_SessionCodec` uses `__slots__`, so a
+  patch that sets a new attribute on it kills aiortc's audio-decoder thread
+  silently (the session continues video-only); and the camera only sends
+  audio packets when there is sound, so a restarted publisher stays video-only
+  until a later rotation has seen audio.
 
 - **E108** (DONE 2026-10-12, integration) - every unload and every Home
   Assistant stop logged `Detected that custom integration 'telus_smarthome_alarmdotcom'
