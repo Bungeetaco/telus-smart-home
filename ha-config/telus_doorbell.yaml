@@ -104,7 +104,7 @@ automation:
         entity_id: input_boolean.telus_doorbell_notifications_muted
         state: "off"
     actions:
-      - action: notify.mobile_app_cph2655
+      - action: notify.mobile_app_oneplus_13
         data:
           title: Doorbell
           # The press event trails the physical press by the polled-feed
@@ -177,7 +177,7 @@ automation:
         entity_id: input_boolean.telus_doorbell_notifications_muted
         state: "off"
     actions:
-      - action: notify.mobile_app_cph2655
+      - action: notify.mobile_app_oneplus_13
         data:
           title: Doorbell
           message: Someone is at the front door (no ring).
@@ -232,7 +232,7 @@ automation:
       - condition: state
         entity_id: input_boolean.telus_doorbell_notifications_muted
         state: "off"
-      - action: notify.mobile_app_cph2655
+      - action: notify.mobile_app_oneplus_13
         data:
           title: Doorbell
           message: The visitor is still waiting at the door.

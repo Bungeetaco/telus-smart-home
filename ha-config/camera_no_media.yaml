@@ -44,7 +44,7 @@ automation:
         for: "00:01:00"
     conditions: []
     actions:
-      - action: notify.mobile_app_cph2655
+      - action: notify.mobile_app_oneplus_13
         data:
           title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}: no media"
           message: >-
@@ -91,7 +91,7 @@ automation:
           {{ trigger.from_state is not none
              and trigger.from_state.state not in ['unavailable', 'unknown'] }}
     actions:
-      - action: notify.mobile_app_cph2655
+      - action: notify.mobile_app_oneplus_13
         data:
           title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}: device kick"
           message: >-
@@ -123,7 +123,7 @@ automation:
           - streaming
     conditions: []
     actions:
-      - action: notify.mobile_app_cph2655
+      - action: notify.mobile_app_oneplus_13
         data:
           title: >-
             {{ state_attr(trigger.entity_id, 'friendly_name') }}:

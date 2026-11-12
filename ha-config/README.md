@@ -96,7 +96,7 @@ Lovelace resource list). None are guesses.
 
 - `camera.doorbell`, `event.doorbell_button_press` (event type `ring`),
   `event.doorbell_recent_activity`
-- `notify.mobile_app_cph2655` (the service the deployment's existing phone
+- `notify.mobile_app_oneplus_13` (the service the deployment's existing phone
   notifications already use), `tts.home_assistant_cloud`,
   `tts.google_translate_en_com`
 - `switch.doorbell_indoor_chime`, `switch.doorbell_outdoor_tone`,
